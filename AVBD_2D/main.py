@@ -4,12 +4,12 @@
 
 import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon
-from solver import Solver
+from solver.solver import Solver
 from bodies import rect_2D
 
 def make_world():
-    solver = Solver(dt=1/120, num_iterations=100, gravity=-9.81)
-    solver.mu = 0.2       # friction
+    solver = Solver(dt=1/120, num_iterations=50, gravity=-9.81)
+    solver.mu = 0.3       # friction
     solver.post_stabilize = True
     # Bodies
     
@@ -17,18 +17,18 @@ def make_world():
                      size=[20.0, 0.5], static=True)
     box1 = rect_2D(position=[0.0, 1.5, 0.5], velocity=[0,0,0], density=8.0, stiffness=1e5,
                    size=[0.5, 0.5], static=False)
-    box2 = rect_2D(position=[ 0.0, 2.6, -0.1], velocity=[0,0,0], density=8.0, stiffness=1e5,
+    box2 = rect_2D(position=[ 0.0, 2.6, -0.5], velocity=[0,0,0], density=8.0, stiffness=1e5,
                    size=[0.6, 0.6], static=False)
-    box3 = rect_2D(position=[ 0.0, 3.8,  0.3], velocity=[0,0,0], density=8.0, stiffness=1e5,
-                   size=[0.5, 0.8], static=True)
+    #box3 = rect_2D(position=[ 0.0, 3.8,  0.3], velocity=[0,0,0], density=8.0, stiffness=1e5,
+    #               size=[0.5, 0.8], static=False)
 
     # Order doesn’t matter
-    for b in (ground, box1, box2, box3):
+    for b in (ground, box1, box2):#, box3):
         solver.add_body(b)
 
-    return solver, [ground, box1, box2, box3]
+    return solver, [ground, box1, box2]#, box3]
 
-def animate(steps=120, substeps=1):
+def animate(steps=250, substeps=1):
     solver, bodies = make_world()
 
     fig, ax = plt.subplots(figsize=(6,6))
@@ -50,7 +50,7 @@ def animate(steps=120, substeps=1):
             solver.step()
         for poly, b in zip(patches, bodies):
             poly.set_xy(b.get_corners())
-        plt.pause(0.001)
+        plt.pause(0.0001)
 
     # Keep window open after sim
     plt.show()

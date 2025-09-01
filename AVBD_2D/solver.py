@@ -16,7 +16,7 @@ class Solver:
         self.persistent_constraints: list[Constraint] = []
         self.contact_constraints: list[ContactConstraint] = []
 
-        self.beta  = 1e8      # penalty ramp factor
+        self.beta  = 1e6      # penalty ramp factor
         self.gamma = 0.98     # warm-start decay
         self.alpha = 0.99     # stabilization for hard rows
         self.post_stabilize = False
@@ -100,8 +100,6 @@ class Solver:
         # warm start
         # solver.py – inside the dual update pass
         for con in self._all_constraints:
-            con.initialize()
-
             for r in range(con.rows()):
                 if self.post_stabilize:
                     con.penalty_k[r] = np.clip(self.gamma * con.penalty_k[r], 1.0, con.k_max[r])
