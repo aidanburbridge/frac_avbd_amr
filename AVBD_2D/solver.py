@@ -3,7 +3,7 @@ import numpy as np
 from bodies import Body
 from constraints.constraint import Constraint, clamp
 from constraints.contact import ContactConstraint
-import collisions
+import collisions_adv as collisions
 
 class Solver:
     def __init__(self, dt, num_iterations, gravity=-9.81):
@@ -170,8 +170,6 @@ class Solver:
                         k = con.penalty_k[r]
                         C = con.C[r]
                         Jr = J[r]
-
-                        ##print("Current penalty_k: ", k, "\t Current lambda_: ", lam)
                         
                         force_magnitude = clamp(k * C + lam, con.fmin[r], con.fmax[r])
                         ##print("Force magnitude: ", force_magnitude)

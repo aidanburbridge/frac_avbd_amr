@@ -38,15 +38,15 @@ def skew(v: np.ndarray) -> np.ndarray:
     """
     x, y, z = np.asarray(v, dtype=float)
     return np.array([
-        [0 , -z, y],
-        [ z, 0, -x],
-        [-y, x, 0]
+        [ 0, -z,  y],
+        [ z,  0, -x],
+        [-y,  x,  0]
         ], dtype=float)
 
 
 # -------------------- Quaternion Helper (3D) -------------------- #
 """
-Quaternion being a way to represent rotation in 3D space - with 4 numbers hence quat.
+Quaternion being a way to represent rotation in 3D space - with 4 numbers hence quat_pos.
     q = (w,x,y,z)
     Where:
         - w: scalar part 
@@ -114,6 +114,37 @@ def quat_from_angular_velocity(omega: np.ndarray, dt: float) -> np.ndarray:
     axis = w / (np.linalg.norm(w) + 1e-12)
     return quat_from_axis_angle(axis, theta)
 
+def quat_conjugate(q: np.ndarray) -> np.ndarray:
+    """
+    Return quaternion conjugate.
+    """
+    w,x,y,z = q
+    return np.array([w,-x,-y,-z], dtype=float)
+
+def quat_from_rotvec(rv: np.ndarray) -> np.ndarray:
+    """
+    Rodrigues: rv is axis * angle with ||rv|| = angle.
+    """
+    theta = float(np.linalg.norm(rv))
+    if theta == 0.0:
+        return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
+    axis = rv / theta
+    half = 0.5*theta
+    s = np.sin(half)
+    return quat_normalize(np.array([np.cos(half), axis[0]*s, axis[1]*s, axis[2]*s], dtype=float))
+
+def quat_log(q: np.ndarray) -> np.ndarray:
+    """
+    Log map: returns a rotation vector r such that exp(r) = q (in quaternion form).
+    """
+    w,x,y,z = quat_normalize(q)
+    v = np.array([x,y,z], dtype=float)
+    nv = np.linalg.norm(v)
+    w = max(min(w, 1.0), -1.0)
+    angle = 2.0*np.arctan2(nv, w)
+    if angle < 1e-12:
+        return np.zeros(3, dtype=float)
+    return (angle / (nv + 1e-12)) * v
 
 # -------------------- Body base classes -------------------- #
 
@@ -130,12 +161,12 @@ class Body:
         self.k = float(stiffness)
 
         # DOFs 
-        self.dof = len(self.position)
+        self.dof = len(self.velocity)   # Either 3 or 6 long
 
         # Mass/inertia defaults (also for statics)
         self.mass = float('inf')
         self.inv_mass = 0.0
-        self.inertia: Union[float, np.ndarray] = float('inf')
+        self.inertia: Union[float, np.ndarray] = float('inf')       # Make inertia a float for 2D and an array for 3D
         self.inv_inertia: Union[float, np.ndarray] = 0.0
 
         # Solver related 
@@ -166,6 +197,11 @@ class CollidableShape(Body, ABC):
     @abstractmethod
     def get_aabb(self) -> Union[AABB2, AABB3, AABB_ND]:
         """ Must return a list of world-space Axis-Aligned Bounding Box. """
+        pass
+
+    @abstractmethod
+    def get_dim(self) -> int:
+        """ Returns the number of dimensions for the bodies. """
         pass
 
 # -------------------- 2D rectangle -------------------- #
@@ -252,6 +288,9 @@ class rect_2D(CollidableShape):
         y_axis = np.array([-s, c], dtype=float)
         return np.stack([x_axis, y_axis], axis=0)
     
+    def get_dim(self):
+        return int(len(self.size))
+    
 # -------------------- 3D box -------------------- #
 
 class box_3D(CollidableShape):
@@ -260,8 +299,8 @@ class box_3D(CollidableShape):
     """
     def __init__(
             self,
-            pos: tuple[float, float, float],
-            quat: tuple[float, float, float, float],
+            trans_pos: tuple[float, float, float],
+            quat_pos: tuple[float, float, float, float],
             linear_vel: tuple[float, float, float],
             ang_vel: tuple[float, float, float],
             density: float,
@@ -269,16 +308,11 @@ class box_3D(CollidableShape):
             size: tuple[float, float, float],
             static: bool = False
             ):
+        
         # Combine spatial position with quaternion orientation
-        packed_pos = np.concatenate([np.asarray(pos, float), np.asarray(quat, float)])
-        packed_vel = np.concatenate([np.asarray(linear_vel, float), np.asarray(ang_vel, float)])
-        super().__init__(packed_pos, packed_vel, density, penalty_gain, static)
-
-        # Unpack for convience 
-        self.pos        = np.asarray(pos, dtype=float).copy()    # Position of the center of the box
-        self.quat       = quat_normalize(np.asarray(quat, dtype=float)).copy()
-        self.linear_vel = np.asarray(linear_vel, dtype=float).copy()
-        self.ang_vel    = np.asarray(ang_vel, dtype=float).copy()
+        position = np.concatenate([np.asarray(trans_pos, float), np.asarray(quat_pos, float)])
+        velocity = np.concatenate([np.asarray(linear_vel, float), np.asarray(ang_vel, float)])
+        super().__init__(position, velocity, density, penalty_gain, static)
 
         # Geometry
         self.size = np.asarray(size, dtype=float)  # (w,h,d)
@@ -292,7 +326,7 @@ class box_3D(CollidableShape):
             Ixx = (1.0/12.0) * self.mass * (h*h + d*d)
             Iyy = (1.0/12.0) * self.mass * (w*w + d*d)
             Izz = (1.0/12.0) * self.mass * (w*w + h*h)
-            self.inertia = np.diag([Ixx, Iyy, Izz])
+            self.inertia = np.diag([Ixx, Iyy, Izz])                 # Inertia here is an array - correct for 3D
             self.inv_inertia = np.diag([
                 0.0 if Ixx <= 0 else 1.0/Ixx,
                 0.0 if Iyy <= 0 else 1.0/Iyy,
@@ -303,13 +337,10 @@ class box_3D(CollidableShape):
             self.inv_mass = 0.0
             self.inertia = np.diag([np.inf, np.inf, np.inf])
             self.inv_inertia = np.zeros((3,3), dtype=float)
-        
-        # Match the packed layout used by the solver
-        self._sync_packed()
-    
+            
     def rotmat(self) -> np.ndarray:
         """ Return 3x3 rotation matrix from the box's quaternion. """
-        return quat_to_rotmat(self.quat)
+        return quat_to_rotmat(self.position[3:])
     
     def world_axes(self) -> np.ndarray:
         """ World/global space principal axes of the box. """
@@ -338,7 +369,7 @@ class box_3D(CollidableShape):
         corners_local = half_extents * corner_pattern
         rot_matrix = self.rotmat()
 
-        world_corners = (rot_matrix @ corners_local.T).T + self.pos
+        world_corners = (rot_matrix @ corners_local.T).T + self.position[:3]
 
         return world_corners
     
@@ -350,42 +381,78 @@ class box_3D(CollidableShape):
                      float(np.min(corners[:,1])), float(np.max(corners[:,1])),
                      float(np.min(corners[:,2])), float(np.max(corners[:,2])))
     
-    # -------------------- Integration & packing helpers -------------------- #
-
-    def integrate_orientation(self, dt: float):
-        """ First-order quaternion update using current angular velocity and dt. """
-
-        dq = quat_from_angular_velocity(self.ang_vel, dt)
-        self.quat = quat_normalize(quat_mult(dq, self.quat))
-        self._sync_packed()
-
-    def _sync_packed(self):
-        """ 
-        Synchronize the 7 position variables. 
-        Basically make sure the packed position agrees with/stores the correct pose (translation + rotation).
-        Ensures after computation involving position/quaternion the packed array is updated.
-        Also refresh the packed velocity to reflect correct linear velocity and angular velocity.
+    def get_dim(self):
+        return int(len(self.size))
+    
+    def I_world(self) -> np.ndarray:
+        """Rotate body inertia into world frame: R I_body R^T."""
+        R = self.rotmat()
+        return R @ self.inertia @ R.T
         
-        position = [x, y, z, q_w, q_x, q_y, q_z]
-            - Global spatial: [x,y,z]
-            - Rotational quaternion: [q_w, q_x, q_y, q_z]
-        velocity = [vx, vy, vz, wx, wy, wz]
-            - Linear velocity: [vx, vy, vz]
-            - Angular velocty: [wx, wy, wz]
+    def _closest_hemisphere(self, q_ref: np.ndarray, q: np.ndarray) -> np.ndarray:
         """
-        self.position[:3] = self.pos
-        if self.position.shape[0] >= 7:
-            self.position[3:7] = self.quat
-        else:
-            self.position = np.concatenate([self.pos, self.quat], axis=0)
-        self.velocity[:3] = self.linear_vel
-        if self.velocity.shape[0] >= 6:
-            self.velocity[3:6] = self.ang_vel
-        else:
-            self.velocity = np.concatenate([self.linear_vel, self.ang_vel], axis=0)
+        Return q or -q so that dot(q_ref, q_out) >= 0 (shortest path on S3).
+        """
+        return q if float(np.dot(q_ref, q)) >= 0.0 else -q
 
 
-# -------------------- Utility: 3D faces -------------------- #
+    def delta_twist_from(self, pose7_source: np.ndarray) -> np.ndarray:
+        """
+        6D delta from pose7_source to *current* pose:
+          d = [ x - x_src ; log( q ⊗ conj(q_src) ) ]  (world frame)
+        """
+        dx  = self.position[:3] - np.asarray(pose7_source[:3], dtype=float)
+        q   = quat_normalize(self.position[3:])
+        qs  = quat_normalize(np.asarray(pose7_source[3:],dtype=float))
+        qs  = self._closest_hemisphere(q, qs)
+        qerr = quat_mult(q, quat_conjugate(qs))     # current minus source
+        dth  = quat_log(qerr)
+        return np.concatenate([dx, dth])
+
+    def delta_twist_to(self, pose7_target: np.ndarray) -> np.ndarray:
+        """
+        6D delta from *current* pose to pose7_target:
+          d = [ x_tgt - x ; log( q_tgt ⊗ conj(q) ) ]
+        """
+        dx  = np.asarray(pose7_target[:3], float) - self.position[:3]
+        q   = quat_normalize(self.position[3:])
+        qt  = quat_normalize(np.asarray(pose7_target[3:], float))
+        qt  = self._closest_hemisphere(q, qt)
+        qerr = quat_mult(qt, quat_conjugate(q))     # target minus current
+        dth  = quat_log(qerr)
+        return np.concatenate([dx, dth])
+
+    # ---------- Gyro-stable free prediction (no external torques) ----------
+    def integrate_rotation(self, dt: float) -> np.ndarray:
+        """
+        Predict free pose y with angular velocity and considering gyroscopic precession.
+        Angular dynamics in body frame:  I ωdot_b + ω_b × (I ω_b) = 0
+        Steps:
+          1) ω_b ← Rᵀ ω_w
+          2) ωdot_b = I^{-1} [ - ω_b × (I ω_b) ]
+          3) ω_b ← ω_b + dt * ωdot_b
+          4) ω_w ← R ω_b;  q ← exp(ω_w dt) ⊗ q
+        Returns a new pose y (does not mutate self).
+        """
+        q  = quat_normalize(self.position[3:])
+        wW = self.velocity[3:]                  # ω in world
+
+        # rotation with gyro precession (τ=0)
+        R   = self.rotmat()
+        I   = self.inertia
+        wB  = R.T @ wW
+        hB  = I @ wB
+        wdotB = np.linalg.solve(I, -np.cross(wB, hB))
+        wB_new = wB + dt * wdotB
+        wW_new = R @ wB_new
+
+        dq  = quat_from_rotvec(wW_new * dt)
+        q_y = quat_normalize(quat_mult(dq, q))
+
+        return q_y
+
+
+### -------------------- Utility: 3D faces -------------------- ###
 
 def box_face_vectors(b: box_3D) -> list[tuple[np.ndarray, np.ndarray]]:
     """
@@ -403,15 +470,15 @@ def box_face_vectors(b: box_3D) -> list[tuple[np.ndarray, np.ndarray]]:
 
     # Half extents / how far each face is from the center of the box
     hx, hy, hz = 0.5 * b.size
-
+    trans_pos = b.position[:3]
     # Face centers = box center + (axis direction x half-extent)
     centers = [
-        b.pos +  hx*ex,  # +x
-        b.pos + -hx*ex,  # -x
-        b.pos +  hy*ey,  # +y
-        b.pos + -hy*ey,  # -y
-        b.pos +  hz*ez,  # +z
-        b.pos + -hz*ez,  # -z
+        trans_pos +  hx*ex,  # +x
+        trans_pos + -hx*ex,  # -x
+        trans_pos +  hy*ey,  # +y
+        trans_pos + -hy*ey,  # -y
+        trans_pos +  hz*ez,  # +z
+        trans_pos + -hz*ez,  # -z
     ]
 
     # Frame / face vectors 
@@ -430,13 +497,13 @@ def box_face_vectors(b: box_3D) -> list[tuple[np.ndarray, np.ndarray]]:
 
 class RigidND_Scaffold(Body):
     """
-    Plain: Minimal ND rigid placeholder (pos in R^D, linear velocity); orientation is identity.
+    Plain: Minimal ND rigid placeholder (trans_pos in R^D, linear velocity); orientation is identity.
     Scientific: Prototype for SE(D): stores translation and an identity rotation matrix R∈SO(D).
     """
     def __init__(self, D: int, position, velocity, density: float, stiffness: float, size, static: bool=False):
-        pos = np.asarray(position, float).reshape(D)
+        trans_pos = np.asarray(position, float).reshape(D)
         vel = np.asarray(velocity, float).reshape(D)
-        super().__init__(pos, vel, density, stiffness, static)
+        super().__init__(trans_pos, vel, density, stiffness, static)
         self.D = int(D)
         self.R = np.eye(self.D, dtype=float)              # placeholder orientation
         self.size = np.asarray(size, dtype=float).reshape(self.D)
@@ -458,7 +525,7 @@ class RigidND_Scaffold(Body):
 
     def get_corners(self) -> np.ndarray:
         """
-        Plain: All 2^D corners of the hyper-rectangle, rotated by R and translated by pos.
+        Plain: All 2^D corners of the hyper-rectangle, rotated by R and translated by trans_pos.
         Scientific: V_world = R V_local + t with V_local ∈ {±s_1/2}×…×{±s_D/2}.
         """
         he = 0.5 * self.size

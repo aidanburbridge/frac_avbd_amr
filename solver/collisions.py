@@ -1,7 +1,7 @@
 # COLLISIONS
 import numpy as np
 from dataclasses import dataclass
-from bodies import Body, CollidableShape, AABB
+from geometry.primitives import Body, CollidableShape, AABB_ND
 
 ### -------------------------- Tolerances -------------------------- ###
 

@@ -4,8 +4,8 @@
 
 import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon
-from solver.solver import Solver
 from bodies import rect_2D
+from solver_3d_2d import Solver
 
 def make_world():
     solver = Solver(dt=1/120, num_iterations=50, gravity=-9.81)

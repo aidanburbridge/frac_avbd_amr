@@ -1,8 +1,9 @@
 # SOLVER
 import numpy as np
-from geometry.primitives import Body, quat_from_rotvec, quat_log, quat_mult, quat_conjugate
-from .constraints import Constraint, ContactConstraint, clamp
-from . import collisions
+from bodies import Body
+from constraints.constraint import Constraint, clamp
+from constraints.contact import ContactConstraint
+import collisions_adv as collisions
 
 class Solver:
     def __init__(self, dt, num_iterations, gravity=-9.81):
@@ -16,10 +17,10 @@ class Solver:
         self.persistent_constraints: list[Constraint] = []
         self.contact_constraints: list[ContactConstraint] = []
 
-        self.beta  = 1e5      # penalty ramp factor
+        self.beta  = 1000      # penalty ramp factor
         self.gamma = 0.98     # warm-start decay
         self.alpha = 0.99     # stabilization for hard rows
-        self.post_stabilize = True
+        self.post_stabilize = False
         self.mu = 0.6         # default friction
 
         # Private state for the solver step
@@ -137,8 +138,7 @@ class Solver:
                 if self.post_stabilize:
                     con.penalty_k[r] = np.clip(self.gamma * con.penalty_k[r], 1.0, con.k_max[r])
                 else:
-                    if con.is_hard[r]:
-                        con.lambda_[r]   = con.lambda_[r] * self.alpha * self.gamma
+                    con.lambda_[r]   = con.lambda_[r] * self.alpha * self.gamma
                     con.penalty_k[r] = np.clip(self.gamma * con.penalty_k[r], 1.0, con.k_max[r])
 
                 # Cap penalty by material stiffness for *non-hard* rows
@@ -159,9 +159,8 @@ class Solver:
             elif dof == 6:  # body is box_3D
                 y = b.position.copy()
                 y[:3] += b.velocity[:3] * dt         # Update translation position
-                y[3:] = b.integrate_rotation(dt)
-                b.position = y.copy()
                 y[1] += self.gravity * dt * dt
+                y[3:] = b.integrate_rotation(dt)
 
             b.inertial_pos = y                                      # Copy inertial position y into internal variable intertial_pos
 
@@ -208,32 +207,23 @@ class Solver:
                     con.compute_derivatives(b)
                     J = con.JA if con.A is b else con.JB
                     H = con.HA if con.A is b else con.HB
-
                     for r in range(con.rows()):
-                        hard = con.is_hard[r]
-                        lam = con.lambda_[r] if hard else 0.0
+                        lam = con.lambda_[r] if np.isinf(con.stiffness[r]) else 0.0
                         k = con.penalty_k[r]
                         C = con.C[r]
                         Jr = J[r]
-                        
-                        if hard:
-                            fmag = clamp(k*C + lam, con.fmin[r], con.fmax[r])
-                        else:
-                            fmag = k*C
-
+                        fmag = clamp(k*C + lam, con.fmin[r], con.fmax[r])
                         absf = abs(fmag)
-
                         if H is not None and H.shape == (con.rows(), dof, dof) and np.any(H[r]):
                             col_norms = np.linalg.norm(H[r], axis=0)
                             Gdiag = np.diag(col_norms) * absf
-
                         else:
                             Gdiag = np.diag(np.abs(Jr)) * absf
-
                         rhs += Jr * fmag
                         lhs += k * np.outer(Jr, Jr) + Gdiag
                         #print("J[r]: ", Jr, "Force clipped: ", fmag, "Force: " ,(k*C +lam))
                         #print("RHS: ", rhs, "\t LHS: ", lhs) 
+
 
                 try:
                     delta = np.linalg.solve(lhs, rhs)
@@ -250,7 +240,7 @@ class Solver:
                     pass
 
 
-            # Dual update (skip on the extra post-stabilization pass)
+            # Dual update (skip on the extra post-stab pass)
             if num_it < self.iterations:
                 for con in self._all_constraints:
 
@@ -258,7 +248,7 @@ class Solver:
 
                     for r in range(con.rows()):                     # Hard constraints update λ via clamped force; soft rows keep λ=0
 
-                        if con.is_hard[r]:              # Only hard constraints have lambda updated this way
+                        if np.isinf(con.stiffness[r]):              # Only hard constraints have lambda updated this way
 
                             new_lambda = clamp(con.penalty_k[r] * con.C[r] + con.lambda_[r], con.fmin[r], con.fmax[r])
                             con.lambda_[r] = new_lambda
@@ -266,10 +256,10 @@ class Solver:
                         # Ramp up penalty if force is not clamped
                         if con.fmin[r] < con.lambda_[r] < con.fmax[r]:
                             # Cap growth by both a global max and the material stiffness
-                            max_cap = min(con.k_max[r], con.stiffness[r] if not con.is_hard[r] else con.k_max[r])
+                            max_cap = min(con.k_max[r], con.stiffness[r] if not np.isinf(con.stiffness[r]) else con.k_max[r])
                             con.penalty_k[r] = min(con.penalty_k[r] + self.beta * abs(con.C[r]), max_cap)
 
-            if num_it == self.iterations - 1:
+            if num_it == self.iterations -1:
                 inv_dt = 1.0 / dt                                   # Multiplication is faster
                 for b in self.bodies:
                     if b.static:

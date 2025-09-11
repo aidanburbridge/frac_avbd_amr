@@ -66,6 +66,10 @@ class CollidableShape(Body, ABC):
         """ Must return a list of world-space Axis-Aligned Bounding Box. """
         pass
     
+    @abstractmethod
+    def get_dim(self) -> int:
+        pass 
+
 class rect_2D(CollidableShape):
     def __init__(self, position, velocity, density:float, stiffness:float, size, static=False):
         super().__init__(position, velocity, density, stiffness, static)
@@ -141,4 +145,5 @@ class rect_2D(CollidableShape):
         y_axis = np.array([-s, c])
         return np.array([x_axis, y_axis])
     
-
+    def get_dim(self) -> int:
+        return len(self.size) 
