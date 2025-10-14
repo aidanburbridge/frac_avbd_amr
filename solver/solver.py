@@ -16,7 +16,7 @@ class Solver:
         self.persistent_constraints: list[Constraint] = []
         self.contact_constraints: list[ContactConstraint] = []
 
-        self.beta  = 1e7      # penalty ramp factor
+        self.beta  = 100000      # penalty ramp factor
         self.gamma = 0.98     # warm-start decay
         self.alpha = 0.99     # stabilization for hard rows
         self.post_stabilize = True

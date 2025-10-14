@@ -137,11 +137,11 @@ def _sat_and_overlap(A: CollidableShape, B: CollidableShape): # TODO add face bi
             best_axis, best_tag = axis, tag
             #print("New best axis: ", best_axis)
 
-    return best_axis, float(min_overlap), best_tag, cand
+    return best_axis, float(min_overlap), best_tag#, cand
 
 ### -------------------------- Manifold Builder (3D) -------------------------- ###
 
-def _build_contact_manifold(A: CollidableShape, B:CollidableShape, sat_normal:np.ndarray) -> list[Contact]:
+def _build_contact_manifold(A: CollidableShape, B:CollidableShape, sat_normal:np.ndarray, sat_min_overlap:float) -> list[Contact]:
 
     # Need which vertices to clip to
 
@@ -206,12 +206,12 @@ def _build_contact_manifold(A: CollidableShape, B:CollidableShape, sat_normal:np
     # get face for reference
     # If the reference face normal is not aligned with the contact normal, flip the face vertices around the center
     # This ensures the face is oriented correctly in global coordinates
-    print("Ref and contact dot prod: ", np.dot(ref_normal, contact_normal))
+    #print("Ref and contact dot prod: ", np.dot(ref_normal, contact_normal))
     if np.dot(ref_normal, contact_normal) < 0.0:
         ref_normal = -ref_normal
         ref_sign = -ref_sign
-        print("flipped ref normal sign")
-    print("Reference normal sign: ", ref_sign)
+        #print("flipped ref normal sign")
+    #print("Reference normal sign: ", ref_sign)
 
     ref_face = _face_vertices(ref_body, ref_axis_idx, ref_sign)
 
@@ -248,7 +248,6 @@ def _build_contact_manifold(A: CollidableShape, B:CollidableShape, sat_normal:np
         plane_norm = _unit(np.cross(edge_ab, ref_normal* wind_dir))
         plane_offset = float(np.dot(plane_norm, v_a))
 
-
         # clip incident face at 4 reference planes
         clipped_poly = _clip_poly_to_plane(clipped_poly, plane_norm, plane_offset)
         
@@ -261,57 +260,41 @@ def _build_contact_manifold(A: CollidableShape, B:CollidableShape, sat_normal:np
 
     clipped_poly = _dedupe_points(clipped_poly)
     # project clipped points onto reference
+    # Project clipped_poly points onto the reference face plane along the contact normal
+    # For each point p in clipped_poly, project onto ref_face plane along contact_normal
 
-    sep = []
-    proj = []
+    # Need contact points, depths and a SINGLE normal for each point
+    n_ref = _unit(ref_normal.copy())
+    d_ref = float(np.dot(n_ref, ref_face[0])) # signed distance of ref_plane -- distance of ref plane from origin
+    # Plane equation n_ref * x = d_ref
 
-    d_ref = float(np.dot(ref_normal, ref_face[0]))
-    for pt in clipped_poly:
-        s = float(np.dot(ref_normal, pt) - d_ref)
-        sep.append(s)
-        proj.append(pt -s*ref_normal)
+    contact_pts, depths = [], []
+    # loop through ref vertices
+    for vert in clipped_poly:
+        s = float(np.dot(n_ref, vert) - d_ref)
+        #print("Signed distance: ", s)
+        #if s >= _EPS_CLIP:
+            #s = max(0.0, s)
+        depth = s
+        p = vert - s * n_ref
+        contact_pts.append(p)
+        depths.append(depth)
+    
+    contact_pts  = np.asarray(contact_pts)
+    depths  = np.asarray(depths)
+    if contact_pts.shape[0] == 0:
+        return []   # or your debug return
 
+    # deepest up to 4
+    idx = np.argsort(depths)[:4]
+    contact_pts = contact_pts[idx]; depths = depths[idx]
 
-    # keep points that are on/inside the plane (tolerant)
-    idxs = [i for i, s in enumerate(sep) if s >= -_EPS_CLIP]
-    if not idxs:
-        return (np.empty((0, ref_face.shape[1])), ref_face, ref_normal,
-                inc_face, inc_normal, contact_normal)
+    contact_list = []
+    for i, p in enumerate(contact_pts):
+        contact_list.append(Contact(ref_body, inc_body, contact_normal, depths[i], p))
 
-    # choose up to 4 deepest (largest s)
-    idxs.sort(key=lambda i: -sep[i])
-    idxs = idxs[:4]
-
-    # --- Build contacts (normal points ref -> inc) ---
-    contacts: list[Contact] = []
-
-    # (Optional) clamp depth by SAT overlap if you have it; otherwise use s directly.
-    # depth = min(sep[i], min_overlap + 1e-7)   # if you pass min_overlap to this function
-    # For now:
-    for i in idxs:
-        pt_on_plane = proj[i]
-        depth = sep[i]                             # already positive penetration along +ref_normal
-
-        # If your engine expects normal from body A -> body B, align here:
-        AtoB = _center(B) - _center(A)
-        out_n = contact_normal if np.dot(AtoB, contact_normal) >= 0.0 else -contact_normal
-
-        fid = _feature_id_hash(A, B,
-                            ref_axis_idx if ref_body is A else -ref_axis_idx-1,
-                            inc_axis_idx if inc_body is B else -inc_axis_idx-1,
-                            pt_on_plane)
-
-        contacts.append(Contact(
-            bodyA=A, bodyB=B,
-            normal=_unit(out_n),
-            depth=float(depth),
-            point=pt_on_plane,
-            feature_id=fid
-        ))
-        
-    return contacts, np.asarray(proj), ref_face, ref_normal, inc_face, inc_normal, contact_normal
-#    return clipped_poly, ref_face, ref_normal, inc_face, inc_normal, contact_normal
-
+    #return clipped_poly, ref_face, ref_normal, inc_face, inc_normal, contact_normal, contact_pts, depths
+    return contact_list
 ### -------------------------- Narrow Phase + Get Collisions  -------------------------- ###
 
 def narrow_phase(pair: tuple[CollidableShape, CollidableShape]):
@@ -328,21 +311,29 @@ def narrow_phase(pair: tuple[CollidableShape, CollidableShape]):
     if bodyA.static and not bodyB.static:
         bodyA, bodyB = bodyB, bodyA                             # Swap bodies if A is static - mathematical convention
 
-    n, ov, tag, _ = _sat_and_overlap(bodyA, bodyB)
+    #n, ov, tag, _ = _sat_and_overlap(bodyA, bodyB)
+    n, ov, tag = _sat_and_overlap(bodyA, bodyB)
+
     if n is None:
         return None
-    
-    kind = tag[0]
-    # face-point contact
-    if kind in ("FA", "FB"):                                    # If face-point clip the voxel
-        contacts, _ = _build_box_box_manifold(bodyA,bodyB,n,ov)
-    # edge-edge contact
     else:
-        i, j = tag[1], tag[2]
-        # Build contacts
-        contacts,_ = _build_edge_edge_contact(bodyA, bodyB, n, ov, i, j)
+        return _build_contact_manifold(bodyA, bodyB, n, ov)
 
-    return contacts if contacts else None
+    
+    #kind = tag[0]
+    # # face-point contact
+    # if kind in ("FA", "FB"):                                    # If face-point clip the voxel
+    #     contacts, _ = _build_contact_manifold(bodyA,bodyB,n)
+    # # edge-edge contact
+    # else:
+    #     i, j = tag[1], tag[2]
+    #     # Build contacts
+    #     contacts,_ = _build_edge_edge_contact(bodyA, bodyB, n, ov, i, j)
+
+    # return contacts if contacts else None
+
+#    contacts, _, _,_,_,_= _build_contact_manifold(bodyA,bodyB,n)
+
 
 def get_collisions(bodies: list[Body], ignore_ids: set[tuple[int, int]] | None = None) -> list[Contact]:
     """
