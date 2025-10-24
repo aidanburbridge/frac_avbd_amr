@@ -122,8 +122,8 @@ class ContactConstraint(Constraint):
         super().__init__(A, B, rows=rows)
 
         self.make_hard()                                        # Make this a hard constraint - contact & friction should be hard
-        #self.fmax[0] = 0.0
-        self.fmin[0] = 0.0
+        self.fmax[0] = 0.0
+        #keep self.fmin = -np.inf
         self.n = contact.normal.astype(float)
         self.tangets = _orthonormal_tangent_basis(self.n)       # Get tangents from normal
 
@@ -141,17 +141,18 @@ class ContactConstraint(Constraint):
         dim = A.get_dim()
         rows = self.rows()
 
-        pB = self.contact.point.astype(float)                   # Contact point on A
+        pA = self.contact.point.astype(float)                   # Contact point on A
         depth = float(self.contact.depth)                       # Distance between contact points
         self.depth = depth
-        pA = pB - self.n * depth                                # Contact point on B derived from collision normal and depth
-        
+        pB = pA - self.n * depth                                # Contact point on B derived from collision normal and depth
+
         rA0 = pA - A.initial_pos[:dim]
         rB0 = pB - B.initial_pos[:dim]
 
         # For debugging
         self.point_list.extend([pA, pB])
-        
+        ##
+
         # Allocate caches with dim
         dof_A = A.velocity.shape[0]
         dof_B = B.velocity.shape[0]
@@ -160,31 +161,39 @@ class ContactConstraint(Constraint):
         JB = np.zeros((rows, dof_B), dtype=float)
 
         # Row 0 of constraint: normal
-        ang_A = np.cross(rA0, self.n)
-        ang_B = np.cross(rB0, self.n)
-        JA[0, :dof_A] = np.hstack([ self.n,  ang_A])
-        JB[0, :dof_B] = np.hstack([-self.n, -ang_B])
+        if dim == 2:                                            # 2D rotational
+            ang_A = rA0[0]*self.n[1] - rA0[1]*self.n[0]
+            ang_B = rB0[0]*self.n[1] - rB0[1]*self.n[0]
+            JA[0, :dof_A] = [ self.n[0],  self.n[1],  ang_A]
+            JB[0, :dof_B] = [-self.n[0], -self.n[1], -ang_B]
+        else: # dim == 3                                        # 3D rotational
+            ang_A = np.cross(rA0, self.n)
+            ang_B = np.cross(rB0, self.n)
+            JA[0, :dof_A] = np.hstack([ self.n,  ang_A])
+            JB[0, :dof_B] = np.hstack([-self.n, -ang_B])
 
         # Rows 1-2 of constraint: tangential (friction)
         for k, t in enumerate(self.tangets, start=1):           # Start at 1 because row 0 is filled
-            ang_A = np.cross(rA0, t)
-            ang_B = np.cross(rB0, t)
-            JA[k, :dof_A] = np.hstack([ t,  ang_A])
-            JB[k, :dof_B] = np.hstack([-t, -ang_B])
-    
+            if dim == 2:
+                ang_A = rA0[0] * t[1] - rA0[1] * t[0]
+                ang_B = rB0[0] * t[1] - rB0[1] * t[0]
+                JA[k, :dof_A] = [ t[0],  t[1],  ang_A]
+                JB[k, :dof_B] = [-t[0], -t[1], -ang_B]
+            else: # dim == 3
+                ang_A = np.cross(rA0, t)
+                ang_B = np.cross(rB0, t)
+                JA[k, :dof_A] = np.hstack([ t,  ang_A])
+                JB[k, :dof_B] = np.hstack([-t, -ang_B])
+        
         # delta0 = (A.position[:dim] + rA0) + (B.position[:dim] + rB0)
         # C0[0] = float(np.dot(self.n, delta0)) + self.COLLISION_MARGIN
 
-        # pA0 = A.position[:dim] + rA0
-        # pB0 = B.position[:dim] - rB0
-
-        pA0 = A.initial_pos[:dim] + rA0
-        pB0 = B.initial_pos[:dim] - rB0
+        pA0 = A.position[:dim] + rA0
+        pB0 = B.position[:dim] + rB0
 
         C0[0] = float(np.dot(self.n, (pA0 - pB0))) + self.COLLISION_MARGIN
-        #print(f"depth: {depth}\t pA0 - pB0: {pA0-pB0}\t C0[0]: {C0[0]}")
-        # print(f"Normal vector: {self.n}")
         #C0[0] = self.COLLISION_MARGIN - float(self.contact.depth)
+        print("Init C0[0]: ", C0[0])
         
         for k, t in enumerate(self.tangets, start=1):
             C0[k] = float(np.dot(t, (pA0 - pB0)))
@@ -197,15 +206,22 @@ class ContactConstraint(Constraint):
         A = self.A
         B = self.B
 
-        dA = A.delta_twist_from(A.initial_pos) if A is not None else 0.0
-        dB = B.delta_twist_from(B.initial_pos) if B is not None else 0.0
-        self.C[:] = (1.0 - alpha) * self._cache.C0 + (self._cache.JA @ dA if np.ndim(dA) else 0.0) + (self._cache.JB @ dB if np.ndim(dB) else 0.0)
+        
+        if self.dof == 3:
+            dA = A.position - A.initial_pos
+            dB = B.position - B.initial_pos
+            self.C[:] = (1.0 - alpha) * self._cache.C0 + (self._cache.JA @ dA + self._cache.JB @ dB)
 
-        #print(f"\nSelf._cache.C0: {self._cache.C0[0]} \t Self.C: {self.C[0]} \n Jacobian A: {self._cache.JA[0][:3]} \n Jacobian B: {self._cache.JB[0][:3]}")
+        
+        elif self.dof == 6:
+            dA = A.delta_twist_from(A.initial_pos) if A is not None else 0.0
+            dB = B.delta_twist_from(B.initial_pos) if B is not None else 0.0
+            self.C[:] = (1.0 - alpha) * self._cache.C0 + (self._cache.JA @ dA if np.ndim(dA) else 0.0) + (self._cache.JB @ dB if np.ndim(dB) else 0.0)
 
+        print("Self.C[0]: ", self.C[0])
         # friction cones
-        lam_n_mag = max(self.lambda_[0], 0.0)
-        #lam_n_mag = abs(self.lambda_[0])
+        #lam_n = max(self.lambda_[0], 0.0)
+        lam_n_mag = abs(self.lambda_[0])
         mu = self.friction
 
         for r in range(1, self.rows()):
@@ -250,3 +266,4 @@ def _orthonormal_tangent_basis(n: np.ndarray) -> list[np.ndarray]:
         t2 = np.cross(n, t1)
         t2 /= (np.linalg.norm(t2) + 1e-12)
         return [t1, t2]
+    

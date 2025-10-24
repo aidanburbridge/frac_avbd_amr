@@ -19,7 +19,7 @@ class Contact:
     normal: np.ndarray                                          # Unit vector pointing from body A to body B
     depth: float                                                # The amount of penetration between bodies
     point: np.ndarray                                           # The point of collision 
-    feature_id : int = 0                                        # persistant ID for warm start
+    feature_id : int = 1                                        # persistant ID for warm start
 
 @dataclass
 class Endpoint:
@@ -141,7 +141,7 @@ def _sat_and_overlap(A: CollidableShape, B: CollidableShape): # TODO add face bi
 
 ### -------------------------- Manifold Builder (3D) -------------------------- ###
 
-def _build_contact_manifold(A: CollidableShape, B:CollidableShape, sat_normal:np.ndarray, sat_min_overlap:float) -> list[Contact]:
+def _build_contact_manifold(A: CollidableShape, B:CollidableShape, sat_normal:np.ndarray, sat_min_overlap:float, debug=False) -> list[Contact]:
 
     # Need which vertices to clip to
 
@@ -194,7 +194,7 @@ def _build_contact_manifold(A: CollidableShape, B:CollidableShape, sat_normal:np
         contact_normal = -contact_normal
     
     ref_axes = ref_body.get_axes()
-    ref_he = _half_extents(ref_body)
+    #ref_he = _half_extents(ref_body)
 
     raw_ref_axis = ref_axes[ref_axis_idx]
     ref_sign = np.sign(np.dot(raw_ref_axis, contact_normal))
@@ -221,7 +221,8 @@ def _build_contact_manifold(A: CollidableShape, B:CollidableShape, sat_normal:np
     inc_axis_idx = int(np.argmax(np.abs(dot_prod_inc)))
 
     # keep same signage - compare to abs but then restore sign
-    inc_sign = np.sign(dot_prod_inc[inc_axis_idx]) or -1.0
+    #inc_sign = np.sign(dot_prod_inc[inc_axis_idx]) or -1.0
+    inc_sign = 1.0 if np.dot(inc_axes[inc_axis_idx], -contact_normal) >= 0.0 else -1.0
     inc_normal = _unit(inc_body.get_axes()[inc_axis_idx]) * inc_sign
 
     # get face for incident
@@ -272,28 +273,37 @@ def _build_contact_manifold(A: CollidableShape, B:CollidableShape, sat_normal:np
     # loop through ref vertices
     for vert in clipped_poly:
         s = float(np.dot(n_ref, vert) - d_ref)
-        #print("Signed distance: ", s)
-        #if s >= _EPS_CLIP:
-            #s = max(0.0, s)
-        depth = s
-        p = vert - s * n_ref
-        contact_pts.append(p)
-        depths.append(depth)
+        #print("S: ",s)
+        if s < 0:
+            depth = -s
+            #print("depth: ", depth)
+            p = vert - s * n_ref
+            contact_pts.append(p)
+            depths.append(depth)
     
-    contact_pts  = np.asarray(contact_pts)
-    depths  = np.asarray(depths)
+    contact_pts  = np.asarray(contact_pts, dtype=float)
+    depths  = np.asarray(depths, dtype=float)
+
     if contact_pts.shape[0] == 0:
         return []   # or your debug return
 
-    # deepest up to 4
-    idx = np.argsort(depths)[:4]
-    contact_pts = contact_pts[idx]; depths = depths[idx]
+    # keep deepest 4 
+
+    idx = np.argsort(depths)
+    #print(f"Depths: {depths}, \nargsort depths: {depths[idx]}")
+
+    contact_pts = contact_pts[idx]
+    depths = depths[idx]
+    #print("Depths: ", depths)
 
     contact_list = []
+    #contact_normal = -contact_normal
     for i, p in enumerate(contact_pts):
-        contact_list.append(Contact(ref_body, inc_body, contact_normal, depths[i], p))
+        fid = _set_feature_id(ref_body, inc_body, p)
+        contact_list.append(Contact(ref_body, inc_body, contact_normal, depths[i], p, fid))
 
-    #return clipped_poly, ref_face, ref_normal, inc_face, inc_normal, contact_normal, contact_pts, depths
+    if debug:
+        return contact_list, clipped_poly, ref_face, ref_normal, inc_face, inc_normal, contact_normal, contact_pts, depths
     return contact_list
 ### -------------------------- Narrow Phase + Get Collisions  -------------------------- ###
 
@@ -308,17 +318,17 @@ def narrow_phase(pair: tuple[CollidableShape, CollidableShape]):
     if bodyA.static and bodyB.static:
         return None                                             # No contacts between the two static, unmoveable objects
 
-    if bodyA.static and not bodyB.static:
-        bodyA, bodyB = bodyB, bodyA                             # Swap bodies if A is static - mathematical convention
+    # if bodyA.static and not bodyB.static:
+    #     bodyA, bodyB = bodyB, bodyA                             # Swap bodies if A is static - mathematical convention
 
     #n, ov, tag, _ = _sat_and_overlap(bodyA, bodyB)
     n, ov, tag = _sat_and_overlap(bodyA, bodyB)
+    # print(f"n: {n} ov: {ov}")
 
     if n is None:
         return None
     else:
         return _build_contact_manifold(bodyA, bodyB, n, ov)
-
     
     #kind = tag[0]
     # # face-point contact
@@ -347,14 +357,14 @@ def get_collisions(bodies: list[Body], ignore_ids: set[tuple[int, int]] | None =
 
     # Phase 1: Broad Phase
     potential_pairs = broad_phase(collidable_bodies, ignore_ids= (ignore_ids or set()))
+    #print("Potential pairs:", potential_pairs)
 
     # Phase 2: Narrow Phase + manifold
     for pair in potential_pairs:
         contact_info = narrow_phase(pair)
+        #print("contact_info: ", contact_info)
         if contact_info:
-            #all_contacts.append(contact_info)
             all_contacts.extend(contact_info)
-
 
     return all_contacts
 
@@ -560,7 +570,9 @@ def _dedupe_points(points: np.ndarray) -> np.ndarray:           # Checks if any 
             unique.append(p)
     return np.asarray(unique)
 
-def _feature_id_hash(bodyA: Body, bodyB: Body, ref_idx: int, inc_idx: int, p: np.ndarray) -> int: # TODO wtf is going on here?
-    # Quantize point for ID stability (helps warm-starting)
-    q = np.round(p * 1e4).astype(int)
-    return (hash((id(bodyA) >> 4, id(bodyB) >> 4, ref_idx, inc_idx, int(q.sum()))) & 0x7fffffff)
+def _set_feature_id(bodyA: Body, bodyB: Body, p: np.ndarray) -> int: # TODO wtf is going on here?
+    point_val = round(abs(p[0]) + abs(p[1])+ abs(p[2]))
+    print("\tp: ", p, "\tnorm p:", np.linalg.norm(p))
+    print(f"1: {abs(p[0])} 2: {abs(p[1])} 3: {abs(p[2])}, value: {point_val}")
+    value = bodyA.body_id * 1000 + bodyB.body_id * 100 + point_val
+    return value

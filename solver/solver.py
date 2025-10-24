@@ -3,6 +3,7 @@ import numpy as np
 from geometry.primitives import Body, quat_from_rotvec, quat_log, quat_mult, quat_conjugate
 from .constraints import Constraint, ContactConstraint, clamp
 from . import collisions
+from .manifold import Manifold
 
 class Solver:
     def __init__(self, dt, num_iterations, gravity=-9.81):
@@ -16,123 +17,106 @@ class Solver:
         self.persistent_constraints: list[Constraint] = []
         self.contact_constraints: list[ContactConstraint] = []
 
-        self.beta  = 100000      # penalty ramp factor
-        self.gamma = 0.98     # warm-start decay
-        self.alpha = 0.99     # stabilization for hard rows
+        self.beta  = 10      # penalty ramp factor
+        self.gamma = 0.99     # warm-start decay
+        self.alpha = 0.95     # stabilization for hard rows
         self.post_stabilize = True
         self.mu = 0.6         # default friction
 
-        # Private state for the solver step
-        self._all_constraints: list[Constraint] = []
-        self._contact_cache: dict = {}
-        self._incidence_map: dict = {}
+        # # Private state for the solver step
+        # self._all_constraints: list[Constraint] = []
+        # self._contact_cache: dict = {}
+        # self._incidence_map: dict = {}
+
+        self.num_bodies:int = 0
+        self.manifolds: dict[tuple[int,int], Manifold] = {}
+        self.separation_frames = 1
+        self._frame_id = 0
         
 
     def add_body(self, body:Body):
         
-        if self.dof:
-            if self.dof == body.dof:
-                self.bodies.append(body)
-            else:
-                raise ValueError(f"Cannot add a {int((body.dof / 3) + 1)}D body to a {int((self.dof/3)+1)}D environment.")
-        else:
-            self.bodies.append(body)
+        if self.dof == None:
             self.dof = body.dof
 
+        if self.dof == body.dof:
+            self.num_bodies += 1
 
-    def add_constraint(self, con: Constraint):
-        self.persistent_constraints.append(con)
+            body.body_id = self.num_bodies
+            print(f"Body id: {body.body_id}")
+            self.bodies.append(body)
+
+        else:
+            raise ValueError(f"Cannot add a {int((body.dof / 3) + 1)}D body to a {int((self.dof/3)+1)}D environment.")
+
 
     def _build_contact_constraints(self):
-        # Build the set of pairs to ignore from persistent constraints
-        ignore_ids = set()
-        for p_con in self.persistent_constraints:
-            pair = tuple(sorted((id(p_con.A), id(p_con.B))))
-            ignore_ids.add(pair)
-            
-        # Find contacts with broad phase + narrow phase
-        raw_contacts = collisions.get_collisions(self.bodies, ignore_ids)
-        
-        # Create contact constraints and warm-start (read only from cache)
-        new_contact_cons = []
+
+        raw_contacts = collisions.get_collisions(self.bodies, ignore_ids=None)
+        pairmap: dict[tuple[int, int], list] = {}
+
         for c in raw_contacts:
-            cons = ContactConstraint(contact=c, friction=self.mu)
+            #print(f"Body A id: {c.bodyA.body_id} and Body B id: {c.bodyB.body_id}")
+            ida = int(c.bodyA.body_id)
+            idb = int(c.bodyB.body_id)
+            key = (min(ida, idb), max(ida, idb))
+            pairmap.setdefault(key, []).append(c)
+        
+        for (ida, idb), contacts_for_pair in pairmap.items():
+            A = next(b for b in self.bodies if b.body_id == ida)
+            B = next(b for b in self.bodies if b.body_id == idb)
+
+            mf = self.manifolds.get((ida, idb))
+            if mf is None:
+                mf = Manifold(A, B)
+                self.manifolds[(ida, idb)] = mf
+
+            #print("Num contacts: ", len(contacts_for_pair))
             
-            # Warm-start from the previous frame's cache
-            ida, idb = id(c.bodyA), id(c.bodyB)
-            cache = self._contact_cache
+            mf.update_from_contacts(contacts=contacts_for_pair, friction=self.mu, max_sep_frames=self.separation_frames)
 
-            feature_id = getattr(c, "feature_id", None)
+        to_del = [key for key, mf in self.manifolds.items() if mf.is_empty()]
+        for key in to_del:
+            del self.manifolds[key]
 
-            if feature_id is not None:
-                key = (min(ida, idb), max(ida, idb), int(c.feature_id))     # min/max makes this order-independent
-
-                if key in cache:
-                    lam, kval = cache[key]
-                    cons.lambda_[:] = lam
-                    cons.penalty_k[:] = kval
-            else:
-                # optional fallback if feature_id is missing/unstable
-                legacy_key = (min(ida, idb), max(ida, idb),
-                              tuple(np.round(c.point, 3)),
-                              tuple(np.round(c.normal, 3)))
-                
-                if legacy_key in cache:
-                    lam, kval = cache[legacy_key]
-                    cons.lambda_[:] = lam
-                    cons.penalty_k[:] = kval
-
-            new_contact_cons.append(cons)
-
-        self.contact_constraints = new_contact_cons
-    
-    # Warm start the lambda and penalty (k) values for contacts - closer to correct answer
-    def _write_contact_cache_post_solve(self):
-        new_cache = {}
-        for cons in self.contact_constraints:                       # Get contact patch - bodies involved - contact points (1-4 per contact) - normals (how many?)
-            c = cons.contact
-            feature_id = getattr(c, "feature_id", None)
-            if feature_id is not None:
-                key = (
-                    min(id(c.bodyA), id(c.bodyB)),
-                    max(id(c.bodyA), id(c.bodyB)),
-                    int(c.feature_id)
-                    )
-            else:
-                # fallback key if needed
-                key = (min(id(c.bodyA), id(c.bodyB)),
-                       max(id(c.bodyA), id(c.bodyB)),
-                       tuple(np.round(c.point, 3)),
-                       tuple(np.round(c.normal, 3)))
-            new_cache[key] = (cons.lambda_.copy(), cons.penalty_k.copy())
-        self._contact_cache = new_cache
+        manifold_constraints = []
+        for mf in self.manifolds.values():
+            manifold_constraints.extend(mf.constraints)
+        
+        self.contact_constraints = manifold_constraints
 
     def step(self):
-        dof = self.dof
+
         dt = self.dt
+        dof = self.dof
+
+        # Set intertial state and guess position for faster solve
         for b in self.bodies:
+            if b.static:                                            # Don't move static bodies 
+                continue
             b.initial_pos = b.position.copy()
+            y = b.position.copy()
+            y[:3] += b.velocity[:3] * dt        # Update translation position
+            y[3:] = b.integrate_rotation(dt)    # Update rotational position
+            b.position = y.copy()               # TODO copy y to keep simple for now
+
+            y[1] += self.gravity * dt *dt       # Update due to gravity position
+            b.inertial_pos = y.copy()
+            # b.position = b.position + b.velocity * dt # + warm start acceleration stuff
+            
+            # Add in acceleration warm start stuff
+            # accel = (b.velocity - b.prev_vel) /dt
+            # accelExt = accel[1]
 
         # Broad and narrow phase collision detection + warm starting
         self._build_contact_constraints()
+
+        #print(f"Manifold: {self.manifolds}")
         self._all_constraints = self.persistent_constraints + self.contact_constraints
-
-        # TODO redundant loops!!
-
-        # Initialize once per frame
-        for con in self._all_constraints:
-            con.initialize()
-
-        # Build incidence map for efficient lookup when looping through constraints later
-        self._incidence_map = {id(b): [] for b in self.bodies}
-        for con in self._all_constraints:
-            if con.A:                
-                self._incidence_map[id(con.A)].append(con)
-            if con.B:
-                self._incidence_map[id(con.B)].append(con)
 
         # Warm start
         for con in self._all_constraints:
+            con.initialize()
             for r in range(con.rows()):
                 if self.post_stabilize:
                     con.penalty_k[r] = np.clip(self.gamma * con.penalty_k[r], 1.0, con.k_max[r])
@@ -142,28 +126,12 @@ class Solver:
                     con.penalty_k[r] = np.clip(self.gamma * con.penalty_k[r], 1.0, con.k_max[r])
 
                 # Cap penalty by material stiffness for *non-hard* rows
-                if not np.isinf(con.stiffness[r]):
+                if not con.is_hard[r]:
                     con.penalty_k[r] = min(con.penalty_k[r], con.stiffness[r])
 
-        # Set intertial state and guess position for faster solve
-        for b in self.bodies:
-            #b.initial_pos = b.position.copy()
-            if b.static:                                            # Don't move static bodies 
-                continue
+        #print(f"Num constraints: {len(self._all_constraints)}")
 
-            if dof == 3:    # body is rect_2D
-                y = b.position.copy() + b.velocity * dt
-                y[1] += self.gravity * dt * dt                      # Update inertial position to include gravity's effect
-                b.position = b.position + b.velocity * dt
 
-            elif dof == 6:  # body is box_3D
-                y = b.position.copy()
-                y[:3] += b.velocity[:3] * dt         # Update translation position
-                y[3:] = b.integrate_rotation(dt)
-                b.position = y.copy()
-                y[1] += self.gravity * dt * dt
-
-            b.inertial_pos = y                                      # Copy inertial position y into internal variable intertial_pos
 
         # Main solver loop - Newton Method iterations
         """
@@ -176,98 +144,98 @@ class Solver:
         (M/Δt² + constraint stiffnesses)(Δq) = - (M/Δt² (y - q_i) + constraint forces)
         
         """
-
+        # lhs = np.ndarray()
+        # rhs = np.ndarray()
+        # Gdiag = np.ndarray()
       # --- Main iterations in twist space (6D for 3D, 3D for 2D) ---
         total_iters = self.iterations + (1 if self.post_stabilize else 0)
         for num_it in range(total_iters):
-            current_alpha = 1.0 if (self.post_stabilize and num_it >= self.iterations) else self.alpha
+
+            current_alpha = self.alpha
+            if self.post_stabilize:
+                current_alpha = 1.0 if num_it < self.iterations else 0.0
 
             for b in self.bodies:
                 if b.static:
                     continue
-
                 # Build inertial Hessian & residual in the correct dimensionality
-                if dof == 3: # --- 2D body: 3D solve ---
-                    M = np.diag([b.mass, b.mass, b.inertia if np.isscalar(b.inertia) else float(b.inertia)])
-                    e3 = (b.position - b.inertial_pos)
-                    lhs = M / (dt*dt)
-                    rhs = (M / (dt*dt)) @ e3
+                mI3 = b.mass * np.eye(3)
+                Iw  = b.I_world()        # world-frame inertia
+                M   = np.block([[mI3, np.zeros((3,3))],
+                                [np.zeros((3,3)), Iw]])  # (6,6)
+                e6 = b.delta_twist_from(b.inertial_pos)
 
-                elif dof == 6: # --- 3D rigid body: 6D solve ---
-                    mI3 = b.mass * np.eye(3)
-                    Iw  = b.I_world()        # world-frame inertia
-                    M   = np.block([[mI3, np.zeros((3,3))],
-                                    [np.zeros((3,3)), Iw]])  # (6,6)
-                    e6 = b.delta_twist_from(b.inertial_pos)
+                force = -(M / (dt*dt)) @ e6
+                #print(f"Force: {force}")
+                hessian = M / (dt*dt)
 
-                    lhs = M / (dt*dt)
-                    rhs = (M / (dt*dt)) @ e6
-
-                for con in self._incidence_map[id(b)]:
+                for con in self._all_constraints:
+                    #print("Curent alpha: ", current_alpha)
                     con.compute_constraint(current_alpha)
                     con.compute_derivatives(b)
                     J = con.JA if con.A is b else con.JB
                     H = con.HA if con.A is b else con.HB
 
                     for r in range(con.rows()):
-                        hard = con.is_hard[r]
-                        lam = con.lambda_[r] if hard else 0.0
+                        lam = con.lambda_[r] if con.is_hard[r] else 0.0
                         k = con.penalty_k[r]
                         C = con.C[r]
                         Jr = J[r]
                         
-                        if hard:
-                            fmag = clamp(k*C + lam, con.fmin[r], con.fmax[r])
+                        if con.is_hard[r]:
+                            f_add = clamp(k*C + lam, con.fmin[r], con.fmax[r])
+                            #print(f"Additional force to apply: {f_add}")
                         else:
-                            fmag = k*C
-
-                        absf = abs(fmag)
+                            f_add = k*C
 
                         if H is not None and H.shape == (con.rows(), dof, dof) and np.any(H[r]):
                             col_norms = np.linalg.norm(H[r], axis=0)
-                            Gdiag = np.diag(col_norms) * absf
+                            Gdiag = np.diag(col_norms) * abs(f_add)
 
                         else:
-                            Gdiag = np.diag(np.abs(Jr) * absf)
+                            Gdiag = np.diag(np.abs(Jr) * abs(f_add))
 
-                        rhs += Jr * fmag
-                        lhs += k * np.outer(Jr, Jr) + Gdiag
+                        force -= Jr * f_add
+                        hessian += np.outer(Jr, Jr * k) + Gdiag
                         #print("J[r]: ", Jr, "Force clipped: ", fmag, "Force: " ,(k*C +lam))
                         #print("RHS: ", rhs, "\t LHS: ", lhs) 
 
                 try:
-                    delta = np.linalg.solve(lhs, rhs)
-                    if dof == 3:
-                        b.position -= delta
-                    elif dof == 6:
-                        dx = delta[:3]
-                        dth = delta[3:]
-                        b.position[:3] -= dx
-                        dq = quat_from_rotvec(-dth)
-                        b.position[3:] = quat_mult(dq, b.position[3:])
+                    delta = np.linalg.solve(hessian, force)
+                   # print(f"Positional delta: {delta[:3]}\tCurrent position: {b.position[:3]}")
+                    dx = delta[:3]
+                    dth = delta[3:]
+                    b.position[:3] += dx
+                    dq = quat_from_rotvec(dth)
+                    b.position[3:] = quat_mult(dq, b.position[3:])
+
+                    # print(f"[Iteration: {num_it}]\tbody {id(b)%1000}\t||rhs||: {np.linalg.norm(rhs):.3e} "
+                    #       f"\tcond(lhs): {np.linalg.cond(lhs):.2e}\t||delta_x||: {np.linalg.norm(dx):.3e}"
+                    #       f"\t||delta_rot||: {np.linalg.norm(dth)}\tbeta: {self.beta}")
+                    
                 except np.linalg.LinAlgError:
-                    print("Warning: Linear solve failed. LHS may be singular or ill-conditioned.")
-                    pass
+                    eps = 1e-9
+                    hessian = hessian + eps*np.eye(hessian.shape[0])
+                    delta = np.linalg.solve(hessian, force)
+                    # print("Warning: Linear solve failed. LHS may be singular or ill-conditioned.")
 
 
             # Dual update (skip on the extra post-stabilization pass)
             if num_it < self.iterations:
                 for con in self._all_constraints:
-
-                    con.compute_constraint(current_alpha)           # refresh C at new positions
-
+                    con.compute_constraint(current_alpha)           # refresh C at new positions - TODO the constraint is NOT recomputed, it says the same thing as before...
                     for r in range(con.rows()):                     # Hard constraints update λ via clamped force; soft rows keep λ=0
 
-                        if con.is_hard[r]:              # Only hard constraints have lambda updated this way
+                        # 1) Update lambda for hard rows
+                        if con.is_hard[r]:
+                            con.lambda_[r] = clamp(con.penalty_k[r] * con.C[r] + con.lambda_[r], con.fmin[r], con.fmax[r])
 
-                            new_lambda = clamp(con.penalty_k[r] * con.C[r] + con.lambda_[r], con.fmin[r], con.fmax[r])
-                            con.lambda_[r] = new_lambda
+                            if con.fmin[r] < con.lambda_[r] and con.lambda_[r] < con.fmax[r]:
+                                con.penalty_k[r] = con.penalty_k[r] + self.beta * abs(con.C[r])
 
-                        # Ramp up penalty if force is not clamped
-                        if con.fmin[r] < con.lambda_[r] < con.fmax[r]:
-                            # Cap growth by both a global max and the material stiffness
-                            max_cap = min(con.k_max[r], con.stiffness[r] if not con.is_hard[r] else con.k_max[r])
-                            con.penalty_k[r] = min(con.penalty_k[r] + self.beta * abs(con.C[r]), max_cap)
+                        else:
+                            con.penalty_k[r] = min(con.stiffness[r], con.penalty_k[r] + self.beta * abs(con.C[r]))
+
 
             if num_it == self.iterations - 1:
                 inv_dt = 1.0 / dt                                   # Multiplication is faster
@@ -275,16 +243,12 @@ class Solver:
                     if b.static:
                         continue
                     else:
-                        if dof == 3:
-                            b.prev_vel = b.velocity.copy()
-                            b.velocity = (b.position - b.initial_pos) * inv_dt
-                        elif b.dof == 6:
-                            q0 = b.initial_pos[3:]
-                            q1 = b.position[3:]
-                            q_rel = quat_mult(q1, quat_conjugate(q0))
-                            d_theta = quat_log(q_rel)
-                            omega = d_theta * inv_dt
-                            b.velocity[:3] = (b.position[:3] - b.initial_pos[:3]) * inv_dt
-                            b.velocity[3:] = omega
+                        q0 = b.initial_pos[3:]
+                        q1 = b.position[3:]
+                        q_rel = quat_mult(q1, quat_conjugate(q0))
+                        d_theta = quat_log(q_rel)
+                        omega = d_theta * inv_dt
+                        b.velocity[:3] = (b.position[:3] - b.initial_pos[:3]) * inv_dt
+                        b.velocity[3:] = omega
 
-        self._write_contact_cache_post_solve()
+        #self._write_contact_cache_post_solve()

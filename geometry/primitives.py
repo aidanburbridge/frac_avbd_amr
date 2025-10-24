@@ -172,6 +172,7 @@ class Body:
         # Solver related 
         self.initial_pos = self.position.copy()
         self.prev_vel = self.velocity.copy()
+        self.body_id: int = None
 
         # Inertial or "y" in paper
         self.inertial_pos = np.zeros_like(self.position)

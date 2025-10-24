@@ -5,6 +5,8 @@ import numpy as np
 # Project imports (your current layout)
 from geometry.primitives import rect_2D, box_3D
 from solver.solver import Solver
+from solver.collisions import Contact
+from solver.constraints import ContactConstraint
 
 # Third-party
 import pyvista as pv
@@ -96,46 +98,49 @@ def make_world_3d():
     """
     Build a small 3D scene: ground + a couple of cubes.
     """
-    solver = Solver(dt=1/120, num_iterations=40, gravity=-9.81)
-    solver.mu = 0.6
+    solver = Solver(dt=1/120, num_iterations=15, gravity=-9.81)
+    solver.mu = 0.0
     solver.post_stabilize = True
+    solver.beta = 10000
+    solver.alpha = 0.95
+    solver.gamma = 0.99
 
     ground = box_3D(
         trans_pos=(0.0, -1.0, 0.0),
         quat_pos=(1.0, 0.0, 0.0, 0.0),
         linear_vel=(0.0, 0.0, 0.0),
         ang_vel=(0.0, 0.0, 0.0),
-        density=1000.0,
+        density=100.0,
         penalty_gain=1e6,
-        size=(20.0, 2.0, 20.0),
+        size=(10.0, 1.0, 10.0),
         static=True
     )
 
     cube1 = box_3D(
-        trans_pos=(0.0, 2.0, 0.0),
-        quat_pos=(1.0, 0.0, 0.0, 0.0),
-        linear_vel=(0.0, 10.0, 0.0),
-        ang_vel=(2.0, 0.0, 0.3),
-        density=500.0,
+        trans_pos=(3.0, 1.0, 0.0),
+        quat_pos=(.1, 0.2, 0.3, 0.5),
+        linear_vel=(0.5, 0.0, 0.0),
+        ang_vel=(0.0, 0.0, 0.0),
+        density=100.0,
         penalty_gain=1e5,
         size=(0.8, 0.8, 0.8),
         static=False
     )
     cube2 = box_3D(
-        trans_pos=(0.0, 10.0, 0.0),
+        trans_pos=(0.0, 4.0, 0.0),
         quat_pos=(1.0, 0.0, 0.0, 0.0),
         linear_vel=(0.0, 0.0, 0.0),
-        ang_vel=(0.0, 0.3, 0.0),
-        density=500.0,
+        ang_vel=(0.0, 0.0, 0.0),
+        density=100.0,
         penalty_gain=1e5,
         size=(1.0, 1.0, 1.0),
         static=False
     )
 
-    for b in (ground, cube1, cube2):
+    for b in (ground, cube1):#, cube2):
         solver.add_body(b)
 
-    return solver, [ground, cube1, cube2]
+    return solver, [ground, cube1]#, cube2]
 
 def build_actor_for_body(plotter: pv.Plotter, body, color=None):
     """
@@ -145,7 +150,7 @@ def build_actor_for_body(plotter: pv.Plotter, body, color=None):
         w, h, d = body.size
         mesh = pv.Cube(center=(0, 0, 0), x_length=w, y_length=h, z_length=d)
         actor = plotter.add_mesh(mesh, color=(color or "royalblue"),
-                                 smooth_shading=True, show_edges=False)
+                                 smooth_shading=True, show_edges=False)#, opacity=0.5)
         def update():
             R = rot_from_axes(body.get_axes())
             t = body.position[:3] if body.position.shape[0] >= 3 else body.pos
@@ -174,16 +179,50 @@ def build_actor_for_body(plotter: pv.Plotter, body, color=None):
     actor = plotter.add_mesh(mesh, color=(color or "gray"))
     return actor, (lambda: None)
 
+def paint_contacts(plotter:pv.Plotter, contact_constraints:list[ContactConstraint], point_radius=0.03, point_color="yellow"):
+    actors = []
+    
+    contacts = [cc.contact for cc in contact_constraints if hasattr(cc, "contact") and cc.contact is not None]
+    
+    for c in contacts:
+        p = np.asarray(c.point, dtype=float)
+        n = np.asarray(c.normal, dtype=float)
+        d = float(c.depth)
+        if p.shape != (3,) or n.shape != (3,):
+            continue
+        n_norm = np.linalg.norm(n) + 1e-12
+        n = n/n_norm
+
+        # Point
+        sph = pv.Sphere(radius=point_radius, center=p)
+        actors.append(plotter.add_mesh(sph, color=point_color, smooth_shading=True))
+
+        # Arro
+        centers = p[None, :]
+        dirs = n[None, :]
+
+        actors.append(plotter.add_arrows(centers, dirs, mag=d, color=point_color))
+    
+    return actors
+
+def _clear_contact_overlay(plotter, overlay):
+    if overlay["actors"]:
+        for a in overlay["actors"]:
+            try:
+                plotter.remove_actor(a)
+            except Exception:
+                pass
+        overlay["actors"].clear()
 
 # ---------- main loop ----------
-
 def run_realtime():
-    solver, bodies = make_world_3d()
 
+    solver, bodies = make_world_3d()
     pv.set_plot_theme("document")
     plotter = pv.Plotter(window_size=(1280, 720))
     plotter.add_axes()
     plotter.set_background("white")
+
     try_enable_msaa(plotter)
 
     # Camera
@@ -191,9 +230,6 @@ def run_realtime():
         plotter.camera_position = "iso"
     except Exception:
         pass
-
-    # Floor / grid
-    #add_floor_compat(plotter)
 
     # Actors
     updaters = []
@@ -203,9 +239,27 @@ def run_realtime():
         updaters.append(update)
 
     # HUD and controls
-    plotter.add_text(f"PyVista {pv.__version__}  |  space=pause  q=quit", font_size=10)
+    plotter.add_text(f"PyVista {pv.__version__}  |  space=pause  q=quit c=paint contacts", font_size=10)
     paused = {"flag": True}
-    plotter.add_key_event("space", lambda: paused.update(flag=not paused["flag"]))
+    contact_overlay = {"show": False, "actors": []}
+
+    def toggle_pause():
+        # flip paused; if we’re unpausing, nuke any overlay immediately
+        paused["flag"] = not paused["flag"]
+        if not paused["flag"]:
+            contact_overlay["show"] = False
+            _clear_contact_overlay(plotter, contact_overlay)
+
+    def toggle_contacts():
+        # Only allow painting while paused
+        if paused["flag"]:
+            contact_overlay["show"] = not contact_overlay["show"]
+        else:
+            # if running, ensure it's off
+            contact_overlay["show"] = False
+
+    plotter.add_key_event("space", toggle_pause)
+    plotter.add_key_event("c", toggle_contacts)
     plotter.add_key_event("q", lambda: plotter.close())
 
     # Start window (compat)
@@ -214,7 +268,12 @@ def run_realtime():
     last = time.perf_counter()
     frames = 0
 
+    update_interval = 3
+    iter_count = 0
+
     while window_is_open(plotter):
+        # TODO issue with painting contacts - the contacts flicker every time.
+
         if not paused["flag"]:
             solver.step()
 
@@ -226,26 +285,45 @@ def run_realtime():
                     b.linear_vel = b.velocity[:3]
                     b.ang_vel    = b.velocity[3:6]
                     b.integrate_orientation(solver.dt)
+        
+        iter_count += 1
 
-        # Update visuals
-        for update in updaters:
-            update()
+        if iter_count % update_interval:
 
-        frames += 1
-        now = time.perf_counter()
-        if now - last > 0.5:
-            fps = frames / (now - last)
-            # plotter.add_text(f"PyVista {pv.__version__}  |  FPS: {fps:5.1f}   (space=pause, q=quit)",
-            #                  position="upper_right", font_size=10)
-            frames = 0
-            last = now
+            # Contacts overlay logic: paint ONLY when paused+show; otherwise clear
+            if paused["flag"] and contact_overlay["show"]:
+                # clear previous and repaint from current contacts
+                _clear_contact_overlay(plotter, contact_overlay)
 
-        # Drive rendering
-        try:
-            plotter.update()
-        except Exception:
-            pass
-        plotter.render()
+                contacts = getattr(solver, "contact_constraints", []) or []
+                if contacts:
+                    new_actors = paint_contacts(plotter, contacts)
+                    contact_overlay["actors"].extend(new_actors)
+            else:
+                # ensure nothing lingers when running or when overlay is off
+                if contact_overlay["actors"]:
+                    _clear_contact_overlay(plotter, contact_overlay)
+
+
+            # Update visuals
+            for update in updaters:
+                update()
+
+            frames += 1
+            now = time.perf_counter()
+            if now - last > 0.5:
+                fps = frames / (now - last)
+                # plotter.add_text(f"PyVista {pv.__version__}  |  FPS: {fps:5.1f}   (space=pause, q=quit)",
+                #                  position="upper_right", font_size=10)
+                frames = 0
+                last = now
+
+            # Drive rendering
+            try:
+                plotter.update()
+            except Exception:
+                pass
+            plotter.render()
 
     try:
         plotter.close()
