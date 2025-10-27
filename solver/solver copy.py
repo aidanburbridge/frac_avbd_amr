@@ -32,11 +32,8 @@ class Solver:
 
         self.num_bodies:int = 0
         self.manifolds: dict[tuple[int,int], Manifold] = {}
-        self.separation_frames = 3
+        self.separation_frames = 1
         self._frame_id = 0
-
-        # Debug/diagnostics
-        self.debug_contacts: bool = False
         
 
     def add_body(self, body:Body):
@@ -79,8 +76,6 @@ class Solver:
             if mf is None:
                 mf = Manifold(id2body[a], id2body[b])
                 self.manifolds[(a, b)] = mf
-            # propagate solver threshold into manifold
-            mf.max_sep_frames = int(self.separation_frames)
 
             # OPTIONAL: cheap dedup per feature in the same frame
             uniq = {}
@@ -91,15 +86,9 @@ class Solver:
             mf.update_from_contacts(
                 contacts=list(uniq.values()),
                 friction=self.mu,
-                dist_eps=0.05,
-                cos_eps=0.9
+                dist_eps=0.1,
+                cos_eps=0.95
             )
-
-        # Clear manifolds not seen this frame (no contacts this frame)
-        for key, mf in list(self.manifolds.items()):
-            if key not in pairmap:
-                # Force-clear constraints to avoid stale contacts persisting
-                mf.update_from_contacts(contacts=[], friction=self.mu, dist_eps=0.05, cos_eps=0.995)
 
         # Age manifolds not seen this frame (no contacts): they’ll clear themselves
         for key in list(self.manifolds):
@@ -111,55 +100,35 @@ class Solver:
                                     for mf in self.manifolds.values()
                                     for con in mf.constraints]
 
-    def print_contacts_summary(self):
-        """
-        Print per-body contact summary for the current frame.
-        Shows number of contact constraints and their points/normals/depths.
-        """
-        by_body = defaultdict(list)
-        for con in self.contact_constraints:
-            c = getattr(con, "contact", None)
-            if c is None:
-                continue
-            # Entry from A's perspective
-            by_body[int(con.A.body_id)].append({
-                "pair": (int(con.A.body_id), int(con.B.body_id)),
-                "point": np.asarray(c.point, float),
-                "normal": np.asarray(c.normal, float),
-                "depth": float(c.depth),
-                "rows": int(con.rows()),
-                "lambda": con.lambda_,
-            })
-            # Entry from B's perspective (flip normal for clarity)
-            by_body[int(con.B.body_id)].append({
-                "pair": (int(con.A.body_id), int(con.B.body_id)),
-                "point": np.asarray(c.point, float),
-                "normal": -np.asarray(c.normal, float),
-                "depth": float(c.depth),
-                "rows": int(con.rows()),
-                "lambda": con.lambda_,
-
-            })
-
-        if not by_body:
-            print("[contacts] No contact constraints this frame.")
-            return
-
-        print("[contacts] Per-body contact summary:")
-        for bid in sorted(by_body.keys()):
-            entries = by_body[bid]
-            n_contacts = len(entries)
-            n_rows = sum(e["rows"] for e in entries)
-            print(f"  Body {bid}: {n_contacts} contacts, {n_rows} rows")
-            for e in entries:
-                p = e["point"]; n = e["normal"]; d = e["depth"]; pair = e["pair"]; l = e["lambda"]
-                print(f"    pair={pair} p={p.round(3)} n={n.round(3)} d={d:.4f} lam={l}")
-
     def step(self):
 
         dt = self.dt
         dof = self.dof
 
+        # Broad and narrow phase collision detection + warm starting
+        self._build_contact_constraints()
+
+        #print(f"Manifold: {self.manifolds}")
+        self._all_constraints = self.persistent_constraints + self.contact_constraints
+
+        # Warm start
+        for con in self._all_constraints:
+            con.initialize()
+            print(f"\nConstraints for body {con.A.body_id} and body {con.B.body_id}:")
+            for r in range(con.rows()):
+                if self.post_stabilize:
+                    con.penalty_k[r] = np.clip(self.gamma * con.penalty_k[r], 1.0, con.k_max[r])
+                else:
+                    if con.is_hard[r]:
+                        con.lambda_[r]   = con.lambda_[r] * self.alpha * self.gamma
+                    con.penalty_k[r] = np.clip(self.gamma * con.penalty_k[r], 1.0, con.k_max[r])
+
+                # Cap penalty by material stiffness for *non-hard* rows
+                if not con.is_hard[r]:
+                    con.penalty_k[r] = min(con.penalty_k[r], con.stiffness[r])
+            print(f"\t Penalty value: {con.penalty_k[0]}\t\t Lambda value: {con.lambda_[0]}")
+
+        
         # Set intertial state and guess position for faster solve
         for b in self.bodies:
             if b.static:                                            # Don't move static bodies 
@@ -177,34 +146,6 @@ class Solver:
             # Add in acceleration warm start stuff
             # accel = (b.velocity - b.prev_vel) /dt
             # accelExt = accel[1]
-
-        # Broad and narrow phase collision detection + warm starting
-        self._build_contact_constraints()
-
-        if self.debug_contacts:
-            self.print_contacts_summary()
-
-        #print(f"Manifold: {self.manifolds}")
-        self._all_constraints = self.persistent_constraints + self.contact_constraints
-
-        # Warm start
-        for con in self._all_constraints:
-            con.initialize()
-            #print(f"\nConstraints for body {con.A.body_id} and body {con.B.body_id}:")
-            for r in range(con.rows()):
-                if self.post_stabilize:
-                    con.penalty_k[r] = np.clip(self.gamma * con.penalty_k[r], 1.0, con.k_max[r])
-                else:
-                    if con.is_hard[r]:
-                        con.lambda_[r]   = con.lambda_[r] * self.alpha * self.gamma
-                    con.penalty_k[r] = np.clip(self.gamma * con.penalty_k[r], 1.0, con.k_max[r])
-
-                # Cap penalty by material stiffness for *non-hard* rows
-                if not con.is_hard[r]:
-                    con.penalty_k[r] = min(con.penalty_k[r], con.stiffness[r])
-            #print(f"\t Penalty value: {con.penalty_k[0]}\t\t Lambda value: {con.lambda_[0]}")
-
-    
 
         # Main solver loop - Newton Method iterations
         """
@@ -245,15 +186,9 @@ class Solver:
                 for con in self._all_constraints:
                     #print("Curent alpha: ", current_alpha)
                     con.compute_constraint(current_alpha)
-                    # Only apply this constraint to its participating bodies
-                    if b is con.A:
-                        con.compute_derivatives(b)
-                        J, H = con.JA, con.HA
-                    elif b is con.B:
-                        con.compute_derivatives(b)
-                        J, H = con.JB, con.HB
-                    else:
-                        continue
+                    con.compute_derivatives(b)
+                    J = con.JA if con.A is b else con.JB
+                    H = con.HA if con.A is b else con.HB
 
                     for r in range(con.rows()):
                         lam = con.lambda_[r] if con.is_hard[r] else 0.0

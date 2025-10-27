@@ -149,7 +149,8 @@ class ContactConstraint(Constraint):
         rA0 = pA - A.initial_pos[:dim]
         rB0 = pB - B.initial_pos[:dim]
 
-
+        # For debugging
+        self.point_list.extend([pA, pB])
         
         # Allocate caches with dim
         dof_A = A.velocity.shape[0]
@@ -178,14 +179,9 @@ class ContactConstraint(Constraint):
         # pB0 = B.position[:dim] - rB0
 
         pA0 = A.initial_pos[:dim] + rA0
-        pB0 = B.initial_pos[:dim] + rB0
+        pB0 = B.initial_pos[:dim] - rB0
 
-        # For debugging
-        self.point_list.extend([pA0, pB0])
-
-        # Define normal constraint so C > 0 when penetration exceeds margin
-        # dot(n, pA0 - pB0) = -depth, so use depth - margin
-        C0[0] = float(-np.dot(self.n, (pA0 - pB0)) - self.COLLISION_MARGIN)
+        C0[0] = float(np.dot(self.n, (pA0 - pB0))) + self.COLLISION_MARGIN
         #print(f"depth: {depth}\t pA0 - pB0: {pA0-pB0}\t C0[0]: {C0[0]}")
         # print(f"Normal vector: {self.n}")
         #C0[0] = self.COLLISION_MARGIN - float(self.contact.depth)
@@ -219,12 +215,9 @@ class ContactConstraint(Constraint):
     def compute_derivatives(self, body: Body) -> None:
         assert self._cache is not None
         if body is self.A:
-            self.JA[:, :] = self._cache.JA
-        elif body is self.B:
-            self.JB[:, :] = self._cache.JB
+            self.JA[:,:] = self._cache.JA
         else:
-            # Unrelated body: do not modify Jacobians
-            return
+            self.JB[:,:] = self._cache.JB
     
     def update_bounds(self):
         # Update friction bounds based on the current normal force lambda

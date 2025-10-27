@@ -19,47 +19,109 @@ class Manifold():
         self.A = A
         self.B = B
 
-        self.constraint_dict : dict[int, ContactConstraint] = {}    # dictionary of { (p_key, n_key), ContactConstraint }
-        self.separation_frames: dict[int, int]= {}                  # dictionary of { (p_key, n_key), int }
+        self.constraint_dict = {}    # dictionary of { (p_key, n_key), ContactConstraint }
+        self.separation_frames = {}                  # dictionary of { (p_key, n_key), int }
+        self.constraint_list = []
+        self.max_sep_frames = 3                      # frames to keep stale contacts
 
-    @property
-    def constraints(self) -> list[Constraint]:
-        return list(self.constraint_dict.values())
+    @staticmethod
+    def _proximity_test(c, old_con, dist_eps = 2e-3, cos_eps=0.985):
+        """
+        Tests if old contact point and normal are close to new ones.
+        """
+        dp = float(np.linalg.norm(c.point - old_con.contact.point))
+        ndot = float(np.dot(c.normal, old_con.contact.normal))
+        #print(f"point new: {c.point}, point old: {old_con.contact.point}, dp: {dp} ... ndot: {ndot}")
+        return (dp <= dist_eps) and (ndot >= cos_eps)
     
-    def update_from_contacts(self, contacts: list, friction: float, max_sep_frames: int) -> None:
-        
-        seen_keys = set()
+    @staticmethod
+    def _key_from_contact(con, p_dec=3, n_dec=2):
+        """Deterministic key without a feature id: quantized A-local point & normal."""
 
+        p_key = tuple(np.round(con.point.astype(float), p_dec))
+        n_key = tuple(np.round(con.normal.astype(float), n_dec))
+        return ("local", p_key, n_key)
+    
+    def update_from_contacts(self, contacts: list, friction: float, dist_eps = 0.1, cos_eps=0.95) -> None:
+        
+        old = self.constraint_dict
+
+        new_dict = {}
+        used_old = set()
+        
         for c in contacts:
-            print("Contact feature id: ", c.feature_id)
-            key = c.feature_id
+            con = ContactConstraint(c, friction)
 
-            if key in self.constraint_dict:
-                print(f"\t\t!!Old constraint used for {c.bodyA.body_id} and {c.bodyB.body_id}.!!\n")
-                cons = self.constraint_dict[key]
-                cons.contact = c
+            matched_key = None
+            for k_old, con_old in old.items():
+                if con_old in used_old:
+                    continue
+                if self._proximity_test(c, con_old, dist_eps, cos_eps):
+                    matched_key = k_old               # reuse key to keep continuity
+                    con.warmstart_from(con_old)       # copy ONLY lambda_, penalty_k
+                    used_old.add(con_old)
+                    # Reset separation counter for this key
+                    self.separation_frames[k_old] = 0
+                    break
+
+            key = matched_key if matched_key is not None else self._key_from_contact(c)
+            new_dict[key] = con
+            # Initialize sep counter for new keys
+            if key not in self.separation_frames:
                 self.separation_frames[key] = 0
+
+        # Carry over unmatched old constraints for a limited number of frames
+        for k_old, con_old in old.items():
+            if con_old in used_old:
+                continue
+            sep = self.separation_frames.get(k_old, 0) + 1
+            # If clearly separated (AABB disjoint), drop immediately
+            if not self._aabb_overlap():
+                sep = self.max_sep_frames + 1
+            if sep <= self.max_sep_frames:
+                new_dict[k_old] = con_old
+                self.separation_frames[k_old] = sep
             else:
-                print(f"\t\tNew constraint made for {c.bodyA.body_id} and {c.bodyB.body_id}.")
-                cons = ContactConstraint(contact=c, friction=friction)
-                self.constraint_dict[key] = cons
-                self.separation_frames[key] = 0
-            seen_keys.add(key)
+                self.separation_frames.pop(k_old, None)
 
-        print("Seen keys: ", seen_keys)
-        print("Current keys: ", self.constraint_dict.keys())
+        self.constraint_dict = new_dict
+        self.constraints = list(new_dict.values())
 
-        to_delete = []
-
-        for key in self.constraint_dict.keys():
-            if key not in seen_keys:
-            #     self.separation_frames[key] += 1
-            #     if self.separation_frames[key] > max_sep_frames:
-                to_delete.append(key)
-        
-        for key in to_delete:
-            self.constraint_dict.pop(key, None)
-            self.separation_frames.pop(key, None)
 
     def is_empty(self) -> bool:
         return len(self.constraint_dict) == 0
+
+    def _aabb_overlap(self) -> bool:
+        """Conservative test using AABBs to quickly detect clear separation."""
+        try:
+            a = self.A.get_aabb()
+            b = self.B.get_aabb()
+        except Exception:
+            return True
+
+        # ND AABB case
+        if hasattr(a, 'mins') and hasattr(a, 'maxs') and hasattr(b, 'mins') and hasattr(b, 'maxs'):
+            minsA = np.asarray(a.mins, float)
+            maxsA = np.asarray(a.maxs, float)
+            minsB = np.asarray(b.mins, float)
+            maxsB = np.asarray(b.maxs, float)
+            return np.all(maxsA >= minsB) and np.all(maxsB >= minsA)
+
+        # Named fields (2D/3D)
+        def bounds(obj):
+            xr = (getattr(obj, 'min_x', -np.inf), getattr(obj, 'max_x', np.inf))
+            yr = (getattr(obj, 'min_y', -np.inf), getattr(obj, 'max_y', np.inf))
+            zr = None
+            if hasattr(obj, 'min_z') and hasattr(obj, 'max_z'):
+                zr = (getattr(obj, 'min_z'), getattr(obj, 'max_z'))
+            return xr, yr, zr
+
+        ax, ay, az = bounds(a)
+        bx, by, bz = bounds(b)
+        def ov1(r1, r2):
+            return not (r1[1] < r2[0] or r2[1] < r1[0])
+        if not ov1(ax, bx) or not ov1(ay, by):
+            return False
+        if az is not None and bz is not None and not ov1(az, bz):
+            return False
+        return True

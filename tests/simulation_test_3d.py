@@ -98,12 +98,13 @@ def make_world_3d():
     """
     Build a small 3D scene: ground + a couple of cubes.
     """
-    solver = Solver(dt=1/120, num_iterations=15, gravity=-9.81)
-    solver.mu = 0.0
+    solver = Solver(dt=1/60, num_iterations=15, gravity=-9.81)
+    solver.mu = 0.3
     solver.post_stabilize = True
-    solver.beta = 10000
+    solver.beta = 1000
     solver.alpha = 0.95
     solver.gamma = 0.99
+    solver.debug_contacts = False
 
     ground = box_3D(
         trans_pos=(0.0, -1.0, 0.0),
@@ -116,8 +117,9 @@ def make_world_3d():
         static=True
     )
 
+
     cube1 = box_3D(
-        trans_pos=(3.0, 1.0, 0.0),
+        trans_pos=(4.0, 1.0, 0.0),
         quat_pos=(.1, 0.2, 0.3, 0.5),
         linear_vel=(0.5, 0.0, 0.0),
         ang_vel=(0.0, 0.0, 0.0),
@@ -136,11 +138,21 @@ def make_world_3d():
         size=(1.0, 1.0, 1.0),
         static=False
     )
+    cube3 = box_3D(
+        trans_pos=(0.0, 8.0, 0.0),
+        quat_pos=(1.0, 0.0, 0.0, 0.0),
+        linear_vel=(0.0, 0.0, 0.0),
+        ang_vel=(0.0, 0.0, 0.0),
+        density=100.0,
+        penalty_gain=1e5,
+        size=(1.0, 1.0, 1.0),
+        static=False
+    )
 
-    for b in (ground, cube1):#, cube2):
+    for b in (ground, cube1, cube2, cube3):
         solver.add_body(b)
 
-    return solver, [ground, cube1]#, cube2]
+    return solver, [ground, cube1, cube2, cube3]
 
 def build_actor_for_body(plotter: pv.Plotter, body, color=None):
     """
@@ -150,7 +162,7 @@ def build_actor_for_body(plotter: pv.Plotter, body, color=None):
         w, h, d = body.size
         mesh = pv.Cube(center=(0, 0, 0), x_length=w, y_length=h, z_length=d)
         actor = plotter.add_mesh(mesh, color=(color or "royalblue"),
-                                 smooth_shading=True, show_edges=False)#, opacity=0.5)
+                                 smooth_shading=True, show_edges=False, opacity=0.8)
         def update():
             R = rot_from_axes(body.get_axes())
             t = body.position[:3] if body.position.shape[0] >= 3 else body.pos

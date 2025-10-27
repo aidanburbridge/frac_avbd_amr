@@ -273,10 +273,9 @@ def _build_contact_manifold(A: CollidableShape, B:CollidableShape, sat_normal:np
     # loop through ref vertices
     for vert in clipped_poly:
         s = float(np.dot(n_ref, vert) - d_ref)
-        #print("S: ",s)
-        if s < 0:
-            depth = -s
-            #print("depth: ", depth)
+        # Accept near-coplanar points; treat tiny positive as zero
+        if s <= _EPS_CLIP:
+            depth = max(0.0, -s)
             p = vert - s * n_ref
             contact_pts.append(p)
             depths.append(depth)
@@ -287,11 +286,9 @@ def _build_contact_manifold(A: CollidableShape, B:CollidableShape, sat_normal:np
     if contact_pts.shape[0] == 0:
         return []   # or your debug return
 
-    # keep deepest 4 
-
+    # keep deepest up to 4, prefer larger penetration first
     idx = np.argsort(depths)
-    #print(f"Depths: {depths}, \nargsort depths: {depths[idx]}")
-
+    idx = idx[-4:][::-1]
     contact_pts = contact_pts[idx]
     depths = depths[idx]
     #print("Depths: ", depths)
@@ -299,7 +296,7 @@ def _build_contact_manifold(A: CollidableShape, B:CollidableShape, sat_normal:np
     contact_list = []
     #contact_normal = -contact_normal
     for i, p in enumerate(contact_pts):
-        fid = _set_feature_id(ref_body, inc_body, p)
+        fid = _set_feature_id(ref_body, inc_body, p, ref_axis_idx, inc_axis_idx)
         contact_list.append(Contact(ref_body, inc_body, contact_normal, depths[i], p, fid))
 
     if debug:
@@ -570,9 +567,13 @@ def _dedupe_points(points: np.ndarray) -> np.ndarray:           # Checks if any 
             unique.append(p)
     return np.asarray(unique)
 
-def _set_feature_id(bodyA: Body, bodyB: Body, p: np.ndarray) -> int: # TODO wtf is going on here?
-    point_val = round(abs(p[0]) + abs(p[1])+ abs(p[2]))
-    print("\tp: ", p, "\tnorm p:", np.linalg.norm(p))
-    print(f"1: {abs(p[0])} 2: {abs(p[1])} 3: {abs(p[2])}, value: {point_val}")
-    value = bodyA.body_id * 1000 + bodyB.body_id * 100 + point_val
-    return value
+def _set_feature_id(bodyA: Body, bodyB: Body, p: np.ndarray, ref_face_idx: int | None = None, inc_face_idx: int | None = None) -> int:
+    """Robust, order-stable feature id for warm-starting.
+    Combines body ids, optional face indices, and a quantized world point.
+    """
+    ida = int(getattr(bodyA, 'body_id', 0) or 0)
+    idb = int(getattr(bodyB, 'body_id', 0) or 0)
+    qp = tuple(np.round(np.asarray(p, float), 3))
+    key = (min(ida, idb), max(ida, idb), int(ref_face_idx) if ref_face_idx is not None else -1,
+           int(inc_face_idx) if inc_face_idx is not None else -1, qp)
+    return hash(key) & 0x7fffffff

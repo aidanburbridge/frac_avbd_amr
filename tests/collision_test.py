@@ -30,16 +30,16 @@ boxB = box_3D((0.8, 1., 1.2), (0.0, 0.0, 0.0, 0.0), (0,0,0), (0,0,0), 1000, 10, 
 #Ref and contact dot prod:  0.8545119413843618
 
 # wrong way
-#boxA = box_3D((0.5, 0.4, 0), (0.5, 0.4, 0.4, 0.7), (0,0,0), (0,0,0), 1000, 10, (1,1,2), static=False)
-#boxB = box_3D((0.2, 0, 1), (0.06, 0.4, 0.8, 0.5), (0,0,0), (0,0,0), 1000, 10, (1,2,1), static=False)
+boxA = box_3D((0.5, 0.4, 0), (0.5, 0.4, 0.4, 0.7), (0,0,0), (0,0,0), 1000, 10, (1,1,2), static=False)
+boxB = box_3D((0.2, 0, 1), (0.06, 0.4, 0.8, 0.5), (0,0,0), (0,0,0), 1000, 10, (1,2,1), static=False)
 #Best axis:  [ 0.24084764  0.58595004 -0.77372796] ('EE', 2, 0)
 #Contact normal:  [ 0.24084764  0.58595004 -0.77372796]
 #Reference normal sign:  1.0
 # No flip
 
 # wrong way
-boxA = box_3D((0.1, 0.5, 1), (0.12, 0.4, 0.7, 0.7), (0,0,0), (0,0,0), 1000, 10, (2,1,2), static=False)
-boxB = box_3D((0.2, 2, 2), (0.06, 0.04, 0.30, 0.5), (0,0,0), (0,0,0), 1000, 10, (1,2,1), static=False)
+#boxA = box_3D((0.1, 0.5, 1), (0.12, 0.4, 0.7, 0.7), (0,0,0), (0,0,0), 1000, 10, (2,1,2), static=False)
+#boxB = box_3D((0.2, 2, 2), (0.06, 0.04, 0.30, 0.5), (0,0,0), (0,0,0), 1000, 10, (1,2,1), static=False)
 #Best axis:  [0.22016222 0.85515643 0.46929316] ('FA', 2)
 #Contact normal:  [-0.22016222 -0.85515643 -0.46929316]
 #Reference normal sign:  -1.0
@@ -66,6 +66,10 @@ sat_result, overlap, label = collisions._sat_and_overlap(broad1, broad2)
 # print("Num candidates: ", len(candidates),"\nCandidates: ", candidates)
 
 #contacts, clip = collisions._build_box_box_manifold(broad1, broad2, sat_result, overlap)
+
+
+boxA.body_id = 1
+boxB.body_id = 2
 contact_list, clipped_poly, ref_face, ref_axis, inc_face, inc_axis, contact_normal, contact_pts, depths = collisions._build_contact_manifold(boxA, boxB, sat_result, overlap,debug=True)
 
 # print("Num contacts: ", len(contacts))
