@@ -232,14 +232,14 @@ class Solver:
                 if b.static:
                     continue
                 # Build inertial Hessian & residual in the correct dimensionality
-                mI3 = b.mass * np.eye(3)
-                Iw  = b.I_world()        # world-frame inertia
-                M   = np.block([[mI3, np.zeros((3,3))],
-                                [np.zeros((3,3)), Iw]])  # (6,6)
-                e6 = b.delta_twist_from(b.inertial_pos)
+                # mI3 = b.mass * np.eye(3)
+                # Iw  = b.I_world()        # world-frame inertia
+                # M   = np.block([[mI3, np.zeros((3,3))],
+                #                 [np.zeros((3,3)), Iw]])  # (6,6)
 
+                M = b.mass_mat
+                e6 = b.delta_twist_from(b.inertial_pos)
                 force = -(M / (dt*dt)) @ e6
-                #print(f"Force: {force}")
                 hessian = M / (dt*dt)
 
                 for con in self._all_constraints:

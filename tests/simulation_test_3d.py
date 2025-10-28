@@ -101,7 +101,7 @@ def make_world_3d():
     solver = Solver(dt=1/60, num_iterations=15, gravity=-9.81)
     solver.mu = 0.3
     solver.post_stabilize = True
-    solver.beta = 1000
+    solver.beta = 10000
     solver.alpha = 0.95
     solver.gamma = 0.99
     solver.debug_contacts = False
@@ -139,7 +139,7 @@ def make_world_3d():
         static=False
     )
     cube3 = box_3D(
-        trans_pos=(0.0, 8.0, 0.0),
+        trans_pos=(0.5, 8.0, 0.0),
         quat_pos=(1.0, 0.0, 0.0, 0.0),
         linear_vel=(0.0, 0.0, 0.0),
         ang_vel=(0.0, 0.0, 0.0),
@@ -162,7 +162,7 @@ def build_actor_for_body(plotter: pv.Plotter, body, color=None):
         w, h, d = body.size
         mesh = pv.Cube(center=(0, 0, 0), x_length=w, y_length=h, z_length=d)
         actor = plotter.add_mesh(mesh, color=(color or "royalblue"),
-                                 smooth_shading=True, show_edges=False, opacity=0.8)
+                                 smooth_shading=True, show_edges=False, opacity=0.9)
         def update():
             R = rot_from_axes(body.get_axes())
             t = body.position[:3] if body.position.shape[0] >= 3 else body.pos

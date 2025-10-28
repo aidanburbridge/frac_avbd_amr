@@ -333,12 +333,18 @@ class box_3D(CollidableShape):
                 0.0 if Iyy <= 0 else 1.0/Iyy,
                 0.0 if Izz <= 0 else 1.0/Izz
             ])
+            # Build inertial Hessian & residual in the correct dimensionality
+            mI3 = self.mass * np.eye(3)
+            Iw  = self.I_world()        # world-frame inertia
+            self.mass_mat   = np.block([[mI3, np.zeros((3,3))],
+                            [np.zeros((3,3)), Iw]])  # (6,6)
         else:
             self.mass = float('inf')
             self.inv_mass = 0.0
             self.inertia = np.diag([np.inf, np.inf, np.inf])
             self.inv_inertia = np.zeros((3,3), dtype=float)
-            
+
+                    
     def rotmat(self) -> np.ndarray:
         """ Return 3x3 rotation matrix from the box's quaternion. """
         return quat_to_rotmat(self.position[3:])
