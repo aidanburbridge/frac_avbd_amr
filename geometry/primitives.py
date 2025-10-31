@@ -408,7 +408,7 @@ class box_3D(CollidableShape):
         6D delta from pose7_source to *current* pose:
           d = [ x - x_src ; log( q ⊗ conj(q_src) ) ]  (world frame)
         """
-        dx  = self.position[:3] - np.asarray(pose7_source[:3], dtype=float)
+        dx  = self.position[:3] - np.asarray(pose7_source[:3], dtype=float) # translational
         q   = quat_normalize(self.position[3:])
         qs  = quat_normalize(np.asarray(pose7_source[3:],dtype=float))
         qs  = self._closest_hemisphere(q, qs)

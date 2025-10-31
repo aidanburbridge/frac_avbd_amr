@@ -4,9 +4,10 @@ import numpy as np
 
 # Project imports (your current layout)
 from geometry.primitives import rect_2D, box_3D
-from solver.solver import Solver
-from solver.collisions import Contact
+from solver.solver_3 import Solver
 from solver.constraints import ContactConstraint
+
+from util.time_profiler import PhaseProfiler
 
 # Third-party
 import pyvista as pv
@@ -94,6 +95,8 @@ def set_actor_pose(actor: vtk.vtkActor, R: np.ndarray, t: np.ndarray):
 
 # ---------- scene construction ----------
 
+phase_prof2 = PhaseProfiler()
+
 def make_world_3d():
     """
     Build a small 3D scene: ground + a couple of cubes.
@@ -116,8 +119,6 @@ def make_world_3d():
         size=(10.0, 1.0, 10.0),
         static=True
     )
-
-
     cube1 = box_3D(
         trans_pos=(4.0, 1.0, 0.0),
         quat_pos=(.1, 0.2, 0.3, 0.5),
@@ -162,7 +163,7 @@ def build_actor_for_body(plotter: pv.Plotter, body, color=None):
         w, h, d = body.size
         mesh = pv.Cube(center=(0, 0, 0), x_length=w, y_length=h, z_length=d)
         actor = plotter.add_mesh(mesh, color=(color or "royalblue"),
-                                 smooth_shading=True, show_edges=False, opacity=0.9)
+                                 smooth_shading=True, show_edges=False, opacity=1)
         def update():
             R = rot_from_axes(body.get_axes())
             t = body.position[:3] if body.position.shape[0] >= 3 else body.pos
@@ -280,7 +281,7 @@ def run_realtime():
     last = time.perf_counter()
     frames = 0
 
-    update_interval = 3
+    update_interval = 2 # TODO fix update interval 1 causing a crash!!
     iter_count = 0
 
     while window_is_open(plotter):

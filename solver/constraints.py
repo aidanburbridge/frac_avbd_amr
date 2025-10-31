@@ -14,13 +14,13 @@ class Constraint(ABC):
             A DistanceConstraint will have 1 row - enforces rest distance.
     """
     def __init__(self, A: Body, B: Body, rows: int):            # Where A and B are bodies that have some sort of contraint between the two
-        self.A = A
-        self.B = B
+        self.bodyA = A
+        self.bodyB = B
         self._rows = int(rows)
         
         # Infer per-body generalized-velocity DOFs from velocity vectors
-        dofA = int(self.A.velocity.shape[0]) if self.A is not None else 0
-        dofB = int(self.B.velocity.shape[0]) if self.B is not None else 0
+        dofA = int(self.bodyA.velocity.shape[0]) if self.bodyA is not None else 0
+        dofB = int(self.bodyB.velocity.shape[0]) if self.bodyB is not None else 0
 
         # Jacobians for each body
         self.JA = np.zeros((rows, dofA))                        # Jacobian rows for A
@@ -135,8 +135,8 @@ class ContactConstraint(Constraint):
 
     def initialize(self) -> bool:                               # Use frame-start positions (q0) to build lever arms and C0.
 
-        A = self.A
-        B = self.B
+        A = self.bodyA
+        B = self.bodyB
 
         dim = A.get_dim()
         rows = self.rows()
@@ -174,11 +174,11 @@ class ContactConstraint(Constraint):
         # delta0 = (A.position[:dim] + rA0) + (B.position[:dim] + rB0)
         # C0[0] = float(np.dot(self.n, delta0)) + self.COLLISION_MARGIN
 
-        # pA0 = A.position[:dim] + rA0
-        # pB0 = B.position[:dim] - rB0
+        pA0 = A.position[:dim] + rA0
+        pB0 = B.position[:dim] + rB0
 
-        pA0 = A.initial_pos[:dim] + rA0
-        pB0 = B.initial_pos[:dim] + rB0
+        #pA0 = A.initial_pos[:dim] + rA0
+        #pB0 = B.initial_pos[:dim] + rB0
 
         # For debugging
         self.point_list.extend([pA0, pB0])
@@ -198,14 +198,12 @@ class ContactConstraint(Constraint):
 
     def compute_constraint(self, alpha: float) -> None:
         assert self._cache is not None
-        A = self.A
-        B = self.B
+        A = self.bodyA
+        B = self.bodyB
 
         dA = A.delta_twist_from(A.initial_pos) if A is not None else 0.0
         dB = B.delta_twist_from(B.initial_pos) if B is not None else 0.0
         self.C[:] = (1.0 - alpha) * self._cache.C0 + (self._cache.JA @ dA if np.ndim(dA) else 0.0) + (self._cache.JB @ dB if np.ndim(dB) else 0.0)
-
-        #print(f"\nSelf._cache.C0: {self._cache.C0[0]} \t Self.C: {self.C[0]} \n Jacobian A: {self._cache.JA[0][:3]} \n Jacobian B: {self._cache.JB[0][:3]}")
 
         # friction cones
         lam_n_mag = max(self.lambda_[0], 0.0)
@@ -218,9 +216,9 @@ class ContactConstraint(Constraint):
 
     def compute_derivatives(self, body: Body) -> None:
         assert self._cache is not None
-        if body is self.A:
+        if body is self.bodyA:
             self.JA[:, :] = self._cache.JA
-        elif body is self.B:
+        elif body is self.bodyB:
             self.JB[:, :] = self._cache.JB
         else:
             # Unrelated body: do not modify Jacobians

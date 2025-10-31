@@ -48,7 +48,7 @@ class Solver:
 
         ignore_ids = set()
         for p_con in self.persistent_constraints:
-            pair = tuple(sorted((id(p_con.A), id(p_con.B))))
+            pair = tuple(sorted((id(p_con.bodyA), id(p_con.bodyB))))
             ignore_ids.add(pair)
             
         # Find contacts with broad phase + narrow phase
@@ -130,10 +130,10 @@ class Solver:
         # Build incidence map for efficient lookup when looping through constraints later
         self._incidence_map = {id(b): [] for b in self.bodies}
         for con in self._all_constraints:
-            if con.A:                
-                self._incidence_map[id(con.A)].append(con)
-            if con.B:
-                self._incidence_map[id(con.B)].append(con)
+            if con.bodyA:                
+                self._incidence_map[id(con.bodyA)].append(con)
+            if con.bodyB:
+                self._incidence_map[id(con.bodyB)].append(con)
 
         # Warm start
         for con in self._all_constraints:

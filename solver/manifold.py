@@ -16,8 +16,8 @@ class Manifold():
     """
 
     def __init__(self, A: Body, B: Body):
-        self.A = A
-        self.B = B
+        self.bodyA = A
+        self.bodyB = B
 
         self.constraint_dict = {}    # dictionary of { (p_key, n_key), ContactConstraint }
         self.separation_frames = {}                  # dictionary of { (p_key, n_key), int }
@@ -94,8 +94,8 @@ class Manifold():
     def _aabb_overlap(self) -> bool:
         """Conservative test using AABBs to quickly detect clear separation."""
         try:
-            a = self.A.get_aabb()
-            b = self.B.get_aabb()
+            a = self.bodyA.get_aabb()
+            b = self.bodyB.get_aabb()
         except Exception:
             return True
 

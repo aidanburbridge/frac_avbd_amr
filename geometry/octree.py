@@ -309,8 +309,8 @@ def instantiate_boxes_from_tree(
         pos = tuple(lf.center(origin, h_base))    # cube center
 
         b = box_3D(
-            pos=pos,
-            quat=quat_id,
+            trans_pos=pos,
+            quat_pos=quat_id,
             linear_vel=zero_vel,
             ang_vel=zero_vel,
             density=float(density),
