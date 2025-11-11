@@ -192,10 +192,16 @@ def main():
     
     print(f"\nNum contacts: {len(contact_list)}")
 
+    print(f"Initial box body id A: {boxA}, body B: {boxB}")
+
     for c in const_list:
         jA = c.JA
         jB = c.JB
         pA, pB = c.point_list
+        bodyA = c.bodyA
+        bodyB = c.bodyB
+        print(f"Constraint body id A: {bodyA}, body B: {bodyB}")
+
         print(f"\njA: \t{jA[0][:3]}\njB: \t{jB[0][:3]}\npA: \t{pA}\npB: \t{pB}\ndepth: \t{c.depth}")
         # A
         color_vectors(plotter, pA, jA[0][:3], c.depth, arrow_color="blue")
@@ -216,14 +222,6 @@ def main():
     for con in coll_contacts:
         print(f"\t Pair ({id(con.bodyA)%1000}, {id(con.bodyB)%1000}), point: {con.point.round(3)}, normal: {con.normal.round(3)}, depth: {con.depth.round(3)}")
 
-
-
-
-    candidate_ax_arr = []
-    # for candidate_axis, _ in candidates:
-    #     candidate_ax_arr.append(candidate_axis)
-    # color_axes(plotter, candidate_ax_arr, axis_color="yellow")
-    # color_axes(plotter, np.asarray([sat_result]), axis_color="red")
 
     plotter.camera_position = "iso"
     plotter.enable_parallel_projection()  # Enable orthographic (parallel) projection

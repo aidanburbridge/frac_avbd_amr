@@ -146,8 +146,8 @@ def quat_log(q: np.ndarray) -> np.ndarray:
         return np.zeros(3, dtype=float)
     return (angle / (nv + 1e-12)) * v
 
-# -------------------- Body base classes -------------------- #
 
+# -------------------- Body base classes -------------------- #
 class Body:
     def __init__(self, position, velocity, density:float, stiffness:float, static:bool=False):
 
@@ -173,6 +173,7 @@ class Body:
         self.initial_pos = self.position.copy()
         self.prev_vel = self.velocity.copy()
         self.body_id: int = None
+        self.assembly_id: int = None
 
         # Inertial or "y" in paper
         self.inertial_pos = np.zeros_like(self.position)
@@ -184,6 +185,15 @@ class CollidableShape(Body, ABC):
     """
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
+        self.collidable = True
+
+    def set_static(self) -> None:
+        self.static = True
+        self.mass = float('inf')
+        self.inv_mass = 0.0
+        self.inertia = float('inf')
+        self.inv_inertia = 0.0
 
     @abstractmethod
     def get_corners(self) -> np.array:
@@ -204,6 +214,7 @@ class CollidableShape(Body, ABC):
     def get_dim(self) -> int:
         """ Returns the number of dimensions for the bodies. """
         pass
+
 
 # -------------------- 2D rectangle -------------------- #
     
@@ -357,8 +368,12 @@ class box_3D(CollidableShape):
         """ Returns the rotmat in rows/axes for the SAT function reusability. """
         return self.rotmat().T
     
+    def get_center(self) -> np.ndarray:
+        """ Returns the center of the box. """
+        return self.position[:3]
+        
     def get_corners(self) -> np.ndarray:
-        """ Compute and return the 8 corners via half-extents + cube center. """
+        """ Compute and return the 8 corners via half-extents + box center. """
 
         w, h, d = self.size
         half_extents = np.array([w/2, h/2, d/2], dtype=float)

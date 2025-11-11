@@ -3,6 +3,9 @@ import numpy as np
 from dataclasses import dataclass
 from geometry.primitives import Body, CollidableShape, AABB_ND
 
+# TODO - to avoid collisions between voxels of the same body, when generating collisions, check if the voxels are from the same body
+# OR maybe don't check on the voxel level - maybe need to look up BVH stuff, but definitely don't do collisions between voxels of same body
+
 ### -------------------------- Tolerances -------------------------- ###
 
 _AXIS_TOL = 1e-12                                                # axis/cross tolerance
@@ -37,6 +40,9 @@ def broad_phase(bodies: list[CollidableShape], ignore_ids: set[tuple[int, int]])
     endpoints: list[Endpoint] = []                              # List of the start and end of the AABBs in the x-axis
     dim: int = bodies[0].get_dim()                              # Check dimension of boides
 
+    # Remove non-collidable bodies first
+    bodies = [b for b in bodies if b.collidable == True]
+
     aabbs: dict[CollidableShape, AABB_ND] = {body: body.get_aabb() for body in bodies} # Precaclulate aabbs
 
     for body in bodies:
@@ -53,8 +59,14 @@ def broad_phase(bodies: list[CollidableShape], ignore_ids: set[tuple[int, int]])
     for endpoint in endpoints:                                  # Sweep through the sorted list and form overlapping pairs, checks if they both contain same x value, then add to list if y vlaue also has overlap
         if endpoint.is_min:                                     # when we encounter a new body while cycling through sorted endpoints we then want to compare y values
             for other_body in active_list:                      # By definition these bpdies overlap on x
-                # aabb1 = endpoint.body.get_aabb()
-                # aabb2 = other_body.get_aabb()
+
+                # Skip collisions only for bodies explicitly marked as the same assembly.
+                # If assembly_id is unset (None), do NOT skip — otherwise everything compares equal.
+                if (endpoint.body.assembly_id is not None and
+                    other_body.assembly_id is not None and
+                    endpoint.body.assembly_id == other_body.assembly_id):
+                    continue
+
                 aabb1 = aabbs[endpoint.body]
                 aabb2 = aabbs[other_body]
 

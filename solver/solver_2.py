@@ -302,6 +302,8 @@ class Solver:
                             else:
                                 con.penalty_k[r] = min(con.stiffness[r], con.penalty_k[r] + self.beta * abs(con.C[r]))
 
+                        con.update_bounds()
+
 
             if num_it == self.iterations - 1:
                 for b in self.bodies:

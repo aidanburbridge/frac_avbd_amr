@@ -26,21 +26,6 @@ def try_enable_msaa(plotter: pv.Plotter):
         except Exception:
             pass
 
-def add_floor_compat(plotter: pv.Plotter):
-    """
-    Older PyVista can't use add_floor(origin=...). Build a plane instead.
-    Newer builds may have Plotter.add_floor without 'origin'.
-    """
-    # Try native add_floor with minimal args
-    try:
-        # Many versions accept just sizes/resolution, origin is optional/absent.
-        return plotter.add_floor(i_size=40, j_size=40, i_resolution=20, j_resolution=20)
-    except TypeError:
-        # Fallback: a light gray plane on the XZ plane (normal +Y)
-        floor = pv.Plane(center=(0, 0, 0), direction=(0, 1, 0),
-                         i_size=40, j_size=40, i_resolution=20, j_resolution=20)
-        return plotter.add_mesh(floor, color="#eaeaea", show_edges=False)
-
 def start_interactive_compat(plotter: pv.Plotter):
     """
     Old PyVista: no plotter.is_active; drive the window with interactive_update=True.
@@ -116,13 +101,13 @@ def make_world_3d():
         ang_vel=(0.0, 0.0, 0.0),
         density=100.0,
         penalty_gain=1e6,
-        size=(10.0, 1.0, 10.0),
+        size=(20.0, .50, 20.0),
         static=True
     )
     cube1 = box_3D(
-        trans_pos=(4.0, 1.0, 0.0),
+        trans_pos=(3.0, 1.0, 0.0),
         quat_pos=(.1, 0.2, 0.3, 0.5),
-        linear_vel=(0.5, 0.0, 0.0),
+        linear_vel=(0., 0.0, 0.0),
         ang_vel=(0.0, 0.0, 0.0),
         density=100.0,
         penalty_gain=1e5,
@@ -130,7 +115,7 @@ def make_world_3d():
         static=False
     )
     cube2 = box_3D(
-        trans_pos=(0.0, 4.0, 0.0),
+        trans_pos=(0.0, 3.0, 0.0),
         quat_pos=(1.0, 0.0, 0.0, 0.0),
         linear_vel=(0.0, 0.0, 0.0),
         ang_vel=(0.0, 0.0, 0.0),
@@ -149,11 +134,21 @@ def make_world_3d():
         size=(1.0, 1.0, 1.0),
         static=False
     )
+    cube4 = box_3D(
+        trans_pos=(0., 4, .1),
+        quat_pos=(1.0, 0.0, 0.0, 0.0),
+        linear_vel=(0, 5, 0),
+        ang_vel=(0.0, 0.0, 0.0),
+        density=100.0,
+        penalty_gain=1e5,
+        size=(1.0, 1.0, 1.0),
+        static=False
+    )
 
-    for b in (ground, cube1, cube2, cube3):
+    for b in (ground, cube1, cube2, cube3, cube4):
         solver.add_body(b)
 
-    return solver, [ground, cube1, cube2, cube3]
+    return solver, [ground, cube1, cube2, cube3, cube4]
 
 def build_actor_for_body(plotter: pv.Plotter, body, color=None):
     """

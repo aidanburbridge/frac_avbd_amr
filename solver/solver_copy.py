@@ -7,6 +7,7 @@ from .manifold import Manifold
 from collections import defaultdict
 from util.time_profiler import PhaseProfiler
 
+
 class Solver:
     def __init__(self, dt, num_iterations, gravity=-9.81):
 
@@ -111,14 +112,8 @@ class Solver:
         self.contact_constraints = [con
                                     for mf in self.manifolds.values()
                                     for con in mf.constraints]
-    
-    def add_persistent_constraints(self, constraints: list[Constraint]):
-        self.persistent_constraints.extend(constraints)
-                
+        
     def step(self):
-
-        if self.bodies is None:
-            raise RuntimeError("No bodies have been added to the simulation!")
 
         dt = self.dt
         dof = self.dof
@@ -126,6 +121,8 @@ class Solver:
         # For multiplication and not division
         inv_dt = 1.0 / dt
         inv_dt2 = 1.0 / (dt * dt)
+
+        loop_amt = 0
         
         # Set intertial state and guess position for faster solve
         for b in self.bodies:
@@ -164,16 +161,15 @@ class Solver:
                 #print(f"\nConstraints for body {con.A.body_id} and body {con.B.body_id}:")
                 for r in range(con.rows()):
                     if self.post_stabilize:
-                        con.penalty_k[r] = np.clip(self.gamma * con.penalty_k[r], con.k_min[r], con.k_max[r])
+                        con.penalty_k[r] = np.clip(self.gamma * con.penalty_k[r], 1.0, con.k_max[r])
                     else:
-                        #if con.is_hard[r]:
-                        con.lambda_[r]   = con.lambda_[r] * self.alpha * self.gamma
-                        con.penalty_k[r] = np.clip(self.gamma * con.penalty_k[r], con.k_min[r], con.k_max[r])
+                        if con.is_hard[r]:
+                            con.lambda_[r]   = con.lambda_[r] * self.alpha * self.gamma
+                        con.penalty_k[r] = np.clip(self.gamma * con.penalty_k[r], 1.0, con.k_max[r])
 
                     # Cap penalty by material stiffness for *non-hard* rows
                     if not con.is_hard[r]:
                         con.penalty_k[r] = min(con.penalty_k[r], con.stiffness[r])
-                       # print("Penalty value: ", con.penalty_k[0], "Stiffness: ", con.stiffness[0])
 
                 # Build incidence map #
 
@@ -205,11 +201,34 @@ class Solver:
             if self.post_stabilize:
                 current_alpha = 1.0 if num_it < self.iterations else 0.0
 
-            # with self.prof.phase("compute constraints"):
-            #     for c in self._all_constraints: # TODO can I clean this back up and put in constraints.py
-            #         c.compute_constraint(current_alpha)
-            #         c.compute_derivatives(c.bodyA)
-            #         c.compute_derivatives(c.bodyB)
+            with self.prof.phase("compute constraints"):
+                # Phase-local body deltas (positions are from inertial guess at this point)
+                body_deltas = {}
+                for b in self.bodies:
+                    try:
+                        body_deltas[int(b.body_id)] = b.delta_twist_from(b.initial_pos)
+                    except Exception:
+                        body_deltas[int(b.body_id)] = 0.0
+                # Compute C using cached JA/JB when available and update friction bounds
+                for c in self._all_constraints:
+                    if hasattr(c, "_cache") and c._cache is not None:
+                        da = body_deltas.get(int(c.bodyA.body_id), 0.0) if c.bodyA is not None else 0.0
+                        db = body_deltas.get(int(c.bodyB.body_id), 0.0) if c.bodyB is not None else 0.0
+                        C = (1.0 - current_alpha) * c._cache.C0
+                        if np.ndim(da):
+                            C = C + (c._cache.JA @ da)
+                        if np.ndim(db):
+                            C = C + (c._cache.JB @ db)
+                        c.C[:] = C
+                        # friction cones based on current normal lambda (match ContactConstraint semantics)
+                        if c.rows() > 1:
+                            lam_n_mag = max(c.lambda_[0], 0.0)
+                            mu = float(getattr(c, "friction", 0.0))
+                            c.fmax[1:] =  mu * lam_n_mag
+                            c.fmin[1:] = -mu * lam_n_mag
+                    else:
+                        # Fallback for non-contact constraints
+                        c.compute_constraint(current_alpha)
 
             with self.prof.phase("main solve"):
                 for b in self.bodies:
@@ -231,17 +250,23 @@ class Solver:
                             k_list = []
                             fadd_list = []
                             for con in cons_for_body:
-                                # Refresh residuals and derivatives against the latest pose
-                                con.compute_constraint(current_alpha)
-                                con.compute_derivatives(b)
-                                if hasattr(con, "update_bounds"):
-                                    con.update_bounds()
-                                if con.bodyA is b:
-                                    J = con.JA
-                                elif con.bodyB is b:
-                                    J = con.JB
+                                # Select the Jacobian for this body without copying
+                                if hasattr(con, "_cache") and con._cache is not None:
+                                    if con.bodyA is b or int(con.bodyA.body_id) == int(b.body_id):
+                                        J = con._cache.JA
+                                    elif con.bodyB is b or int(con.bodyB.body_id) == int(b.body_id):
+                                        J = con._cache.JB
+                                    else:
+                                        continue
                                 else:
-                                    continue
+                                    # Fallback: compute derivatives (may copy)
+                                    con.compute_derivatives(b)
+                                    if con.bodyA is b:
+                                        J = con.JA
+                                    elif con.bodyB is b:
+                                        J = con.JB
+                                    else:
+                                        continue
                                 rows = con.rows()
                                 if rows <= 0:
                                     continue
@@ -273,41 +298,65 @@ class Solver:
                     with self.prof.phase("lin alg solve"):
                         try:
                             delta = np.linalg.solve(hessian, force)
+                        # print(f"Positional delta: {delta[:3]}\tCurrent position: {b.position[:3]}")
                             dx = delta[:3]
                             dth = delta[3:]
                             b.position[:3] += dx
                             dq = quat_from_rotvec(dth)
                             b.position[3:] = quat_mult(dq, b.position[3:])
+
+                            # print(f"[Iteration: {num_it}]\tbody {id(b)%1000}\t||rhs||: {np.linalg.norm(rhs):.3e} "
+                            #       f"\tcond(lhs): {np.linalg.cond(lhs):.2e}\t||delta_x||: {np.linalg.norm(dx):.3e}"
+                            #       f"\t||delta_rot||: {np.linalg.norm(dth)}\tbeta: {self.beta}")
                             
                         except np.linalg.LinAlgError:
                             eps = 1e-9
                             hessian = hessian + eps*np.eye(hessian.shape[0])
                             delta = np.linalg.solve(hessian, force)
+                            # print("Warning: Linear solve failed. LHS may be singular or ill-conditioned.")
 
             with self.prof.phase("dual update"):
                 # Dual update (skip on the extra post-stabilization pass)
                 if num_it < self.iterations:
-
+                    # Recompute body deltas with updated positions
+                    body_deltas = {}
+                    for b in self.bodies:
+                        try:
+                            body_deltas[int(b.body_id)] = b.delta_twist_from(b.initial_pos)
+                        except Exception:
+                            body_deltas[int(b.body_id)] = 0.0
                     for con in self._all_constraints:
-                        con.compute_constraint(current_alpha)
+                        # Refresh C quickly using cached J
+                        if hasattr(con, "_cache") and con._cache is not None:
+                            da = body_deltas.get(int(con.bodyA.body_id), 0.0) if con.bodyA is not None else 0.0
+                            db = body_deltas.get(int(con.bodyB.body_id), 0.0) if con.bodyB is not None else 0.0
+                            C = (1.0 - current_alpha) * con._cache.C0
+                            if np.ndim(da):
+                                C = C + (con._cache.JA @ da)
+                            if np.ndim(db):
+                                C = C + (con._cache.JB @ db)
+                            con.C[:] = C
+                        else:
+                            con.compute_constraint(current_alpha)
+                        # Vectorized lambda/penalty updates
                         hard = con.is_hard
                         if np.any(hard):
                             lam_new = clamp(con.penalty_k * con.C + con.lambda_, con.fmin, con.fmax)
+                            # assign only hard rows
                             con.lambda_[hard] = lam_new[hard]
-
-                            inside_bounds = hard & (con.lambda_ > con.fmin) & (con.lambda_ < con.fmax)
-                            if np.any(inside_bounds):
-                                con.penalty_k[inside_bounds] = np.minimum(con.k_max[inside_bounds], con.penalty_k[inside_bounds] + self.beta * np.abs(con.C[inside_bounds]))
-                        
+                            # interior rows (strictly within bounds)
+                            interior = (con.lambda_ > con.fmin + 1e-12) & (con.lambda_ < con.fmax - 1e-12) & hard
+                            if np.any(interior):
+                                con.penalty_k[interior] = con.penalty_k[interior] + self.beta * np.abs(con.C[interior])
                         soft = ~hard
                         if np.any(soft):
-                            con.penalty_k[soft] = np.minimum(
-                                np.minimum(con.k_max[soft], con.stiffness[soft]),
-                                con.penalty_k[soft] + self.beta * np.abs(con.C[soft])
-                                )
-                            #print("penalty: ",con.penalty_k[soft],"  const: ", con.C[soft])
-                        if hasattr(con, "update_bounds"):
-                            con.update_bounds()
+                            con.penalty_k[soft] = np.minimum(con.stiffness[soft], con.penalty_k[soft] + self.beta * np.abs(con.C[soft]))
+                        # Update friction bounds once from updated normal lambda
+                        if con.rows() > 1:
+                            lam_n_mag = max(con.lambda_[0], 0.0)
+                            mu = float(getattr(con, "friction", 0.0))
+                            con.fmax[1:] =  mu * lam_n_mag
+                            con.fmin[1:] = -mu * lam_n_mag
 
             if num_it == self.iterations - 1:
                 for b in self.bodies:
@@ -326,6 +375,10 @@ class Solver:
             print(self.prof.report())
             self.prof.reset()
         self._frame_id += 1
+
+        #print("Num loops: ", loop_amt) # 960 -> 192
+        #self._write_contact_cache_post_solve()
+
 
 
 ### HELPERS ###

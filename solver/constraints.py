@@ -1,7 +1,7 @@
 # CONSTRAINTS
 import numpy as np
 from dataclasses import dataclass
-from geometry.primitives import Body
+from geometry.primitives import Body, box_face_vectors
 from abc import ABC, abstractmethod
 
 
@@ -19,20 +19,20 @@ class Constraint(ABC):
         self._rows = int(rows)
         
         # Infer per-body generalized-velocity DOFs from velocity vectors
-        dofA = int(self.bodyA.velocity.shape[0]) if self.bodyA is not None else 0
-        dofB = int(self.bodyB.velocity.shape[0]) if self.bodyB is not None else 0
+        self.dof = int(self.bodyA.velocity.shape[0]) if self.bodyA is not None else 0
 
         # Jacobians for each body
-        self.JA = np.zeros((rows, dofA))                        # Jacobian rows for A
-        self.JB = np.zeros((rows, dofB))                        # Jacobian rows for B
+        self.JA = np.zeros((rows, self.dof))                        # Jacobian rows for A
+        self.JB = np.zeros((rows, self.dof))                        # Jacobian rows for B
 
-        self.HA = np.zeros((rows, dofA, dofA))
-        self.HB = np.zeros((rows, dofB, dofB))
+        self.HA = np.zeros((rows, self.dof, self.dof))
+        self.HB = np.zeros((rows, self.dof, self.dof))
         self.C  = np.zeros(rows)                                # Constraint function value
 
         self.lambda_ = np.zeros(rows)                           # Lambda
-        self.penalty_k = np.ones(rows) * 1.0                    # k_solver
-        self.k_max = np.ones(rows) * 1e6                        # Set cap to avoid crazy ratio
+        self.penalty_k = np.zeros(rows)                         # k_solver
+        self.k_min = np.ones(rows) * 1.0                        # small positive floor
+        self.k_max = np.ones(rows) * 1e9                        # Set cap to avoid crazy ratio
         self.stiffness = np.ones(rows) * np.inf
         self.fracture = np.ones(rows) * np.inf
 
@@ -96,7 +96,6 @@ class Constraint(ABC):
             self.stiffness[np.asarray(rows)] = float(k)
 
 ### -------------------- Contact Constraint -------------------- ###
-
 @dataclass
 class _ContactFrameCache:
     """ Caches sized by DOF and row count. """
@@ -125,7 +124,7 @@ class ContactConstraint(Constraint):
         #self.fmax[0] = 0.0
         self.fmin[0] = 0.0
         self.n = contact.normal.astype(float)
-        self.tangets = _orthonormal_tangent_basis(self.n)       # Get tangents from normal
+        self.tangents = _orthonormal_tangent_basis(self.n)       # Get tangents from normal
 
         self._cache: _ContactFrameCache | None = None
 
@@ -141,56 +140,46 @@ class ContactConstraint(Constraint):
         dim = A.get_dim()
         rows = self.rows()
 
-        pB = self.contact.point.astype(float)                   # Contact point on A
+        pA = self.contact.point.astype(float)                   # Contact point 
         depth = float(self.contact.depth)                       # Distance between contact points
         self.depth = depth
-        pA = pB - self.n * depth                                # Contact point on B derived from collision normal and depth
+        pB = pA - self.n * depth                                # Contact point on B derived from collision normal and depth
         
         rA0 = pA - A.initial_pos[:dim]
         rB0 = pB - B.initial_pos[:dim]
 
-
-        
         # Allocate caches with dim
-        dof_A = A.velocity.shape[0]
-        dof_B = B.velocity.shape[0]
         C0 = np.zeros(rows, dtype=float)
-        JA = np.zeros((rows, dof_A), dtype=float)
-        JB = np.zeros((rows, dof_B), dtype=float)
+        JA = np.zeros((rows, self.dof), dtype=float)
+        JB = np.zeros((rows, self.dof), dtype=float)
 
         # Row 0 of constraint: normal
         ang_A = np.cross(rA0, self.n)
         ang_B = np.cross(rB0, self.n)
-        JA[0, :dof_A] = np.hstack([ self.n,  ang_A])
-        JB[0, :dof_B] = np.hstack([-self.n, -ang_B])
+        JA[0, :self.dof] = np.hstack([ self.n,  ang_A])
+        JB[0, :self.dof] = np.hstack([-self.n, -ang_B])
 
         # Rows 1-2 of constraint: tangential (friction)
-        for k, t in enumerate(self.tangets, start=1):           # Start at 1 because row 0 is filled
+        for k, t in enumerate(self.tangents, start=1):           # Start at 1 because row 0 is filled
             ang_A = np.cross(rA0, t)
             ang_B = np.cross(rB0, t)
-            JA[k, :dof_A] = np.hstack([ t,  ang_A])
-            JB[k, :dof_B] = np.hstack([-t, -ang_B])
+            JA[k, :self.dof] = np.hstack([ t,  ang_A])
+            JB[k, :self.dof] = np.hstack([-t, -ang_B])
     
-        # delta0 = (A.position[:dim] + rA0) + (B.position[:dim] + rB0)
-        # C0[0] = float(np.dot(self.n, delta0)) + self.COLLISION_MARGIN
-
         pA0 = A.position[:dim] + rA0
         pB0 = B.position[:dim] + rB0
-
-        #pA0 = A.initial_pos[:dim] + rA0
-        #pB0 = B.initial_pos[:dim] + rB0
 
         # For debugging
         self.point_list.extend([pA0, pB0])
 
         # Define normal constraint so C > 0 when penetration exceeds margin
         # dot(n, pA0 - pB0) = -depth, so use depth - margin
-        C0[0] = float(-np.dot(self.n, (pA0 - pB0)) - self.COLLISION_MARGIN)
-        #print(f"depth: {depth}\t pA0 - pB0: {pA0-pB0}\t C0[0]: {C0[0]}")
-        # print(f"Normal vector: {self.n}")
-        #C0[0] = self.COLLISION_MARGIN - float(self.contact.depth)
-        
-        for k, t in enumerate(self.tangets, start=1):
+        #C0[0] = float(-np.dot(self.n, (pA0 - pB0)) - self.COLLISION_MARGIN)
+        C0[0] = float(np.dot(self.n, (pA0 - pB0)) - self.COLLISION_MARGIN)
+
+        #print(f"Pa - Pb: {pA0-pB0}, dot prod {np.dot(self.n, (pA0 - pB0))}, C0 {C0[0]}")
+
+        for k, t in enumerate(self.tangents, start=1):
             C0[k] = float(np.dot(t, (pA0 - pB0)))
 
         self._cache = _ContactFrameCache(C0=C0, JA=JA, JB=JB)
@@ -203,6 +192,7 @@ class ContactConstraint(Constraint):
 
         dA = A.delta_twist_from(A.initial_pos) if A is not None else 0.0
         dB = B.delta_twist_from(B.initial_pos) if B is not None else 0.0
+        
         self.C[:] = (1.0 - alpha) * self._cache.C0 + (self._cache.JA @ dA if np.ndim(dA) else 0.0) + (self._cache.JB @ dB if np.ndim(dB) else 0.0)
 
         # friction cones
@@ -226,7 +216,9 @@ class ContactConstraint(Constraint):
     
     def update_bounds(self):
         # Update friction bounds based on the current normal force lambda
-        lambda_mag = abs(self.lambda_[0])
+        #lambda_mag = abs(self.lambda_[0])
+        lambda_mag = max(self.lambda_[0], 0.0)
+
         for r in range(1, self.rows()):
             self.fmin[r] = -self.friction * lambda_mag
             self.fmax[r] =  self.friction * lambda_mag
@@ -236,6 +228,98 @@ class ContactConstraint(Constraint):
         self.lambda_[:m]   = other.lambda_[:m]
         self.penalty_k[:m] = other.penalty_k[:m]
 
+class FaceBondPoint(Constraint):
+    def __init__(self, A: Body, B: Body,
+                 pA_local: np.ndarray, pB_local: np.ndarray,
+                 normal: np.ndarray, k_n: float, k_t: float):
+        super().__init__(A, B, rows=3)
+
+        # bodies
+        self.bodyA = A
+        self.bodyB = B
+
+        # Local-space anchors (relative to body centers, in body frames)
+        self.pA_local = np.asarray(pA_local, dtype=float).reshape(3)
+        self.pB_local = np.asarray(pB_local, dtype=float).reshape(3)
+
+        # bond directions (defined in world space using current frame)
+        self.n = _normalize(normal)
+        self.t1, self.t2 = _orthonormal_tangent_basis(self.n)
+
+        # material properties - linear elastic per direction (n, t1, t2)
+        self.stiffness[:] = np.array([float(k_n), float(k_t), float(k_t)], dtype=float)
+
+        # per-row rest offsets along (n, t1, t2)
+        self.rest = np.zeros(3, dtype=float)
+        self._rest_initialized = False
+
+        # explicitly set force bounds as inf (unbounded linear springs)
+        self.fmax[:] = np.inf
+        self.fmin[:] = -np.inf
+
+        self._cache = None
+
+    def initialize(self):
+        """Spring-like init: set rest from current anchors; recompute JA/JB; reseed penalty."""
+        A, B = self.bodyA, self.bodyB
+
+        # Current world rotations and lever arms
+        RA = A.rotmat(); RB = B.rotmat()
+        rA = RA @ self.pA_local; rB = RB @ self.pB_local
+
+        # Current anchors and separation
+        pA = A.position[:3] + rA
+        pB = B.position[:3] + rB
+        dp = pA - pB
+
+        # Only capture the rest pose once so strain accumulates across frames
+        if not self._rest_initialized:
+            self.rest[0] = float(np.dot(self.n,  dp))
+            self.rest[1] = float(np.dot(self.t1, dp))
+            self.rest[2] = float(np.dot(self.t2, dp))
+            self._rest_initialized = True
+
+        # Build Jacobians from current lever arms
+        directions = (self.n, self.t1, self.t2)
+        for row, dir in enumerate(directions):
+            ang_A = np.cross(rA, dir)
+            ang_B = np.cross(rB, dir)
+            self.JA[row, :self.dof] = np.hstack([ dir,  ang_A])
+            self.JB[row, :self.dof] = np.hstack([-dir, -ang_B])
+
+        # Reseed solver penalty to material stiffness for bonds (prevents decay across frames)
+        self.penalty_k[:] = self.stiffness
+
+        # Do not create a cache so solver recomputes derivatives/constraints from current state
+        self._cache = None
+        return True
+
+    def compute_constraint(self, alpha: float):
+        """C = projection of current separation minus rest (ignores alpha like C++ spring)."""
+        A, B = self.bodyA, self.bodyB
+        RA = A.rotmat(); RB = B.rotmat()
+        rA = RA @ self.pA_local; rB = RB @ self.pB_local
+        pA = A.position[:3] + rA
+        pB = B.position[:3] + rB
+        dp = pA - pB
+        self.C[0] = float(np.dot(self.n,  dp) - self.rest[0])
+        self.C[1] = float(np.dot(self.t1, dp) - self.rest[1])
+        self.C[2] = float(np.dot(self.t2, dp) - self.rest[2])
+
+    def compute_derivatives(self, body: Body):
+        """Recompute J rows from current lever arms (C++ spring style)."""
+        A, B = self.bodyA, self.bodyB
+        RA = A.rotmat(); RB = B.rotmat()
+        rA = RA @ self.pA_local; rB = RB @ self.pB_local
+        directions = (self.n, self.t1, self.t2)
+        if body is self.bodyA:
+            for row, dir in enumerate(directions):
+                ang_A = np.cross(rA, dir)
+                self.JA[row, :self.dof] = np.hstack([dir, ang_A])
+        elif body is self.bodyB:
+            for row, dir in enumerate(directions):
+                ang_B = np.cross(rB, dir)
+                self.JB[row, :self.dof] = np.hstack([-dir, -ang_B])
 
 ### -------------------- Utils & Helpers -------------------- ###
 def clamp(x, lo, hi):
@@ -255,8 +339,82 @@ def _orthonormal_tangent_basis(n: np.ndarray) -> list[np.ndarray]:
     else: # 3D
         # Gram-Schmidt to guarantee 2 orthonormals exist for 3D
         a = np.array([1.0, 0.0, 0.0]) if abs(n[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
-        t1 = a - n * np.dot(n, a)
-        t1 /= (np.linalg.norm(t1) + 1e-12)
+        #t1 = a - n * np.dot(n, a)
+        t1 = np.cross(n, a)
+        t1 = _normalize(t1)
         t2 = np.cross(n, t1)
-        t2 /= (np.linalg.norm(t2) + 1e-12)
+        t2 = _normalize(t2)
         return [t1, t2]
+    
+def _normalize(v):
+    v = np.asarray(v, dtype=float)
+    n = np.linalg.norm(v)
+    if n == 0:
+        return v
+    return v / n
+
+def build_face_bonds(A: Body, B: Body, E: float, nu: float) -> list[FaceBondPoint]:
+    """
+    Create face bond constraints between two bodies for number of Guass points - (2x2 Guass points).
+    Works in local coordinates.
+    Returns a list of FaceBondPoint.
+    """
+
+    # Guass legendre polynomial points * half extents 
+    # could do this:
+    # 1) get A -> B vector with vec = B.center() - A.center()
+    # 2) find face on A between A and B with max(dot_prod(vec, box_face_centers(A)))
+    # 3) this will give me face center then add (half extents * xi) to center to get bond points
+
+    # Shear modulus
+    G = E / (2*(1+nu))
+
+    # hard code 2 guass points per direction
+    xi = 1.0 / np.sqrt(3)
+    w_share = 0.25
+    
+    vec = B.get_center() - A.get_center()
+    #print("Vec: ", vec)
+    ni = int(np.argmax(np.abs(vec)))            # axis of separation
+    #print("ax: ", ni)
+    sgn = 1.0 if vec[ni] >= 0.0 else -1.0
+    #print("sign: ", sgn)
+
+    # local half extents
+    hA = 0.5 * np.asarray(A.size, dtype=float)
+    hB = 0.5 * np.asarray(B.size, dtype=float)
+
+    # face normals in world aligned (initially); n points from A to B
+    n_world = np.zeros(3)
+    n_world[ni] = sgn
+
+    # choose tangential axes (two remaining indices)
+    tangential_axes = [i for i in range(3) if i != ni]
+    t1i, t2i = tangential_axes
+    #print("tangent axes: ", tangential_axes)
+
+    # effective area and thickness (for stiffness scaling)
+    area = (2*hA[t1i]) * (2*hA[t2i])
+
+    # thickness along normal direction
+    h_norm = (hA[ni] + hB[ni])  # for same sized voxels this is the same as the voxel width
+    k_n = E * area / max(h_norm, 1e-12)
+    k_t = G * area / max(h_norm, 1e-12)
+
+    bonds: list[FaceBondPoint] = []
+    for s1 in (-1.0, 1.0):
+        for s2 in (-1.0, 1.0):
+            pA_local = np.zeros(3)
+            pB_local = np.zeros(3)
+            # normals
+            pA_local[ni]    =  sgn * hA[ni]
+            pB_local[ni]    = -sgn * hB[ni]
+            # tangents
+            pA_local[t1i]   =   s1 * xi * hA[t1i]
+            pA_local[t2i]   =   s2 * xi * hA[t2i]
+            pB_local[t1i]   =   s1 * xi * hB[t1i]
+            pB_local[t2i]   =   s2 * xi * hB[t2i]
+
+            bonds.append(FaceBondPoint(A, B, pA_local, pB_local, n_world, k_n*w_share, k_t*w_share))
+
+    return bonds

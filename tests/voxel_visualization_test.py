@@ -7,8 +7,10 @@ from tqdm import trange
 
 # ---- CONFIG ----
 #STL_PATH = r"C:\Users\aidan\Documents\TUM\Thesis\CactusPot.stl"  # leave blank to autogen cube
-STL_PATH = r"C:\Users\aidan\Documents\TUM\Thesis\simple_plane.stl"
-TARGET_VOXELS = 10000     # approximate occupied voxels
+#STL_PATH = r"C:\Users\aidan\Documents\TUM\Thesis\simple_plane.stl"
+STL_PATH = r"C:\Users\aidan\Documents\TUM\Thesis\10x10x50_beam.stl"
+
+TARGET_VOXELS = 1000     # approximate occupied voxels
 VOXEL_H = None            # set a float to force fixed voxel size (edge length)
 PAD = 1                   # padding voxels around AABB
 FLOOD_FILL = True         # fill interior cavities

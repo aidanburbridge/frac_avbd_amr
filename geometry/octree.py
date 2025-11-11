@@ -4,25 +4,12 @@ from dataclasses import dataclass
 import numpy as np
 from typing import Optional
 from tqdm import trange
+from solver.constraints import FaceBondPoint, build_face_bonds
 
 # Project specific
 from geometry.primitives import box_3D, box_face_vectors
 
 ### -------------------- Data structures -------------------- ###
-@dataclass
-class Bond:
-    """ 
-    Connection between two voxel bodies.
-    Currently done across a shared face (6 connections per voxel).
-    """
-    bodyA_id : int
-    faceA: int
-    bodyB_id: int
-    area: float
-    length: float
-    kn: float
-    kt: float
-
 @dataclass(frozen=True)                                         # Freeze class so values can't change -> must make new leaves instead
 class Leaf:
     level: int
@@ -196,7 +183,6 @@ def octree_refine(
 
 
 ### -------------------- DSU -------------------- ###
-
 class DSU:
     """
     Disjoint-set / union-find
@@ -205,7 +191,7 @@ class DSU:
     Union sets of voxels if they belong to the same structure.
     """
     def __init__(self, n:int):                                  # n - total number of voxels 
-        self.parent = np.arange(n, dtype=np.int64)              # Each node starts as own parent
+        self.parent = np.arange(n, dtype=np.int64)              # Each node starts as own parent - int value used as the assembly ID
         self.rank = np.zeros(n, dtype=np.int8)                  # Rank aka height/score used to keep trees shallow when we union sets
 
     def find_root(self, x:int) -> int:                          # Loops through voxles until it finds it's parent
@@ -213,7 +199,7 @@ class DSU:
         while p[x] != x:                                        # While not itself, if it is parent will return itself
             p[x] = p[p[x]]                                      # Point to "grandparent"
             x = p[x]                                            # Move x up a level
-        return x                                                # Return highest level parent (captain/root)
+        return x                                                # Return highest level parent (captain/root) - return the assembly ID
     
     def union(self, a: int, b: int) -> None:                    # "bond" the voxels a & b together if they belong to same body
         root_a, root_b = self.find_root(a), self.find_root(b)   # Find the root of each given voxel
@@ -227,49 +213,8 @@ class DSU:
             self.parent[root_b] = root_a
             self.rank[root_a] += 1
 
+
 ### -------------------- Primitive building functions -------------------- ###
-
-# def instantiate_boxes_from_tree(
-#         leaves: list[Leaf],
-#         origin: np.ndarray,
-#         h_base: float,
-#         density: float = 1.0,
-#         penalty_gain: float = 1e5,
-#         static: bool = False):
-#     """ Create box_3D for each leaf in the octree. """
-
-#     bodies: list[box_3D] = []
-#     #leaf_id_to_body: dict[int, int] = {}
-#     leaf_key_to_body_index: dict[tuple[int,int,int,int], int] = {}
-
-
-#     zeroes = (0.0, 0.0, 0.0)                                    # for zero velocity initializaiton
-#     q_id = (1.0, 0.0, 0.0, 0.0)                                 # for quaternion initialization
-
-#     # Loop through grid size, add primitive where occ dictates
-#     for leaf_id, lf in enumerate(leaves):
-        
-#         h = lf.size(h_base)                                     # get box size from leaf level
-#         pos = tuple(lf.center(origin, h_base))                  # get primitive positions from centers grid
-        
-#         b = box_3D(
-#             pos=pos,
-#             quat=q_id,
-#             linear_vel=zeroes,
-#             ang_vel=zeroes,
-#             density=float(density),
-#             penalty_gain=float(penalty_gain),
-#             size=(float(h), float(h), float(h)),                # voxelization dictates cube
-#             static=bool(static), 
-#         )
-#         bodies.append(b)
-#         #leaf_id_to_body[leaf_id] = lf
-#         leaf_key_to_body_index[lf.key()] = len(bodies) - 1
-
-    
-#     return bodies, leaf_key_to_body_index
-
-
 def instantiate_boxes_from_tree(
         leaves: list[Leaf],
         origin: np.ndarray,
@@ -323,3 +268,53 @@ def instantiate_boxes_from_tree(
         leaf_key_to_body_index[lf.key()] = len(bodies) - 1
 
     return bodies, leaf_key_to_body_index
+
+### -------------------- Constraint building functions -------------------- ###
+
+def build_constraints_from_tree(
+        leaves: list[Leaf],
+        bodies: list[box_3D],
+        leaf_key_to_body_index: dict[tuple[int,int,int,int], int],
+        E: float,
+        nu: float) -> list[FaceBondPoint]:
+    """
+    Creates a list of bonds between adjacent octree voxels belonging to the same solidbody.
+    Only generates bonds in the positive neighbor direction to not create duplicates.
+    """
+    # Only work at high level - no refinement should be possible until later refinement stage (makes sense to me)
+    pos_dirs = [(1,0,0),(0,1,0),(0,0,1)]
+    all_dirs = pos_dirs + [(-1,0,0),(0,-1,0),(0,0,-1)]
+    bonds = []
+
+    occ = set(lf.key() for lf in leaves) # WHY?
+
+    dsu = DSU(len(bodies))
+
+    for lf in leaves:
+        a_idx = leaf_key_to_body_index.get(lf.key())
+        if a_idx is None:
+            # No leaf here - skip
+            continue
+        L, i, j, k = lf.level, lf.i, lf.j, lf.k
+
+        # 1) Surface check - add surface flag for collision (no collision for internal voxels)
+        is_surface = any((L, i+di, j+dj, k+dk) not in occ for (di,dj,dk) in all_dirs) # if any adjacent cells not in occ then set is_surface to true
+        bodies[a_idx].collidable = is_surface
+
+        # 2) Positive neighbor check - bond forming
+        for ni, nj, nk in pos_dirs:
+            # Check if leaf has neighboring cells in +X,+Y,+Z directions
+            b_key = (L, i+ni, j+nj, k+nk)
+            b_idx = leaf_key_to_body_index.get(b_key)
+            if b_idx is None:
+                # No neighbor is here
+                continue
+            A = bodies[a_idx]
+            B = bodies[b_idx]
+            bonds.extend(build_face_bonds(A,B,E,nu))
+            dsu.union(a_idx, b_idx)
+    
+    for idx, b in enumerate(bodies):
+        b.assembly_id = int(dsu.find_root(idx))
+
+    return bonds
