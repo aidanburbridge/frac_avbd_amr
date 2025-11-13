@@ -1,6 +1,6 @@
 from geometry.primitives import box_3D
 from solver.solver_3 import Solver
-from util.pyvista_visualizer import run_visualizer
+from util.pyvista_visualizer import run_visualizer, run_visualizer_headless
 import geometry.voxelizer as vox
 import geometry.octree as oct
 
@@ -23,7 +23,7 @@ STL_PATH = r"C:\Users\aidan\Documents\TUM\Thesis\10x10x50_beam.stl"
 
 # Voxelization
 stlvox = vox.STLVoxelizer(STL_PATH)
-occ, origin, h_cube = stlvox.voxelize_to_resolution(10)
+occ, origin, h_cube = stlvox.voxelize_to_resolution(50)
 print("Origin: ",origin)
 
 # Octree & Cubes
@@ -68,7 +68,7 @@ for b in boxes:
 
 print("Total static: ", num_stat)
 
-run_visualizer(solver, solver.bodies)
+run_visualizer_headless(solver, solver.bodies, num_steps=1000, save_name="beam_test_04")
 
 
 # BEAM DIMENSIONS

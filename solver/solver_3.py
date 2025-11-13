@@ -205,12 +205,6 @@ class Solver:
             if self.post_stabilize:
                 current_alpha = 1.0 if num_it < self.iterations else 0.0
 
-            # with self.prof.phase("compute constraints"):
-            #     for c in self._all_constraints: # TODO can I clean this back up and put in constraints.py
-            #         c.compute_constraint(current_alpha)
-            #         c.compute_derivatives(c.bodyA)
-            #         c.compute_derivatives(c.bodyB)
-
             with self.prof.phase("main solve"):
                 for b in self.bodies:
                     if b.static:
@@ -221,68 +215,92 @@ class Solver:
                         e6 = b.delta_twist_from(b.inertial_pos)
                         
                     with self.prof.phase("assemble solve"):
-                        force = -(M * inv_dt2) @ e6
-                        hessian = M * inv_dt2
+                        force = b.force_ws
+                        force[:] = M @ e6
+                        force *= -inv_dt2
+
+                        hessian = b.hessian_ws
+                        np.copyto(hessian, M)
+                        hessian *= inv_dt2
+
                         cons_for_body = self.incidence_map.get(int(b.body_id), [])
-                        if not cons_for_body:
-                            pass
-                        else:
-                            J_rows = []
-                            k_list = []
-                            fadd_list = []
+                        if cons_for_body:
+                            needed_rows = 0
+                            prepared: list[tuple[Constraint, int]] = []
                             for con in cons_for_body:
-                                # Refresh residuals and derivatives against the latest pose
                                 con.compute_constraint(current_alpha)
                                 con.compute_derivatives(b)
                                 if hasattr(con, "update_bounds"):
                                     con.update_bounds()
-                                if con.bodyA is b:
-                                    J = con.JA
-                                elif con.bodyB is b:
-                                    J = con.JB
-                                else:
+                                m = con.rows()
+                                if m <= 0:
                                     continue
-                                rows = con.rows()
-                                if rows <= 0:
-                                    continue
-                                # Build f_add for all rows at once
-                                k = con.penalty_k.copy()
-                                C = con.C.copy()
-                                lam = con.lambda_.copy()
-                                fmin = con.fmin.copy()
-                                fmax = con.fmax.copy()
-                                hard = con.is_hard
-                                f_add = np.where(hard, clamp(k * C + lam, fmin, fmax), k * C)
-                                # Accumulate
-                                J_rows.append(J)
-                                k_list.append(k)
-                                fadd_list.append(f_add)
-                            if J_rows:
-                                J_stack = np.vstack(J_rows)
-                                k_stack = np.concatenate(k_list)
-                                f_stack = np.concatenate(fadd_list)
-                                # RHS: force -= J^T f
-                                force -= J_stack.T @ f_stack
-                                # LHS: hessian += J^T diag(k) J  == J^T (k[:,None]*J)
-                                hessian += J_stack.T @ (k_stack[:, None] * J_stack)
-                                # Diagonal stabilization term (avoid per-row np.diag allocations)
-                                g_diag = (np.abs(J_stack).T @ np.abs(f_stack))
-                                idx = np.arange(hessian.shape[0])
-                                hessian[idx, idx] += g_diag
+                                prepared.append((con, m))
+                                needed_rows += m
+
+                            if needed_rows > 0:
+                                ws = b.get_ws(needed_rows)
+                                Jbuf, kbuf, fbuf = ws["J"], ws["k"], ws["f"]
+                                rows = 0
+                                for con, m in prepared:
+                                    if con.bodyA is b:
+                                        J = con.JA
+                                    elif con.bodyB is b:
+                                        J = con.JB
+                                    else:
+                                        continue
+
+                                    k = con.penalty_k
+                                    C = con.C
+                                    lam = con.lambda_
+                                    fmin = con.fmin
+                                    fmax = con.fmax
+                                    hard = con.is_hard
+                                    f_add = np.where(hard, clamp(k * C + lam, fmin, fmax), k * C)
+
+                                    Jbuf[rows:rows+m, :] = J
+                                    kbuf[rows:rows+m] = k
+                                    fbuf[rows:rows+m] = f_add
+                                    rows += m
+
+                                if rows:
+                                    Jv = Jbuf[:rows, :]
+                                    kv = kbuf[:rows]
+                                    fv = fbuf[:rows]
+
+                                    force -= Jv.T @ fv
+                                    hessian += Jv.T @ (kv[:, None]*Jv)
+
+                                    g_diag = (np.abs(Jv).T @ np.abs(fv))
+                                    hessian[np.diag_indices_from(hessian)] += g_diag
 
                     with self.prof.phase("lin alg solve"):
                         try:
-                            delta = np.linalg.solve(hessian, force)
-                            dx = delta[:3]
-                            dth = delta[3:]
-                            b.position[:3] += dx
-                            dq = quat_from_rotvec(dth)
-                            b.position[3:] = quat_mult(dq, b.position[3:])
+                            L = np.linalg.cholesky(hessian)
+                            z = np.linalg.solve(L, force)
+                            delta = np.linalg.solve(L.T, z)
+
+                            # delta = np.linalg.solve(hessian, force)
+                            # dx = delta[:3]
+                            # dth = delta[3:]
+                            # b.position[:3] += dx
+                            # dq = quat_from_rotvec(dth)
+                            # b.position[3:] = quat_mult(dq, b.position[3:])
                             
                         except np.linalg.LinAlgError:
-                            eps = 1e-9
-                            hessian = hessian + eps*np.eye(hessian.shape[0])
-                            delta = np.linalg.solve(hessian, force)
+                            eps = 1e-8
+                            n = hessian.shape[0]
+                            L = np.linalg.cholesky(hessian + eps*np.eye(n))
+                            z = np.linalg.solve(L, force)
+                            delta = np.linalg.solve(L.T, z)
+                            # hessian = hessian + eps*np.eye(hessian.shape[0])
+                            # delta = np.linalg.solve(hessian, force)
+
+                        dx = delta[:3]
+                        dth = delta[3:]
+                        b.position[:3] += dx
+                        dq = quat_from_rotvec(dth)
+                        b.position[3:] = quat_mult(dq, b.position[3:])
 
             with self.prof.phase("dual update"):
                 # Dual update (skip on the extra post-stabilization pass)

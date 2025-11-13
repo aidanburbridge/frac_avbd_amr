@@ -178,6 +178,10 @@ class Body:
         # Inertial or "y" in paper
         self.inertial_pos = np.zeros_like(self.position)
 
+        # Solver scratch buffers
+        self.force_ws = np.zeros(self.dof, dtype=float)
+        self.hessian_ws = np.zeros((self.dof, self.dof), dtype=float)
+
 
 class CollidableShape(Body, ABC):
     """
@@ -188,12 +192,31 @@ class CollidableShape(Body, ABC):
 
         self.collidable = True
 
+        # Pre-allocate arrays (lazy)
+        self.ws = None
+        self.ws_capacity = 0
+
     def set_static(self) -> None:
         self.static = True
         self.mass = float('inf')
         self.inv_mass = 0.0
         self.inertia = float('inf')
         self.inv_inertia = 0.0
+    
+    def get_ws(self, rows_needed:int) -> dict:
+        needed = max(1, int(rows_needed))
+        ws = self.ws
+        capacity = self.ws_capacity
+        if ws is None or capacity < needed:
+            new_cap = max(needed, capacity * 2 if capacity else 32)
+            ws = {
+                "J": np.empty((new_cap, self.dof), dtype=float),
+                "k": np.empty((new_cap,), dtype=float),
+                "f": np.empty((new_cap,), dtype=float),
+            }
+            self.ws = ws
+            self.ws_capacity = new_cap
+        return ws
 
     @abstractmethod
     def get_corners(self) -> np.array:
