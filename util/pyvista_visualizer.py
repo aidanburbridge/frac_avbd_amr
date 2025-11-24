@@ -29,7 +29,9 @@ import copy
 import pickle
 import time
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Tuple, Type
+from typing import Callable, Dict, Iterable, List, Optional, Tuple, Type, Union
+import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pyvista as pv
@@ -39,6 +41,75 @@ from geometry.primitives import rect_2D, box_3D
 from solver.constraints import ContactConstraint
 
 from tqdm import tqdm
+
+
+_DEFAULT_RECORDING_DIR = Path("output/frames_list")
+_SAVE_INDEX_WIDTH = 2
+
+
+def _derive_default_stem(explicit: Optional[str] = None) -> str:
+    if explicit:
+        return explicit
+    argv0 = sys.argv[0] if sys.argv else ""
+    if argv0 and argv0 not in {"-m", ""}:
+        stem = Path(argv0).stem
+        if stem:
+            return stem
+    return "recording"
+
+
+def _base_save_path(target: Optional[Union[str, Path]], default_stem: Optional[str]) -> Path:
+    if target is None:
+        stem = _derive_default_stem(default_stem)
+        return (_DEFAULT_RECORDING_DIR / stem).with_suffix(".pkl")
+
+    path = Path(target).expanduser()
+    if not path.suffix:
+        path = path.with_suffix(".pkl")
+    if path.parent == Path("."):
+        path = _DEFAULT_RECORDING_DIR / path.name
+    return path
+
+
+def _split_numbered_stem(stem: str) -> tuple[str, Optional[int], int]:
+    idx = stem.rfind("_")
+    if idx != -1:
+        suffix = stem[idx + 1 :]
+        if suffix.isdigit():
+            return stem[:idx], int(suffix), len(suffix)
+    return stem, None, _SAVE_INDEX_WIDTH
+
+
+def _unique_save_path(base: Path, *, always_number: bool = False) -> tuple[Path, Optional[Path]]:
+    base = base.expanduser()
+    if not base.suffix:
+        base = base.with_suffix(".pkl")
+    parent = base.parent if base.parent not in (Path(""), Path(".")) else _DEFAULT_RECORDING_DIR
+    parent.mkdir(parents=True, exist_ok=True)
+
+    root, number, width = _split_numbered_stem(base.stem)
+
+    if always_number:
+        number = (number or 0) + 1
+        candidate = parent / f"{root}_{number:0{width}d}{base.suffix}"
+        conflict: Optional[Path] = None
+        while candidate.exists():
+            conflict = candidate
+            number += 1
+            candidate = parent / f"{root}_{number:0{width}d}{base.suffix}"
+        return candidate, conflict
+
+    candidate = parent / base.name
+    conflict = None
+    while candidate.exists():
+        conflict = candidate
+        if number is None:
+            number = 1
+            width = max(width, _SAVE_INDEX_WIDTH)
+        else:
+            number += 1
+        candidate = parent / f"{root}_{number:0{width}d}{base.suffix}"
+    return candidate, conflict
 
 
 # ---------- tiny helpers that adapt to old/new PyVista APIs ----------
@@ -109,7 +180,7 @@ def _build_actor_box(plotter: pv.Plotter, body: box_3D, color: Optional[str] = N
         color=(color or "royalblue"),
         smooth_shading=True,
         show_edges=False,
-        opacity=1,
+        opacity=0.7,
     )
 
     def update():
@@ -180,6 +251,86 @@ def _clear_contact_overlay(plotter: pv.Plotter, overlay: dict):
             except Exception:
                 pass
         overlay["actors"].clear()
+
+
+# ---------- contact serialization helpers ----------
+
+def _vector3(data) -> Optional[np.ndarray]:
+    if data is None:
+        return None
+    try:
+        arr = np.asarray(data, dtype=float)
+    except Exception:
+        return None
+    if arr.size == 0:
+        return None
+    arr = np.ravel(arr)
+    vec = np.zeros(3, dtype=float)
+    count = min(3, arr.size)
+    vec[:count] = arr[:count]
+    return vec
+
+
+def _snapshot_contact_constraints(contact_constraints: Optional[Iterable[ContactConstraint]]) -> List[Dict[str, object]]:
+    snapshot: List[Dict[str, object]] = []
+    if not contact_constraints:
+        return snapshot
+    for cc in contact_constraints:
+        contact = getattr(cc, "contact", None)
+        if contact is None:
+            continue
+        point = _vector3(getattr(contact, "point", None))
+        normal = _vector3(getattr(contact, "normal", None))
+        if point is None or normal is None:
+            continue
+        depth = float(getattr(contact, "depth", 0.0))
+        snapshot.append(
+            {
+                "point": point,
+                "normal": normal,
+                "depth": depth,
+            }
+        )
+    return snapshot
+
+
+def _snapshot_contact_frames(contact_frames: Optional[List[List[Dict[str, object]]]]) -> List[List[Dict[str, object]]]:
+    if not contact_frames:
+        return []
+    return [
+        [
+            {
+                "point": np.asarray(entry["point"], dtype=float).copy(),
+                "normal": np.asarray(entry["normal"], dtype=float).copy(),
+                "depth": float(entry.get("depth", 0.0)),
+            }
+            for entry in frame
+            if "point" in entry and "normal" in entry
+        ]
+        for frame in contact_frames
+    ]
+
+
+def _deserialize_contact_frames(
+    serialized_frames: Optional[List[List[Dict[str, object]]]],
+    frame_count: int,
+) -> List[List[SimpleNamespace]]:
+    if serialized_frames is None:
+        serialized_frames = []
+    playback_frames: List[List[SimpleNamespace]] = []
+    for idx in range(frame_count):
+        raw_frame: List[Dict[str, object]] = serialized_frames[idx] if idx < len(serialized_frames) else []
+        contacts: List[SimpleNamespace] = []
+        for entry in raw_frame or []:
+            point = _vector3(entry.get("point"))
+            normal = _vector3(entry.get("normal"))
+            if point is None or normal is None:
+                continue
+            depth = float(entry.get("depth", 0.0))
+            contact = SimpleNamespace(point=point, normal=normal, depth=depth)
+            contacts.append(SimpleNamespace(contact=contact))
+        playback_frames.append(contacts)
+    return playback_frames
 
 
 # ---------- public API ----------
@@ -456,11 +607,23 @@ def run_visualizer(
 class _PlaybackSolver:
     """Minimal solver shim that replays recorded frames."""
 
-    def __init__(self, bodies: List[object], frames: List[List[np.ndarray]], dt: float):
+    def __init__(
+        self,
+        bodies: List[object],
+        frames: List[List[np.ndarray]],
+        dt: float,
+        contact_frames: Optional[List[List[SimpleNamespace]]] = None,
+    ):
         self.bodies = bodies
         self.frames = frames
         self.dt = float(dt)
         self.contact_constraints: List[ContactConstraint] = []
+        self._contact_frames: List[List[SimpleNamespace]] = contact_frames or [[] for _ in frames]
+        if len(self._contact_frames) < len(self.frames):
+            missing = len(self.frames) - len(self._contact_frames)
+            self._contact_frames.extend([] for _ in range(missing))
+        elif len(self._contact_frames) > len(self.frames):
+            self._contact_frames = self._contact_frames[: len(self.frames)]
         self._current_idx = 0
         if self.frames:
             self._apply_frame(0)
@@ -469,6 +632,8 @@ class _PlaybackSolver:
         snapshot = self.frames[idx]
         for body, pose in zip(self.bodies, snapshot):
             body.position[: pose.shape[0]] = pose
+        contacts = self._contact_frames[idx] if idx < len(self._contact_frames) else []
+        self.contact_constraints = list(contacts)
 
     def step(self):
         if not self.frames:
@@ -496,27 +661,24 @@ def _snapshot_frames(frames: List[List[np.ndarray]]):
 
 
 def _save_recording(
-    save_path: str,
+    save_path: Union[str, Path],
     bodies: List[object],
     frames: List[List[np.ndarray]],
     metadata: Dict[str, object],
+    contact_frames: Optional[List[List[Dict[str, object]]]] = None,
 ) -> str:
-    # Always save into output/frames_list directory
-    base_dir = Path("output") / "frames_list"
-    base_dir.mkdir(parents=True, exist_ok=True)
-
-    orig = Path(save_path).expanduser()
-    name = orig.name
-    if not Path(name).suffix:
-        name = Path(name).with_suffix(".pkl").name
-
-    path = base_dir / name
+    path = Path(save_path).expanduser()
+    if not path.suffix:
+        path = path.with_suffix(".pkl")
+    path.parent.mkdir(parents=True, exist_ok=True)
 
     payload = {
         "frames": _snapshot_frames(frames),
         "bodies": [copy.deepcopy(b) for b in bodies],
         "metadata": metadata,
     }
+    if contact_frames is not None:
+        payload["contact_frames"] = _snapshot_contact_frames(contact_frames)
     with path.open("wb") as fh:
         pickle.dump(payload, fh)
     return str(path)
@@ -535,7 +697,8 @@ def _load_recording(save_path: str):
     frames = list(payload["frames"])
     bodies = list(payload["bodies"])
     metadata = payload.get("metadata", {}) or {}
-    return bodies, frames, metadata
+    contact_frames = payload.get("contact_frames")
+    return bodies, frames, metadata, contact_frames
 
 
 def run_visualizer_headless(
@@ -543,7 +706,8 @@ def run_visualizer_headless(
     bodies: Iterable[object],
     num_steps: int,
     *,
-    save_name: Optional[str] = None,
+    save_path: Optional[Union[str, Path, bool]] = None,
+    default_save_stem: Optional[str] = None,
     record_interval: int = 1,
     show_progress: bool = True,
     prompt_viewer: bool = True,
@@ -551,6 +715,13 @@ def run_visualizer_headless(
 ):
     """
     Run the solver headlessly for a fixed number of steps, recording body poses.
+
+    Saving options:
+    1. Leave `save_path` as None (default) to save using the calling script's name with
+       an auto-incremented suffix (e.g., `cantilever_beam_test_01.pkl`).
+    2. Provide a string/Path in `save_path` to use that name or location (relative names
+       are placed in `output/frames_list`). If the target exists, another suffix is added.
+       Pass `False` explicitly to skip saving.
 
     Returns a dict with the recorded frames so callers can persist or postprocess them.
     """
@@ -560,11 +731,21 @@ def run_visualizer_headless(
     if record_interval <= 0:
         raise ValueError("record_interval must be positive")
 
+    save_target: Optional[Path] = None
+    if save_path is not False:
+        base = _base_save_path(None if save_path is None else save_path, default_save_stem)
+        save_target, conflict = _unique_save_path(base, always_number=save_path is None)
+        if conflict is not None:
+            print(f"[pyvista] WARNING: '{conflict}' exists; saving as '{save_target}' instead.")
+
     bodies_list = list(bodies)
     if not bodies_list:
         raise ValueError("No bodies were provided to record")
 
     frames: List[List[np.ndarray]] = [[b.position.copy() for b in bodies_list]]
+    contact_frames: List[List[Dict[str, object]]] = [
+        _snapshot_contact_constraints(getattr(solver, "contact_constraints", []))
+    ]
 
     progress_bar = None
     if show_progress:
@@ -577,6 +758,9 @@ def run_visualizer_headless(
         should_record = ((step_idx + 1) % record_interval == 0) or (step_idx + 1 == num_steps)
         if should_record:
             frames.append([b.position.copy() for b in bodies_list])
+            contact_frames.append(
+                _snapshot_contact_constraints(getattr(solver, "contact_constraints", []))
+            )
 
     if progress_bar:
         progress_bar.close()
@@ -586,15 +770,16 @@ def run_visualizer_headless(
         "num_frames": len(frames),
         "num_steps": num_steps,
         "record_interval": record_interval,
+        "contact_frames": contact_frames,
     }
-    if save_name:
+    if save_target:
         metadata = {
             "num_frames": len(frames),
             "num_steps": num_steps,
             "record_interval": record_interval,
             "dt": getattr(solver, "dt", 0.0),
         }
-        saved_path = _save_recording(save_name, bodies_list, frames, metadata)
+        saved_path = _save_recording(save_target, bodies_list, frames, metadata, contact_frames)
         result["saved_file"] = saved_path
 
     if prompt_viewer and frames:
@@ -606,7 +791,13 @@ def run_visualizer_headless(
         if answer in {"y", "yes"}:
             viewer_kwargs = viewer_kwargs or {}
             replay_bodies = [copy.deepcopy(b) for b in bodies_list]
-            playback_solver = _PlaybackSolver(replay_bodies, frames, getattr(solver, "dt", 0.0))
+            playback_contacts = _deserialize_contact_frames(contact_frames, len(frames))
+            playback_solver = _PlaybackSolver(
+                replay_bodies,
+                frames,
+                getattr(solver, "dt", 0.0),
+                playback_contacts,
+            )
             run_visualizer(
                 playback_solver,
                 replay_bodies,
@@ -626,19 +817,26 @@ def run_visualizer_from_save(
     Load a saved headless recording from disk and launch the PyVista viewer.
     """
 
-    bodies, frames, metadata = _load_recording(save_path)
+    bodies, frames, metadata, contact_records = _load_recording(save_path)
     if not frames:
         raise ValueError(f"Recording '{save_path}' does not contain any frames")
 
     viewer_opts = dict(viewer_kwargs or {})
     viewer_opts.setdefault("initial_paused", True)
-    playback_solver = _PlaybackSolver(bodies, frames, float(metadata.get("dt", 0.0)))
+    playback_contacts = _deserialize_contact_frames(contact_records, len(frames))
+    playback_solver = _PlaybackSolver(
+        bodies,
+        frames,
+        float(metadata.get("dt", 0.0)),
+        playback_contacts,
+    )
     run_visualizer(playback_solver, bodies, **viewer_opts)
 
     return {
         "frames": frames,
         "metadata": metadata,
         "recording_path": str(Path(save_path).expanduser()),
+        "contact_frames": contact_records,
     }
 
 __all__ = ["run_visualizer", "run_visualizer_headless", "run_visualizer_from_save"]

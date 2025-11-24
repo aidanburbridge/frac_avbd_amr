@@ -1,5 +1,5 @@
 from geometry.primitives import box_3D
-from solver.solver_3 import Solver
+from solver.solver_4 import Solver
 from util.pyvista_visualizer import run_visualizer, run_visualizer_headless
 import geometry.voxelizer as vox
 import geometry.octree as oct
@@ -23,8 +23,8 @@ STL_PATH = r"C:\Users\aidan\Documents\TUM\Thesis\10x10x50_beam.stl"
 
 # Voxelization
 stlvox = vox.STLVoxelizer(STL_PATH)
-occ, origin, h_cube = stlvox.voxelize_to_resolution(50)
-print("Origin: ",origin)
+occ, origin, h_cube = stlvox.voxelize_to_resolution(40)
+print("Origin: ", origin)
 
 # Octree & Cubes
 leaves, h_base = oct.octree_from_occ(occ, h_cube)
@@ -36,15 +36,15 @@ boxes, mapping = oct.instantiate_boxes_from_tree(
     penalty_gain=1e5,
     static=False,
 )
-beam_bonds = oct.build_constraints_from_tree(leaves, boxes, mapping, E=10e7, nu=0.25)
+beam_bonds = oct.build_constraints_from_tree(leaves, boxes, mapping, E=10e5, nu=0.25)
 solver.add_persistent_constraints(beam_bonds)
 
 fall_cube = box_3D(
-    (0, 50, 40),
+    (0, 30, 40),
     (0, 0, 0,0),
     (0,0,0),
     (0,0,0),
-    100,
+    1,
     10e5,
     (10,10,10),
     False
@@ -68,7 +68,7 @@ for b in boxes:
 
 print("Total static: ", num_stat)
 
-run_visualizer_headless(solver, solver.bodies, num_steps=1000, save_name="beam_test_04")
+run_visualizer_headless(solver, solver.bodies, num_steps=500)#, save_path="beam_test_05")
 
 
 # BEAM DIMENSIONS

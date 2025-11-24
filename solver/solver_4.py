@@ -5,7 +5,6 @@ from .constraints import Constraint, ContactConstraint, clamp
 from . import collisions
 from .manifold import Manifold
 from collections import defaultdict
-from util.time_profiler import PhaseProfiler
 
 class Solver:
     def __init__(self, dt, num_iterations, gravity=-9.81):
@@ -34,9 +33,7 @@ class Solver:
         self.max_contacts_per_assembly_pair = 4
 
         # Debug/diagnostics
-        self.debug_contacts: bool = False
-        self.prof = PhaseProfiler()
-        
+        self.debug_contacts: bool = False        
 
     def add_body(self, body:Body):
         
@@ -170,9 +167,7 @@ class Solver:
         if self.bodies is None:
             raise RuntimeError("No bodies have been added to the simulation!")
             
-
         dt = self.dt
-        dof = self.dof
 
         # For multiplication and not division
         inv_dt = 1.0 / dt
@@ -197,8 +192,7 @@ class Solver:
             # accelExt = accel[1]
 
         # Broad and narrow phase collision detection + warm starting
-        with self.prof.phase("build cont. const."):
-            self._build_contact_constraints()
+        self._build_contact_constraints()
 
         # Clear incidence map
         self.incidence_map = {}
@@ -209,40 +203,31 @@ class Solver:
         self._all_constraints = self.persistent_constraints + self.contact_constraints
 
         # Warm start
-        with self.prof.phase("warm start"):
-            for con in self._all_constraints:
-                con.initialize()
-                #print(f"\nConstraints for body {con.A.body_id} and body {con.B.body_id}:")
-                for r in range(con.rows()):
-                    if self.post_stabilize:
-                        con.penalty_k[r] = np.clip(self.gamma * con.penalty_k[r], con.k_min[r], con.k_max[r])
-                    else:
-                        #if con.is_hard[r]:
-                        con.lambda_[r]   = con.lambda_[r] * self.alpha * self.gamma
-                        con.penalty_k[r] = np.clip(self.gamma * con.penalty_k[r], con.k_min[r], con.k_max[r])
+        for con in self._all_constraints:
+            con.initialize()
+            #print(f"\nConstraints for body {con.A.body_id} and body {con.B.body_id}:")
+            for r in range(con.rows()):
+                if self.post_stabilize:
+                    con.penalty_k[r] = np.clip(self.gamma * con.penalty_k[r], con.k_min[r], con.k_max[r])
+                else:
+                    #if con.is_hard[r]:
+                    con.lambda_[r]   = con.lambda_[r] * self.alpha * self.gamma
+                    con.penalty_k[r] = np.clip(self.gamma * con.penalty_k[r], con.k_min[r], con.k_max[r])
 
-                    # Cap penalty by material stiffness for *non-hard* rows
-                    if not con.is_hard[r]:
-                        con.penalty_k[r] = min(con.penalty_k[r], con.stiffness[r])
-                       # print("Penalty value: ", con.penalty_k[0], "Stiffness: ", con.stiffness[0])
+                # Cap penalty by material stiffness for *non-hard* rows
+                if not con.is_hard[r]:
+                    con.penalty_k[r] = min(con.penalty_k[r], con.stiffness[r])
+                    # print("Penalty value: ", con.penalty_k[0], "Stiffness: ", con.stiffness[0])
 
-                # Build incidence map #
+            # Build incidence map #
 
-                if int(con.bodyA.body_id) not in self.incidence_map:
-                    self.incidence_map[int(con.bodyA.body_id)] = []
-                self.incidence_map[int(con.bodyA.body_id)].append(con)
+            if int(con.bodyA.body_id) not in self.incidence_map:
+                self.incidence_map[int(con.bodyA.body_id)] = []
+            self.incidence_map[int(con.bodyA.body_id)].append(con)
 
-                if int(con.bodyB.body_id) not in self.incidence_map:
-                    self.incidence_map[int(con.bodyB.body_id)] = []
-                self.incidence_map[int(con.bodyB.body_id)].append(con)
-
-
-        # assemblies = {
-        #     (b.assembly_id if b.assembly_id is not None else b.body_id)
-        #     for b in self.bodies
-        # }
-        # print(f"{len(assemblies)} assemblies in the solver")
-
+            if int(con.bodyB.body_id) not in self.incidence_map:
+                self.incidence_map[int(con.bodyB.body_id)] = []
+            self.incidence_map[int(con.bodyB.body_id)].append(con)
         
         # Main solver loop - Newton Method iterations
 
@@ -264,127 +249,112 @@ class Solver:
             if self.post_stabilize:
                 current_alpha = 1.0 if num_it < self.iterations else 0.0
 
-            with self.prof.phase("main solve"):
-                for b in self.bodies:
-                    if b.static:
-                        continue
+            for b in self.bodies:
+                if b.static:
+                    continue
 
-                    M = b.mass_mat
-                    with self.prof.phase("delta twist"):
-                        e6 = b.delta_twist_from(b.inertial_pos)
-                        
-                    with self.prof.phase("assemble solve"):
-                        force = b.force_ws
-                        force[:] = M @ e6
-                        force *= -inv_dt2
+                M = b.mass_mat
+                e6 = b.delta_twist_from(b.inertial_pos)
+                    
+                force = b.force_ws
+                force[:] = M @ e6
+                force *= -inv_dt2
 
-                        hessian = b.hessian_ws
-                        np.copyto(hessian, M)
-                        hessian *= inv_dt2
+                hessian = b.hessian_ws
+                np.copyto(hessian, M)
+                hessian *= inv_dt2
 
-                        cons_for_body = self.incidence_map.get(int(b.body_id), [])
-                        if cons_for_body:
-                            needed_rows = 0
-                            prepared: list[tuple[Constraint, int]] = []
-                            for con in cons_for_body:
-                                con.compute_constraint(current_alpha)
-                                con.compute_derivatives(b)
-                                if hasattr(con, "update_bounds"):
-                                    con.update_bounds()
-                                m = con.rows()
-                                if m <= 0:
-                                    continue
-                                prepared.append((con, m))
-                                needed_rows += m
-
-                            if needed_rows > 0:
-                                ws = b.get_ws(needed_rows)
-                                Jbuf, kbuf, fbuf = ws["J"], ws["k"], ws["f"]
-                                rows = 0
-                                for con, m in prepared:
-                                    if con.bodyA is b:
-                                        J = con.JA
-                                    elif con.bodyB is b:
-                                        J = con.JB
-                                    else:
-                                        continue
-
-                                    k = con.penalty_k
-                                    C = con.C
-                                    lam = con.lambda_
-                                    fmin = con.fmin
-                                    fmax = con.fmax
-                                    hard = con.is_hard
-                                    f_add = np.where(hard, clamp(k * C + lam, fmin, fmax), k * C)
-
-                                    Jbuf[rows:rows+m, :] = J
-                                    kbuf[rows:rows+m] = k
-                                    fbuf[rows:rows+m] = f_add
-                                    rows += m
-
-                                if rows:
-                                    Jv = Jbuf[:rows, :]
-                                    kv = kbuf[:rows]
-                                    fv = fbuf[:rows]
-
-                                    force -= Jv.T @ fv
-                                    hessian += Jv.T @ (kv[:, None]*Jv)
-
-                                    g_diag = (np.abs(Jv).T @ np.abs(fv))
-                                    hessian[np.diag_indices_from(hessian)] += g_diag
-
-                    with self.prof.phase("lin alg solve"):
-                        try:
-                            L = np.linalg.cholesky(hessian)
-                            z = np.linalg.solve(L, force)
-                            delta = np.linalg.solve(L.T, z)
-
-                            # delta = np.linalg.solve(hessian, force)
-                            # dx = delta[:3]
-                            # dth = delta[3:]
-                            # b.position[:3] += dx
-                            # dq = quat_from_rotvec(dth)
-                            # b.position[3:] = quat_mult(dq, b.position[3:])
-                            
-                        except np.linalg.LinAlgError:
-                            eps = 1e-8
-                            n = hessian.shape[0]
-                            L = np.linalg.cholesky(hessian + eps*np.eye(n))
-                            z = np.linalg.solve(L, force)
-                            delta = np.linalg.solve(L.T, z)
-                            # hessian = hessian + eps*np.eye(hessian.shape[0])
-                            # delta = np.linalg.solve(hessian, force)
-
-                        dx = delta[:3]
-                        dth = delta[3:]
-                        b.position[:3] += dx
-                        dq = quat_from_rotvec(dth)
-                        b.position[3:] = quat_mult(dq, b.position[3:])
-
-            with self.prof.phase("dual update"):
-                # Dual update (skip on the extra post-stabilization pass)
-                if num_it < self.iterations:
-
-                    for con in self._all_constraints:
+                cons_for_body = self.incidence_map.get(int(b.body_id), [])
+                if cons_for_body:
+                    needed_rows = 0
+                    prepared: list[tuple[Constraint, int]] = []
+                    for con in cons_for_body:
                         con.compute_constraint(current_alpha)
-                        hard = con.is_hard
-                        if np.any(hard):
-                            lam_new = clamp(con.penalty_k * con.C + con.lambda_, con.fmin, con.fmax)
-                            con.lambda_[hard] = lam_new[hard]
-
-                            inside_bounds = hard & (con.lambda_ > con.fmin) & (con.lambda_ < con.fmax)
-                            if np.any(inside_bounds):
-                                con.penalty_k[inside_bounds] = np.minimum(con.k_max[inside_bounds], con.penalty_k[inside_bounds] + self.beta * np.abs(con.C[inside_bounds]))
-                        
-                        soft = ~hard
-                        if np.any(soft):
-                            con.penalty_k[soft] = np.minimum(
-                                np.minimum(con.k_max[soft], con.stiffness[soft]),
-                                con.penalty_k[soft] + self.beta * np.abs(con.C[soft])
-                                )
-                            #print("penalty: ",con.penalty_k[soft],"  const: ", con.C[soft])
+                        con.compute_derivatives(b)
                         if hasattr(con, "update_bounds"):
                             con.update_bounds()
+                        m = con.rows()
+                        if m <= 0:
+                            continue
+                        prepared.append((con, m))
+                        needed_rows += m
+
+                    if needed_rows > 0:
+                        ws = b.get_ws(needed_rows)
+                        Jbuf, kbuf, fbuf = ws["J"], ws["k"], ws["f"]
+                        rows = 0
+                        for con, m in prepared:
+                            if con.bodyA is b:
+                                J = con.JA
+                            elif con.bodyB is b:
+                                J = con.JB
+                            else:
+                                continue
+
+                            k = con.penalty_k
+                            C = con.C
+                            lam = con.lambda_
+                            fmin = con.fmin
+                            fmax = con.fmax
+                            hard = con.is_hard
+                            f_add = np.where(hard, clamp(k * C + lam, fmin, fmax), k * C)
+
+                            Jbuf[rows:rows+m, :] = J
+                            kbuf[rows:rows+m] = k
+                            fbuf[rows:rows+m] = f_add
+                            rows += m
+
+                        if rows:
+                            Jv = Jbuf[:rows, :]
+                            kv = kbuf[:rows]
+                            fv = fbuf[:rows]
+
+                            force -= Jv.T @ fv
+                            hessian += Jv.T @ (kv[:, None]*Jv)
+
+                            g_diag = (np.abs(Jv).T @ np.abs(fv))
+                            hessian[np.diag_indices_from(hessian)] += g_diag
+
+                try:
+                    L = np.linalg.cholesky(hessian)
+                    z = np.linalg.solve(L, force)
+                    delta = np.linalg.solve(L.T, z)
+                except np.linalg.LinAlgError:
+                    eps = 1e-8
+                    n = hessian.shape[0]
+                    L = np.linalg.cholesky(hessian + eps*np.eye(n))
+                    z = np.linalg.solve(L, force)
+                    delta = np.linalg.solve(L.T, z)
+
+                dx = delta[:3]
+                dth = delta[3:]
+                b.position[:3] += dx
+                dq = quat_from_rotvec(dth)
+                b.position[3:] = quat_mult(dq, b.position[3:])
+
+            # Dual update (skip on the extra post-stabilization pass)
+            if num_it < self.iterations:
+
+                for con in self._all_constraints:
+                    con.compute_constraint(current_alpha)
+                    hard = con.is_hard
+                    if np.any(hard):
+                        lam_new = clamp(con.penalty_k * con.C + con.lambda_, con.fmin, con.fmax)
+                        con.lambda_[hard] = lam_new[hard]
+
+                        inside_bounds = hard & (con.lambda_ > con.fmin) & (con.lambda_ < con.fmax)
+                        if np.any(inside_bounds):
+                            con.penalty_k[inside_bounds] = np.minimum(con.k_max[inside_bounds], con.penalty_k[inside_bounds] + self.beta * np.abs(con.C[inside_bounds]))
+                    
+                    soft = ~hard
+                    if np.any(soft):
+                        con.penalty_k[soft] = np.minimum(
+                            np.minimum(con.k_max[soft], con.stiffness[soft]),
+                            con.penalty_k[soft] + self.beta * np.abs(con.C[soft])
+                            )
+                        #print("penalty: ",con.penalty_k[soft],"  const: ", con.C[soft])
+                    if hasattr(con, "update_bounds"):
+                        con.update_bounds()
 
             if num_it == self.iterations - 1:
                 for b in self.bodies:
@@ -398,12 +368,7 @@ class Solver:
                         omega = d_theta * inv_dt
                         b.velocity[:3] = (b.position[:3] - b.initial_pos[:3]) * inv_dt
                         b.velocity[3:] = omega
-        
-        if (self._frame_id % 30) == 0:
-            print(self.prof.report())
-            self.prof.reset()
-        self._frame_id += 1
-
+    
 
 ### HELPERS ###
     def print_contacts_summary(self):
