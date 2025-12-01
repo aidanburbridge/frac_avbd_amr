@@ -231,95 +231,210 @@ class ContactConstraint(Constraint):
 class FaceBondPoint(Constraint):
     def __init__(self, A: Body, B: Body,
                  pA_local: np.ndarray, pB_local: np.ndarray,
-                 normal: np.ndarray, k_n: float, k_t: float):
+                 normal: np.ndarray, k_n: float, k_t: float,
+                 area: float,
+                 tensile_strength: float,
+                 fracture_energy: float | None = None,
+                 fracture_toughness: float | None = None,
+                 material_E: float | None = None,
+                 material_nu: float | None = None):
         super().__init__(A, B, rows=3)
 
         # bodies
         self.bodyA = A
         self.bodyB = B
 
-        # Local-space anchors (relative to body centers, in body frames)
+        # Local-space anchors
         self.pA_local = np.asarray(pA_local, dtype=float).reshape(3)
         self.pB_local = np.asarray(pB_local, dtype=float).reshape(3)
 
-        # bond directions (defined in world space using current frame)
-        self.n = _normalize(normal)
-        self.t1, self.t2 = _orthonormal_tangent_basis(self.n)
+        # 1. Establish the basis vectors in world space initially
+        n_world = _normalize(normal)
+        t1_world, t2_world = _orthonormal_tangent_basis(n_world)
 
-        # material properties - linear elastic per direction (n, t1, t2)
+        # 2. Convert them to Body A's local space
+        # This attaches the "bond direction" to Body A, so it rotates with the voxel
+        # Solves co-rotation problem
+        Ra_init = A.rotmat()
+        self.n_local  = Ra_init.T @ n_world
+        self.t1_local = Ra_init.T @ t1_world
+        self.t2_local = Ra_init.T @ t2_world
+
+        # Placeholders for the current frame's world-space vectors
+        self.n_current = np.zeros(3)
+        self.t1_current = np.zeros(3)
+        self.t2_current = np.zeros(3)
+
+        # Material parameters (bookkeeping)
+        self.material_E = None if material_E is None else float(material_E)
+        self.material_nu = None if material_nu is None else float(material_nu)
+
+        # Base Elastic Stiffness
+        # Rows: [0]-Normal / [1]-Tangent1 / [2]-Tangent2
         self.stiffness[:] = np.array([float(k_n), float(k_t), float(k_t)], dtype=float)
 
-        # per-row rest offsets along (n, t1, t2)
         self.rest = np.zeros(3, dtype=float)
         self._rest_initialized = False
 
-        # explicitly set force bounds as inf (unbounded linear springs)
+        # Bounds preset
         self.fmax[:] = np.inf
         self.fmin[:] = -np.inf
 
         self._cache = None
 
+        # Fracture Properties
+        fracture_energy = _get_fracture_energy(material_E, material_nu, fracture_energy, fracture_toughness)
+
+        # 1. Elastic limits
+        self.delta_n0 = (tensile_strength * area) / float(k_n)
+        self.delta_s0 = (tensile_strength * area) / float(k_t)
+        # 2. Critical limits TODO check on the math here
+        self.delta_nc = (2.0 * fracture_energy) / tensile_strength # normal
+        self.delta_sc = (2.0 * fracture_energy) / tensile_strength # shear
+
+        # Fracture State
+        self.lam_current = 0.0
+        self.is_broken = False
+        self.is_cohesive = False
+
+        # Fracture history
+        self.lam_max_committed = 0.0
+
+        # Damage to scale stiffness
+        self.damage = 0.0
+
     def initialize(self):
-        """Spring-like init: set rest from current anchors; recompute JA/JB; reseed penalty."""
         A, B = self.bodyA, self.bodyB
 
-        # Current world rotations and lever arms
-        RA = A.rotmat(); RB = B.rotmat()
-        rA = RA @ self.pA_local; rB = RB @ self.pB_local
+        # 1. Get current Rotations
+        RA = A.rotmat()
+        RB = B.rotmat()
 
-        # Current anchors and separation
+        # 2. Update Anchors (World Space)
+        rA = RA @ self.pA_local
+        rB = RB @ self.pB_local
         pA = A.position[:3] + rA
         pB = B.position[:3] + rB
         dp = pA - pB
 
-        # Only capture the rest pose once so strain accumulates across frames
+        # 3. Rotate the LOCAL basis vectors into CURRENT WORLD vectors
+        # If the assembly rotates, RA changes, so n_current changes direction in world space,
+        # but stays aligned relative to Body A.
+        self.n_current  = RA @ self.n_local
+        self.t1_current = RA @ self.t1_local
+        self.t2_current = RA @ self.t2_local
+
+        # 4. Initialize Rest Length (Scalar distances don't care about rotation)
         if not self._rest_initialized:
-            self.rest[0] = float(np.dot(self.n,  dp))
-            self.rest[1] = float(np.dot(self.t1, dp))
-            self.rest[2] = float(np.dot(self.t2, dp))
+            self.rest[0] = float(np.dot(self.n_current,  dp))
+            self.rest[1] = float(np.dot(self.t1_current, dp))
+            self.rest[2] = float(np.dot(self.t2_current, dp))
             self._rest_initialized = True
 
-        # Build Jacobians from current lever arms
-        directions = (self.n, self.t1, self.t2)
-        for row, dir in enumerate(directions):
-            ang_A = np.cross(rA, dir)
-            ang_B = np.cross(rB, dir)
-            self.JA[row, :self.dof] = np.hstack([ dir,  ang_A])
-            self.JB[row, :self.dof] = np.hstack([-dir, -ang_B])
+        # 5. Build Jacobians using CURRENT directions
+        directions = (self.n_current, self.t1_current, self.t2_current)
+        for row, dir_vec in enumerate(directions):
+            ang_A = np.cross(rA, dir_vec)
+            ang_B = np.cross(rB, dir_vec)
+            self.JA[row, :self.dof] = np.hstack([ dir_vec,  ang_A])
+            self.JB[row, :self.dof] = np.hstack([-dir_vec, -ang_B])
 
-        # Reseed solver penalty to material stiffness for bonds (prevents decay across frames)
-        self.penalty_k[:] = self.stiffness
-
-        # Do not create a cache so solver recomputes derivatives/constraints from current state
+        if self.is_broken:
+            self.penalty_k[:] = 0.0
+        else:
+            self.penalty_k[:] = self.stiffness * (1.0 - self.damage)
         self._cache = None
         return True
 
     def compute_constraint(self, alpha: float):
-        """C = projection of current separation minus rest (ignores alpha like C++ spring)."""
+        """ Project current separation onto CURRENT basis vectors. """
+
+        # If broken, no constraint to enforce. 
+        if self.is_broken:
+            self.C[:] = 0.0
+            self.penalty_k[:] = 0.0
+            return
+        
         A, B = self.bodyA, self.bodyB
-        RA = A.rotmat(); RB = B.rotmat()
-        rA = RA @ self.pA_local; rB = RB @ self.pB_local
+        RA = A.rotmat()
+        RB = B.rotmat()
+        rA = RA @ self.pA_local
+        rB = RB @ self.pB_local
         pA = A.position[:3] + rA
         pB = B.position[:3] + rB
         dp = pA - pB
-        self.C[0] = float(np.dot(self.n,  dp) - self.rest[0])
-        self.C[1] = float(np.dot(self.t1, dp) - self.rest[1])
-        self.C[2] = float(np.dot(self.t2, dp) - self.rest[2])
+        
+        self.C[0] = float(np.dot(self.n_current,  dp) - self.rest[0])
+        self.C[1] = float(np.dot(self.t1_current, dp) - self.rest[1])
+        self.C[2] = float(np.dot(self.t2_current, dp) - self.rest[2])
+
+        # Separation delta
+        d_n = max(self.C[0], 0)                     # normal 
+        d_s = np.sqrt(self.C[1]**2 + self.C[2]**2)  # shear magnitude
+
+        # Crack initiation check 
+        if not self.is_cohesive and not self.is_broken:
+            Psi = (d_n / self.delta_n0)**2 + (d_s / self.delta_s0)**2
+            if Psi >= 1.0: # Go to cohesive region
+                self.is_cohesive = True
+                self.lam_max_committed = self.lam_calc(d_n, d_s)
+
+        # Cohesive softening
+        if self.is_cohesive:
+            lam = self.lam_calc(d_n, d_s)
+
+            # Update history max lambda (irreverisbility)
+            self.lam_current = max(self.lam_max_committed, lam)
+
+            if self.lam_current >= 1.0:
+                self.damage = 1.0
+                self.penalty_k[:] = 0.0
+            else:
+                # Calculate damage based on current state
+                curr_lam_cr = np.sqrt((self.delta_n0/self.delta_nc)**2) # Pure Mode I TODO maybe update for more complex situations
+                if d_s > 1e-9: # Non-zero I guess (?) TODO
+                    curr_lam_cr = np.sqrt( ((d_n/self.delta_nc)**2 + (d_s/self.delta_sc)**2)/
+                                           ((d_n/self.delta_n0)**2 + (d_s/self.delta_s0)**2))
+            
+                if self.lam_max_committed > curr_lam_cr:
+                    self.damage = (self.lam_max_committed - curr_lam_cr) / (1.0 - curr_lam_cr)
+                    self.damage = clamp(self.damage, 0.0, 1.0)
+                else:
+                    self.damage = 0.0
+                
+                self.penalty_k[:] = self.stiffness * (1.0 - self.damage)
+    
+    def commit_damage(self):
+        """Finalize and commit the damage at the end of the time step."""
+        if self.is_cohesive:
+            self.lam_max_committed = max(self.lam_max_committed, self.lam_current)
+
+            if self.lam_max_committed >= 1.0:
+                self.is_broken = True
+    
 
     def compute_derivatives(self, body: Body):
-        """Recompute J rows from current lever arms (C++ spring style)."""
+        """Recompute J rows using CURRENT basis vectors."""
         A, B = self.bodyA, self.bodyB
-        RA = A.rotmat(); RB = B.rotmat()
-        rA = RA @ self.pA_local; rB = RB @ self.pB_local
-        directions = (self.n, self.t1, self.t2)
+        RA = A.rotmat()
+        RB = B.rotmat()
+        rA = RA @ self.pA_local
+        rB = RB @ self.pB_local
+        
+        directions = (self.n_current, self.t1_current, self.t2_current)
+        
         if body is self.bodyA:
-            for row, dir in enumerate(directions):
-                ang_A = np.cross(rA, dir)
-                self.JA[row, :self.dof] = np.hstack([dir, ang_A])
+            for row, dir_vec in enumerate(directions):
+                ang_A = np.cross(rA, dir_vec)
+                self.JA[row, :self.dof] = np.hstack([dir_vec, ang_A])
         elif body is self.bodyB:
-            for row, dir in enumerate(directions):
-                ang_B = np.cross(rB, dir)
-                self.JB[row, :self.dof] = np.hstack([-dir, -ang_B])
+            for row, dir_vec in enumerate(directions):
+                ang_B = np.cross(rB, dir_vec)
+                self.JB[row, :self.dof] = np.hstack([-dir_vec, -ang_B])
+
+    def lam_calc(self, d_n, d_s):
+        return np.sqrt((d_n/self.delta_nc)**2 + (d_s/self.delta_sc)**2)
+                
 
 ### -------------------- Utils & Helpers -------------------- ###
 def clamp(x, lo, hi):
@@ -353,7 +468,7 @@ def _normalize(v):
         return v
     return v / n
 
-def build_face_bonds(A: Body, B: Body, E: float, nu: float) -> list[FaceBondPoint]:
+def build_face_bonds(A: Body, B: Body, E: float, nu: float, tensile_strength: float, fracture_toughness: float) -> list[FaceBondPoint]:
     """
     Create face bond constraints between two bodies for number of Guass points - (2x2 Guass points).
     Works in local coordinates.
@@ -415,6 +530,37 @@ def build_face_bonds(A: Body, B: Body, E: float, nu: float) -> list[FaceBondPoin
             pB_local[t1i]   =   s1 * xi * hB[t1i]
             pB_local[t2i]   =   s2 * xi * hB[t2i]
 
-            bonds.append(FaceBondPoint(A, B, pA_local, pB_local, n_world, k_n*w_share, k_t*w_share))
+            bonds.append(
+                FaceBondPoint(
+                    A,
+                    B,
+                    pA_local,
+                    pB_local,
+                    n_world,
+                    k_n*w_share,
+                    k_t*w_share,
+                    area*w_share,
+                    tensile_strength=tensile_strength,
+                    fracture_toughness=fracture_toughness,
+                    material_E=E,
+                    material_nu=nu,
+                )
+            )
 
     return bonds
+
+def _get_fracture_energy( E: float, nu: float, G_c: float | None = None, K_Ic: float | None = None) -> float:
+    """
+    Get Critical Energy release rate (G_c) in J/m^2 from Fracture Toughness K_Ic.
+
+    Also just convient here for error handling outside of constraint.
+    """
+    if G_c is not None:
+        return float(G_c)
+    
+    if K_Ic is not None:
+        
+        calc_Gc = (K_Ic**2 * (1.0 - nu**2)) / E
+        return calc_Gc
+    
+    raise ValueError("You must provide either Fracture Energy (G_c) OR Fracture Toughness (K_Ic).")    

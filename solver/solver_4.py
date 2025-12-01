@@ -1,7 +1,7 @@
 # SOLVER
 import numpy as np
 from geometry.primitives import Body, quat_from_rotvec, quat_log, quat_mult, quat_conjugate
-from .constraints import Constraint, ContactConstraint, clamp
+from .constraints import Constraint, ContactConstraint, clamp, FaceBondPoint
 from . import collisions
 from .manifold import Manifold
 from collections import defaultdict
@@ -60,7 +60,7 @@ class Solver:
     def _build_contact_constraints(self):
 
         raw = collisions.get_collisions(self.bodies, ignore_ids=None)
-        #raw = self._limit_contacts_by_assembly(raw)
+        raw = self._limit_contacts_by_assembly(raw)
         
         # Group by canonical pair (ida < idb) and canonicalize each contact orientation
         pairmap = defaultdict(list)
@@ -76,12 +76,8 @@ class Solver:
                 c.normal = -c.normal
             pairmap[(a, b)].append(c)
 
-        #print("New pairmap:")
         # Update manifolds per pair (rebuild fresh; warm-start only λ,k)
         for (a, b), contacts in pairmap.items():
-            # print(f"\tBody A: {a} \tBody B: {b}\n\t\tContacts:")
-            # for c in contacts:
-            #     print("\t\t",c)
             mf = self.manifolds.get((a, b))
             if mf is None:
                 mf = Manifold(id2body[a], id2body[b])
@@ -161,6 +157,118 @@ class Solver:
     
     def add_persistent_constraints(self, constraints: list[Constraint]):
         self.persistent_constraints.extend(constraints)
+
+    def recalculate_assembly_ids(self):
+        """Regroup bodies into assemblies based on the remaining (unbroken) bonds."""
+        if not self.bodies:
+            return
+
+        # 1. Build Adjacency Graph (only active bonds)
+        adj = defaultdict(list)
+        active_bodies = set()
+        for con in self.persistent_constraints:
+            if isinstance(con, FaceBondPoint) and not getattr(con, "is_broken", False):
+                ida = int(con.bodyA.body_id)
+                idb = int(con.bodyB.body_id)
+                adj[ida].append(idb)
+                adj[idb].append(ida)
+                active_bodies.add(ida)
+                active_bodies.add(idb)
+
+        # 2. Assign IDs via BFS
+        # Start new IDs higher than any existing to avoid collision with logic elsewhere
+        next_id = self.next_assembly_id
+        visited = set()
+        
+        # Map body_id -> Body object for quick update
+        id_to_body = {int(b.body_id): b for b in self.bodies}
+
+        # Helper to flood fill a component
+        def flood_fill(start_id, asm_id):
+            queue = [start_id]
+            visited.add(start_id)
+            while queue:
+                curr = queue.pop()
+                if curr in id_to_body:
+                    id_to_body[curr].assembly_id = asm_id
+                for nbr in adj[curr]:
+                    if nbr not in visited:
+                        visited.add(nbr)
+                        queue.append(nbr)
+
+        # Iterate all bodies to handle isolated ones too
+        for bid in id_to_body:
+            if bid not in visited:
+                flood_fill(bid, next_id)
+                next_id += 1
+        
+        self.next_assembly_id = next_id
+
+    # In solver_4.py -> Solver class
+
+    def handle_potential_split(self, body_start: Body, body_target: Body):
+        """
+        Local topology check. Called when the bond between body_start and 
+        body_target breaks. Checks if a path still exists between them. 
+        If not, assigns a new assembly_id to the chunk attached to body_start.
+        """
+        # 1. Optimistic Check: If they already have different IDs, we are done.
+        # (This happens if multiple bonds break in one frame separating the same chunk)
+        if body_start.assembly_id != body_target.assembly_id:
+            return
+
+        target_id = body_target.assembly_id
+        
+        # 2. Build Local Adjacency Graph
+        # Optimization: Only look at bonds connected to this specific assembly ID.
+        adj = defaultdict(list)
+        
+        # Note: We iterate persistent_constraints to find active paths.
+        # Since the broken bond already has .is_broken=True, 
+        # this loop will naturally ignore it, which is exactly what we want.
+        for con in self.persistent_constraints:
+            if isinstance(con, FaceBondPoint) and not con.is_broken:
+                # We only care about connections within the current assembly
+                if con.bodyA.assembly_id == target_id:
+                    adj[con.bodyA].append(con.bodyB)
+                    adj[con.bodyB].append(con.bodyA)
+
+        # 3. BFS / Flood Fill
+        # Try to reach body_target starting from body_start
+        queue = [body_start]
+        visited = {body_start}
+        found_target = False
+        
+        # Track the cluster we are traversing so we can re-ID it if we fail to find target
+        cluster_nodes = [body_start]
+        
+        idx = 0
+        while idx < len(queue):
+            curr = queue[idx]
+            idx += 1
+            
+            if curr == body_target:
+                found_target = True
+                break # Path exists! They are still the same assembly.
+            
+            for neighbor in adj[curr]:
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append(neighbor)
+                    cluster_nodes.append(neighbor)
+
+        # 4. Handle Split
+        if not found_target:
+            # We traversed the whole cluster attached to body_start and
+            # never found body_target. This means body_start has broken off.
+            
+            new_id = self.next_assembly_id
+            self.next_assembly_id += 1
+            
+            print(f"[Fracture] Split detected! Assembly {target_id} -> {new_id}")
+            
+            for b in cluster_nodes:
+                b.assembly_id = new_id
                 
     def step(self):
 
@@ -369,6 +477,22 @@ class Solver:
                         b.velocity[:3] = (b.position[:3] - b.initial_pos[:3]) * inv_dt
                         b.velocity[3:] = omega
     
+        # Update fracture here 
+        # Check for bonds exceeding facture energy levels - remove necessary 
+        broken_bonds = []
+        for con in self.persistent_constraints:
+            if isinstance(con, FaceBondPoint):
+                con.commit_damage()
+                if con.is_broken:
+                    broken_bonds.append(con)
+                    # Enable collision for exposed faces
+                    con.bodyA.collidable = True
+                    con.bodyB.collidable = True
+        if broken_bonds:
+            for con in broken_bonds:
+                self.persistent_constraints.remove(con)
+            
+            self.recalculate_assembly_ids()
 
 ### HELPERS ###
     def print_contacts_summary(self):

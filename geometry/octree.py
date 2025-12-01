@@ -276,7 +276,9 @@ def build_constraints_from_tree(
         bodies: list[box_3D],
         leaf_key_to_body_index: dict[tuple[int,int,int,int], int],
         E: float,
-        nu: float) -> list[FaceBondPoint]:
+        nu: float,
+        tensile_strength: float,
+        fracture_toughness: float) -> list[FaceBondPoint]:
     """
     Creates a list of bonds between adjacent octree voxels belonging to the same solidbody.
     Only generates bonds in the positive neighbor direction to not create duplicates.
@@ -311,7 +313,14 @@ def build_constraints_from_tree(
                 continue
             A = bodies[a_idx]
             B = bodies[b_idx]
-            bonds.extend(build_face_bonds(A,B,E,nu))
+            bonds.extend(build_face_bonds(
+                A,
+                B,
+                E,
+                nu,
+                tensile_strength=tensile_strength,
+                fracture_toughness=fracture_toughness,
+            ))
             dsu.union(a_idx, b_idx)
     
     for idx, b in enumerate(bodies):

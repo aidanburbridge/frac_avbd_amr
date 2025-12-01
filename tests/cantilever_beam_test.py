@@ -23,7 +23,7 @@ STL_PATH = r"C:\Users\aidan\Documents\TUM\Thesis\10x10x50_beam.stl"
 
 # Voxelization
 stlvox = vox.STLVoxelizer(STL_PATH)
-occ, origin, h_cube = stlvox.voxelize_to_resolution(40)
+occ, origin, h_cube = stlvox.voxelize_to_resolution(4)
 print("Origin: ", origin)
 
 # Octree & Cubes
@@ -36,15 +36,23 @@ boxes, mapping = oct.instantiate_boxes_from_tree(
     penalty_gain=1e5,
     static=False,
 )
-beam_bonds = oct.build_constraints_from_tree(leaves, boxes, mapping, E=10e5, nu=0.25)
+beam_bonds = oct.build_constraints_from_tree(
+    leaves,
+    boxes,
+    mapping,
+    E=10e5,
+    nu=0.25,
+    tensile_strength=5e4,
+    fracture_toughness=1e4,
+)
 solver.add_persistent_constraints(beam_bonds)
 
 fall_cube = box_3D(
-    (0, 30, 40),
-    (0, 0, 0,0),
+    (0, 50, 40),
+    (0, 0, 0.258819, 0.9659258 ),
+    (0,-30,0),
     (0,0,0),
-    (0,0,0),
-    1,
+    10,
     10e5,
     (10,10,10),
     False
@@ -68,7 +76,7 @@ for b in boxes:
 
 print("Total static: ", num_stat)
 
-run_visualizer_headless(solver, solver.bodies, num_steps=500)#, save_path="beam_test_05")
+run_visualizer_headless(solver, solver.bodies, num_steps=300)#, save_path="beam_test_05")
 
 
 # BEAM DIMENSIONS
