@@ -265,13 +265,11 @@ class FaceBondPoint(Constraint):
         self.t1_current = np.zeros(3)
         self.t2_current = np.zeros(3)
 
-        # Material parameters (bookkeeping)
-        self.material_E = None if material_E is None else float(material_E)
-        self.material_nu = None if material_nu is None else float(material_nu)
-
         # Base Elastic Stiffness
         # Rows: [0]-Normal / [1]-Tangent1 / [2]-Tangent2
         self.stiffness[:] = np.array([float(k_n), float(k_t), float(k_t)], dtype=float)
+        self.area = float(area)
+        self.tensile_strength = float(tensile_strength)
 
         self.rest = np.zeros(3, dtype=float)
         self._rest_initialized = False
@@ -284,6 +282,10 @@ class FaceBondPoint(Constraint):
 
         # Fracture Properties
         fracture_energy = _get_fracture_energy(material_E, material_nu, fracture_energy, fracture_toughness)
+        self.fracture_energy = float(fracture_energy)
+        self.fracture_toughness = None if fracture_toughness is None else float(fracture_toughness)
+        self.material_E = None if material_E is None else float(material_E)
+        self.material_nu = None if material_nu is None else float(material_nu)
 
         # 1. Elastic limits
         self.delta_n0 = (tensile_strength * area) / float(k_n)

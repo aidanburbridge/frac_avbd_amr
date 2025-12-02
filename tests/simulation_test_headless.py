@@ -1,19 +1,32 @@
+from __future__ import annotations
+
+import argparse
 
 # Project imports (your current layout)
 from geometry.primitives import box_3D
-from solver.solver_3 import Solver
+from solver.hybrid_solver import HybridWorld
+from solver.solver_4 import Solver
 
 from util.pyvista_visualizer import run_visualizer_headless
 
 
-# SOLVER
-solver = Solver(dt=1/60, num_iterations=15, gravity=-9.81)
-solver.mu = 0.3
-solver.post_stabilize = True
-solver.beta = 10000
-solver.alpha = 0.95
-solver.gamma = 0.99
-solver.debug_contacts = False
+def _parse_args():
+    parser = argparse.ArgumentParser(description="Simple headless drop test.")
+    parser.add_argument(
+        "--solver",
+        choices=["hybrid", "python"],
+        default="hybrid",
+        help="Choose Julia hybrid or pure Python solver_3.",
+    )
+    parser.add_argument(
+        "--no-sync",
+        action="store_true",
+        help="For hybrid: skip copying poses back each frame (Julia-only timing).",
+    )
+    return parser.parse_args()
+
+
+ARGS = _parse_args()
 
 
 ground = box_3D(
@@ -67,7 +80,27 @@ cube4 = box_3D(
     static=False
 )
 
-for b in (ground, cube1, cube2, cube3, cube4):
-    solver.add_body(b)
+if ARGS.solver == "hybrid":
+    bodies = [ground, cube1, cube2, cube3, cube4]
+    solver = HybridWorld(
+        bodies,
+        constraints=[],
+        dt=1 / 60,
+        iterations=15,
+        gravity=-9.81,
+        sync_bodies=not ARGS.no_sync,
+    )
+    body_list = bodies
+else:
+    solver = Solver(dt=1 / 60, num_iterations=15, gravity=-9.81)
+    solver.mu = 0.3
+    solver.post_stabilize = True
+    solver.beta = 10000
+    solver.alpha = 0.95
+    solver.gamma = 0.99
+    solver.debug_contacts = False
+    for b in (ground, cube1, cube2, cube3, cube4):
+        solver.add_body(b)
+    body_list = solver.bodies
 
-run_visualizer_headless(solver, solver.bodies, num_steps=500)
+run_visualizer_headless(solver, body_list, num_steps=500)
