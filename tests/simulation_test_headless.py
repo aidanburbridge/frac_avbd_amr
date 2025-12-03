@@ -16,7 +16,7 @@ def _parse_args():
         "--solver",
         choices=["hybrid", "python"],
         default="hybrid",
-        help="Choose Julia hybrid or pure Python solver_3.",
+        help="Choose Julia hybrid or pure Python solver_4.",
     )
     parser.add_argument(
         "--no-sync",

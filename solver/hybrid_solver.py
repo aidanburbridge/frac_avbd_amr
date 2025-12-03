@@ -16,10 +16,11 @@ class HybridSolver:
     performs the heavy math so we avoid per-frame data shuttling.
     """
 
-    def __init__(self, dt: float, iterations: int, gravity: float = -9.81, project: Optional[str] = None) -> None:
+    def __init__(self, dt: float, iterations: int, gravity: float = -9.81, friction: float = 0.5, project: Optional[str] = None) -> None:
         self.dt = float(dt)
         self.iterations = int(iterations)
         self.gravity = float(gravity)
+        self.friction = float(friction)
         self._jl, self._bridge = self._load_bridge(project)
         self._sim = None
 
@@ -107,7 +108,7 @@ class HybridSolver:
         kwargs_jl = {k: _to_julia_array(v) for k, v in kwargs.items()}
 
         self._sim = self._bridge.init_system(
-            pos_jl, vel_jl, mass_jl, bond_jl, self.dt, self.gravity, self.iterations, **kwargs_jl
+            pos_jl, vel_jl, mass_jl, bond_jl, self.dt, self.gravity, self.iterations, friction=self.friction, **kwargs_jl
         )
         return self._sim
 
@@ -208,18 +209,20 @@ class HybridWorld:
         dt: float,
         iterations: int,
         gravity: float = -9.81,
+        friction: float = 0.5,
         project: Optional[str] = None,
         sync_bodies: bool = True,
     ) -> None:
         self.dt = float(dt)
         self.iterations = int(iterations)
         self.gravity = float(gravity)
+        self.friction = float(friction)
         self.bodies = list(bodies)
         self.constraints = list(constraints)
         self.contact_constraints = []  # placeholder for visualizer API
         self._sync_bodies = bool(sync_bodies)
 
-        self._solver = HybridSolver(self.dt, self.iterations, self.gravity, project)
+        self._solver = HybridSolver(self.dt, self.iterations, self.gravity, friction=self.friction, project=project)
 
         pos, vel, masses, sizes, assembly_ids, idx_map = _body_arrays(self.bodies)
         bonds = _bond_rows(self.constraints, idx_map)

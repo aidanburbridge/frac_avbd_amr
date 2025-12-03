@@ -17,12 +17,13 @@ function init_system(
     dt::Float64,
     gravity::Float64,
     iters::Int;
+    friction::Float64=0.5,
     sizes::Union{Matrix{Float64},Nothing}=nothing,
     assembly_ids::Union{Vector{Int},Nothing}=nothing
 )
     # Create the SimulationState object
     # This object stays in Julia memory
-    sim = PhysicsCore.init_simulation(pos, vel, masses, bond_data, dt, gravity, iters; sizes=sizes, assembly_ids=assembly_ids)
+    sim = PhysicsCore.init_simulation(pos, vel, masses, bond_data, dt, gravity, iters; friction=friction, sizes=sizes, assembly_ids=assembly_ids)
     return sim
 end
 

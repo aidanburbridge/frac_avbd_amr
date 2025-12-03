@@ -180,7 +180,6 @@ def _build_actor_box(plotter: pv.Plotter, body: box_3D, color: Optional[str] = N
         color=(color or "royalblue"),
         smooth_shading=True,
         show_edges=False,
-        opacity=0.7,
     )
 
     def update():

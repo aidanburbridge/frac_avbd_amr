@@ -37,8 +37,8 @@ import geometry.octree as oct
 # simulate beam bending under gravity
 
 # Shared solver params
-DT = 1 / 60
-ITER = 15
+DT = 1 / 240
+ITER = 60
 GRAV = -9.81
 
 #STL
@@ -46,7 +46,7 @@ STL_PATH = r"C:\Users\aidan\Documents\TUM\Thesis\10x10x50_beam.stl"
 
 # Voxelization
 stlvox = vox.STLVoxelizer(STL_PATH)
-occ, origin, h_cube = stlvox.voxelize_to_resolution(40)
+occ, origin, h_cube = stlvox.voxelize_to_resolution(200)
 print("Origin: ", origin)
 
 # Octree & Cubes
@@ -55,7 +55,7 @@ boxes, mapping = oct.instantiate_boxes_from_tree(
     leaves,
     origin=origin,
     h_base=h_cube,
-    density=1.0,
+    density=.10,
     penalty_gain=1e5,
     static=False,
 )
@@ -65,8 +65,8 @@ beam_bonds = oct.build_constraints_from_tree(
     mapping,
     E=10e5,
     nu=0.25,
-    tensile_strength=5e4,
-    fracture_toughness=1e4,
+    tensile_strength=5e8,
+    fracture_toughness=1e6,
 )
 
 # Build a base assembly that we can duplicate and transform
@@ -96,7 +96,8 @@ if USE_HYBRID:
         dt=DT,
         iterations=ITER,
         gravity=GRAV,
-        sync_bodies=SYNC_BODIES,  # set False to time pure Julia without pose round-trips
+        sync_bodies=SYNC_BODIES,  # set False to time pure Julia without pose round-trip
+        friction=0.3,
     )
 else:
     solver = Solver(dt=DT, num_iterations=ITER, gravity=GRAV)
@@ -115,7 +116,7 @@ else:
 num_stat = sum(1 for body in cantilever.bodies if getattr(body, "static", False))
 print("Total static: ", num_stat)
 
-run_visualizer_headless(solver, cantilever.bodies + falling_beam.bodies, num_steps=500)#, save_path="beam_test_05")
+run_visualizer_headless(solver, cantilever.bodies + falling_beam.bodies, num_steps=1000)#, save_path="beam_test_05")
 
 if __name__ == "__main__" and _unknown:
     # If extra args were provided, show a warning so users know they were ignored.
