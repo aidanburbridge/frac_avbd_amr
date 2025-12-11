@@ -145,8 +145,8 @@ end
 function prepare_contacts!(sim::SimulationState, dt::Float64)
     @inbounds for i in 1:sim.active_contact_count
         con = sim.contact_buffer[i]
-        bA = sim.bodies[con.body_idx_a + 1]
-        bB = sim.bodies[con.body_idx_b + 1]
+        bA = sim.bodies[con.body_idx_a+1]
+        bB = sim.bodies[con.body_idx_b+1]
         prepare_contact!(con, bA, bB, dt)
     end
 end
@@ -154,8 +154,8 @@ end
 function solve_contacts!(sim::SimulationState)
     @inbounds for i in 1:sim.active_contact_count
         con = sim.contact_buffer[i]
-        bA = sim.bodies[con.body_idx_a + 1]
-        bB = sim.bodies[con.body_idx_b + 1]
+        bA = sim.bodies[con.body_idx_a+1]
+        bB = sim.bodies[con.body_idx_b+1]
         solve_contact!(con, bA, bB)
     end
 end
@@ -210,7 +210,7 @@ function init_simulation(
         v_ang = Vec3(vel_flat[i, 4], vel_flat[i, 5], vel_flat[i, 6])
 
         mass = masses[i]
-        is_static = (mass == Inf)
+        is_static = (mass == Inf) && (norm(v_lin) == 0.0) && (norm(v_ang) == 0.0)
         asm_id = assembly_ids === nothing ? -1 : assembly_ids[i]
 
         bodies[i] = Body(i - 1, asm_id, is_static, p, q, size_v, mass; vel=v_lin, ang_vel=v_ang)

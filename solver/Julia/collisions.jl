@@ -305,7 +305,9 @@ function sat_check(bA::Body, bB::Body)
     return (Vec3(best_axis[1], best_axis[2], best_axis[3]), min_overlap)
 end
 
-@inline function clip_poly_to_plane!(poly::MVector{8,Vec3}, poly_len::Int, normal::Vec3, offset::Float64, scratch::MVector{8,Vec3})
+const POLY_CLIP_CAP = 16
+
+@inline function clip_poly_to_plane!(poly::MVector{POLY_CLIP_CAP,Vec3}, poly_len::Int, normal::Vec3, offset::Float64, scratch::MVector{POLY_CLIP_CAP,Vec3})
     if poly_len == 0
         return 0
     end
@@ -323,21 +325,31 @@ end
                 if abs(denom) > TOL_AXIS
                     t = (offset - dot(normal, prev)) / denom
                     out_len += 1
-                    scratch[out_len] = prev + t * (curr - prev)
+                    if out_len <= POLY_CLIP_CAP
+                        scratch[out_len] = prev + t * (curr - prev)
+                    end
                 end
             end
             out_len += 1
-            scratch[out_len] = curr
+            if out_len <= POLY_CLIP_CAP
+                scratch[out_len] = curr
+            end
         elseif prev_in
             denom = dot(normal, curr - prev)
             if abs(denom) > TOL_AXIS
                 t = (offset - dot(normal, prev)) / denom
                 out_len += 1
-                scratch[out_len] = prev + t * (curr - prev)
+                if out_len <= POLY_CLIP_CAP
+                    scratch[out_len] = prev + t * (curr - prev)
+                end
             end
         end
         prev = curr
         prev_in = curr_in
+    end
+
+    if out_len > POLY_CLIP_CAP
+        out_len = POLY_CLIP_CAP
     end
 
     unique_len = 0
@@ -428,12 +440,12 @@ function build_manifold!(bA::Body, bB::Body, sat_normal::Vec3, overlap::Float64,
 
     inc_face = get_face_vertices(inc_body, inc_idx, inc_sign)
 
-    clipped_poly = MVector{8,Vec3}(undef)
+    clipped_poly = MVector{POLY_CLIP_CAP,Vec3}(undef)
     @inbounds for i in 1:4
         clipped_poly[i] = inc_face[i]
     end
     poly_len = 4
-    scratch = MVector{8,Vec3}(undef)
+    scratch = MVector{POLY_CLIP_CAP,Vec3}(undef)
     wind_dir = dot(cross(ref_face[2] - ref_face[1], ref_face[3] - ref_face[1]), ref_normal) >= 0 ? 1.0 : -1.0
 
     for i in 1:4
@@ -453,8 +465,8 @@ function build_manifold!(bA::Body, bB::Body, sat_normal::Vec3, overlap::Float64,
         return contact_count
     end
 
-    local_points = MVector{8,Vec3}(undef)
-    local_depths = MVector{8,Float64}(undef)
+    local_points = MVector{POLY_CLIP_CAP,Vec3}(undef)
+    local_depths = MVector{POLY_CLIP_CAP,Float64}(undef)
     local_count = 0
 
     @inbounds for i in 1:poly_len
@@ -464,16 +476,22 @@ function build_manifold!(bA::Body, bB::Body, sat_normal::Vec3, overlap::Float64,
             depth = max(0.0, -s)
             contact_p = vert - s * ref_normal
             local_count += 1
-            local_points[local_count] = contact_p
-            local_depths[local_count] = depth
+            if local_count <= POLY_CLIP_CAP
+                local_points[local_count] = contact_p
+                local_depths[local_count] = depth
+            end
         end
+    end
+
+    if local_count > POLY_CLIP_CAP
+        local_count = POLY_CLIP_CAP
     end
 
     if local_count == 0
         return contact_count
     end
 
-    used = MVector{8,Bool}(false, false, false, false, false, false, false, false)
+    used = MVector{POLY_CLIP_CAP,Bool}(false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false)
     keep = min(local_count, 4)
     for _ in 1:keep
         best_idx = 1

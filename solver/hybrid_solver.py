@@ -118,16 +118,33 @@ class HybridSolver:
         self._bridge.step_batch(self._sim, int(steps))
 
     def get_state(self) -> np.ndarray:
+
+        # TODO add in stress data from bridge
         if self._sim is None:
             raise RuntimeError("No simulation initialized.")
         # Minimal transfer: only pull positions/quaternions to Python.
         return np.array(self._bridge.get_positions(self._sim))
+    
+    def write_frame(self, filename: str) -> None:
+        if self._sim is None:
+            return
+        
+        self._bridge.write_frame(self._sim, str(filename))
+    
+    def get_visualization_data(self) -> tuple[np.ndarray, np.ndarray]:
 
+        if self._sim is None:
+            # Return empty arrays
+            return np.zeros((0, 6)), np.zeros((0, 4))
+        
+        # Julia bridge function        
+        stress_jl, bond_jl = self._bridge.get_visualization_data(self._sim)
+
+        return np.array(stress_jl), np.array(bond_jl)
 
 # --------------------------------------------------------------------------- #
 # Python adapter that mirrors the solver_4 interface for easy swapping.
 # --------------------------------------------------------------------------- #
-
 
 def _body_arrays(
     bodies: Iterable[object],
@@ -249,6 +266,11 @@ class HybridWorld:
 
     def get_state(self) -> np.ndarray:
         return self._solver.get_state()
-
+    
+    def write_frame(self, filename:str) -> None:
+        self._solver.write_frame(filename)
+    
+    def get_visualization_data(self) -> tuple[np.ndarray, np.ndarray]:
+        return self._solver.get_visualization_data()
 
 __all__ = ["HybridSolver", "HybridWorld"]

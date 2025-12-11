@@ -52,6 +52,8 @@ _FACE_ALIASES = {
     "down": "bottom",
 }
 
+_AXIS_MAP = {'x': 0, 'y': 1, 'z': 2, 0: 0, 1: 1, 2: 2}
+
 
 def _as_vector(value: Sequence[float] | float) -> np.ndarray:
     arr = np.asarray(value, dtype=float)
@@ -261,6 +263,65 @@ class VoxelAssembly:
         _scale_constraint_anchors(self.constraints, s)
         _reset_constraint_state(self.constraints)
         return self
+    
+    def align_longest_axis(self, target_axis: str = 'z') -> "VoxelAssembly":
+
+        bounds = self.bounds()
+        # Choose longest index from aabb bounds
+        current_idx = np.argmax(bounds.maxs - bounds.mins)
+        target_idx = _AXIS_MAP[target_axis.lower()]
+
+        if current_idx == target_idx:
+            return self
+        
+        v_curr = np.zeros(3)
+        v_target = np.zeros(3)
+
+        # Set target axis index as 1
+        v_curr[current_idx] = 1.0
+        v_target[target_idx] = 1.0
+
+        # Find rotation axis with cross product
+        rot_axis = np.cross(v_curr,v_target)
+        return self.rotate(axis=rot_axis, angle=90, degrees=True)
+    
+    def set_boundary_velocity(
+        self,
+        faces: Sequence[str],
+        velocity: list[float],
+        ratio: float | None = None,
+        distance: float | None = None,
+        debug: bool = False,
+    ) -> "VoxelAssembly":
+
+        targets = self.select_boundary(faces, ratio=ratio, distance=distance)
+        vel = np.array(velocity, dtype=float)
+
+        if debug:
+            self._debug_boundary_selection(targets, faces, vel, ratio, distance)
+    
+        for b in targets:
+            b.mass = np.inf
+            b.static = False
+            b.velocity[:3] = vel
+            b.velocity[3:] = 0.0
+
+        return self
+
+    def set_boundary_fixed(
+        self,
+        faces: Sequence[str],
+        ratio: float | None = None,
+        distance: float | None = None,
+        debug: bool = False,
+    ) -> "VoxelAssembly":
+        return self.set_boundary_velocity(
+            faces,
+            [0.0, 0.0, 0.0],
+            ratio=ratio,
+            distance=distance,
+            debug=debug,
+        )
 
     def set_bond_material(
         self,
@@ -311,7 +372,78 @@ class VoxelAssembly:
         _reset_constraint_state(self.constraints)
         return self
 
-    # ----- fixed faces & static flags -----
+    def _debug_boundary_selection(
+        self,
+        targets: list[box_3D],
+        faces: Sequence[str],
+        velocity: np.ndarray,
+        ratio: float | None,
+        distance: float | None,
+    ) -> None:
+        """Print a summary of voxels tagged by boundary helpers."""
+        total = len(self.bodies)
+        selected = len(targets)
+        fraction = 0.0 if total == 0 else selected / total
+        spec = f"distance={distance}" if distance is not None else f"ratio={ratio}"
+        vel_str = ", ".join(f"{v:.4g}" for v in velocity)
+        print(
+            f"[VoxelAssembly] boundary selection faces={list(faces)} {spec} "
+            f"count={selected}/{total} ({fraction*100:.2f}%) velocity=({vel_str})"
+        )
+        # for idx, body in enumerate(targets):
+        #     center = body.get_center()
+        #     aabb = body.get_aabb()
+        #     label = getattr(body, "body_id", None)
+        #     if label is None:
+        #         label = f"obj-{id(body)}"
+        #     print(
+        #         f"  [{idx}] body_id={label} assembly={getattr(body, 'assembly_id', None)} "
+        #         f"center=({center[0]:.4f}, {center[1]:.4f}, {center[2]:.4f}) "
+        #         f"size=({body.size[0]:.4f}, {body.size[1]:.4f}, {body.size[2]:.4f}) "
+        #         f"aabb=({aabb.min_x:.4f}, {aabb.max_x:.4f}, "
+        #         f"{aabb.min_y:.4f}, {aabb.max_y:.4f}, "
+        #         f"{aabb.min_z:.4f}, {aabb.max_z:.4f}) "
+        #         f"static={body.static}"
+        #     )
+    
+    def select_boundary(self, faces: Sequence[str], ratio: float | None = None, distance: float | None = None) -> list[box_3D]:
+
+        if ratio is not None and distance is not None:
+            raise ValueError("Specify either a ratio or distance, not both.")
+        elif ratio is None and distance is None:
+            raise ValueError("Did not provide either a ratio or a distance.")
+
+        bounds = self.bounds()
+        extents = bounds.maxs - bounds.mins
+        selection = []
+
+        face_list = []
+        for face in faces:
+            key = _FACE_ALIASES.get(face.lower(), face.lower())
+            if key not in _FACE_KEY_MAP:
+                raise ValueError(f"Unknown face '{face}'")
+            face_list.append(_FACE_KEY_MAP[key])
+
+        for body in self.bodies:
+            aabb = body.get_aabb()
+            center = (np.array([aabb.min_x, aabb.min_y, aabb.min_z]) + 
+                      np.array([aabb.max_x, aabb.max_y, aabb.max_z])) * 0.5 
+            
+            for axis, side in face_list:
+                limit = bounds.mins[axis] if side == "min" else bounds.maxs[axis]
+
+                if distance is not None:
+                    threshold = float(distance)
+                else:
+                    r = float(ratio) if ratio is not None else 0.1
+                    threshold = extents[axis] * r
+                
+                dist = abs(center[axis] - limit)
+                if dist <= threshold:
+                    selection.append(body)
+                    break
+        return selection 
+       
     def set_all_static(self, flag: bool) -> "VoxelAssembly":
         for body in self.bodies:
             body.static = bool(flag)
@@ -346,6 +478,8 @@ class VoxelAssembly:
             if face_hits:
                 body.set_static()
         return self
+    
+
 
 
 __all__ = ["VoxelAssembly", "Bounds"]

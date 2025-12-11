@@ -1,6 +1,6 @@
 from geometry.primitives import box_3D
 from solver.solver_4 import Solver
-from util.pyvista_visualizer import run_visualizer, run_visualizer_headless
+from util.pyvista_visualizer import run_visualizer, run_solver_headless
 import geometry.voxelizer as vox
 import geometry.octree as oct
 
@@ -76,7 +76,7 @@ for b in boxes:
 
 print("Total static: ", num_stat)
 
-run_visualizer_headless(solver, solver.bodies, num_steps=300)#, save_path="beam_test_05")
+run_solver_headless(solver, solver.bodies, num_steps=300)#, save_path="beam_test_05")
 
 
 # BEAM DIMENSIONS

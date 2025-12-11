@@ -118,21 +118,21 @@ function solve_contact!(con::ContactConstraint, bA::Body, bB::Body)
 
     delta = con.effective_mass * rhs
 
-    λn = con.lambda_n + delta[1]
-    λt1 = con.lambda_t1 + delta[2]
-    λt2 = con.lambda_t2 + delta[3]
+    lam_n = con.lambda_n + delta[1]
+    lam_t1 = con.lambda_t1 + delta[2]
+    lam_t2 = con.lambda_t2 + delta[3]
 
-    λn = max(0.0, λn)
-    t_limit = con.friction_coeff * λn
-    λt1 = clamp(λt1, -t_limit, t_limit)
-    λt2 = clamp(λt2, -t_limit, t_limit)
+    lam_n = max(0.0, lam_n)
+    t_limit = con.friction_coeff * lam_n
+    lam_t1 = clamp(lam_t1, -t_limit, t_limit)
+    lam_t2 = clamp(lam_t2, -t_limit, t_limit)
 
-    dλ = SVector(λn - con.lambda_n, λt1 - con.lambda_t1, λt2 - con.lambda_t2)
-    con.lambda_n = λn
-    con.lambda_t1 = λt1
-    con.lambda_t2 = λt2
+    d_lam = SVector(lam_n - con.lambda_n, lam_t1 - con.lambda_t1, lam_t2 - con.lambda_t2)
+    con.lambda_n = lam_n
+    con.lambda_t1 = lam_t1
+    con.lambda_t2 = lam_t2
 
-    impulse = con.normal * dλ[1] + con.tangent1 * dλ[2] + con.tangent2 * dλ[3]
+    impulse = con.normal * d_lam[1] + con.tangent1 * d_lam[2] + con.tangent2 * d_lam[3]
 
     if !bA.is_static
         bA.vel -= impulse * bA.inv_mass
@@ -166,11 +166,12 @@ mutable struct FaceBond
     is_broken::Bool
     is_cohesive::Bool
     damage::Float64
-    lam_max_committed::Float64
-    lam_current::Float64
+    max_eff_strain::Float64
+    current_eff_strain::Float64
 
     # Parameters
     stiffness::Vec3
+    current_k::Vec3     # As per AVBD ramping stiffness
     rest_length::Vec3
     limits::SVector{4,Float64}
     age::Int
@@ -182,17 +183,18 @@ mutable struct FaceBond
     rA::Vec3
     rB::Vec3
     effective_mass::SMatrix{3,3,Float64,9}
-    bias_vec::SVector{3,Float64}
-    lambda::SVector{3,Float64}
+
+    #bias_vec::SVector{3,Float64}
+    #lambda::SVector{3,Float64}
 
     function FaceBond(idxA, idxB, pA_loc, pB_loc, n_world, k_n, k_t, area, tensile, fracture_E)
         new(idxA, idxB, pA_loc, pB_loc, Vec3(0, 0, 0), Vec3(0, 0, 0), Vec3(0, 0, 0),
             false, false, 0.0, 0.0, 0.0,
-            Vec3(k_n, k_t, k_t), Vec3(0.0, 0.0, 0.0),
+            Vec3(k_n, k_t, k_t), Vec3(k_n, k_t, k_t), Vec3(0.0, 0.0, 0.0),
             SVector(0.0, 0.0, 0.0, 0.0), 0,
             Vec3(0.0, 0.0, 0.0), Vec3(0.0, 0.0, 0.0), Vec3(0.0, 0.0, 0.0),
             Vec3(0.0, 0.0, 0.0), Vec3(0.0, 0.0, 0.0),
-            ZERO_MAT3, SVector(0.0, 0.0, 0.0), SVector(0.0, 0.0, 0.0))
+            ZERO_MAT3)
     end
 end
 
@@ -230,11 +232,11 @@ end
 end
 
 @inline function compliance_val(k::Float64, dt::Float64)
-    return k > 0.0 ? (1.0 / k) / (dt * dt) : 1e6
+    return k > 0.0 ? (1.0 / k) / (dt * dt) : 1e12
 end
 
 function build_K(bA::Body, bB::Body, rA::Vec3, rB::Vec3, dirs::NTuple{3,Vec3})
-    K = @MMatrix zeros(3,3)
+    K = @MMatrix zeros(3, 3)
     invm = bA.inv_mass + bB.inv_mass
     @inbounds for i in 1:3
         di = dirs[i]
@@ -269,33 +271,24 @@ function prepare_bonds!(bonds::Vector{FaceBond}, bodies::Vector{Body}, dt::Float
         pB_w = transform_point(bond.pB_local, bB.pos, bB.quat)
         bond.rA = pA_w - bA.pos
         bond.rB = pB_w - bB.pos
-        dp = pA_w - pB_w
-
-        err_n = dot(bond.n_curr, dp) - bond.rest_length[1]
-        err_s1 = dot(bond.t1_curr, dp) - bond.rest_length[2]
-        err_s2 = dot(bond.t2_curr, dp) - bond.rest_length[3]
 
         k_scale = (bond.is_cohesive || bond.damage > 0.0) ? (1.0 - bond.damage) : 1.0
+        bond.current_k = bond.stiffness .* k_scale
+
         if k_scale <= 0.0
             bond.effective_mass = ZERO_MAT3
-            bond.bias_vec = SVector(0.0, 0.0, 0.0)
-            bond.lambda = SVector(0.0, 0.0, 0.0)
-            bond.age += 1
             continue
         end
 
-        k_vec = bond.stiffness .* k_scale
         dirs = (bond.n_curr, bond.t1_curr, bond.t2_curr)
         K = build_K(bA, bB, bond.rA, bond.rB, dirs)
 
-        comp_n = compliance_val(k_vec[1], dt)
-        comp_t1 = compliance_val(k_vec[2], dt)
-        comp_t2 = compliance_val(k_vec[3], dt)
+        comp_n = compliance_val(bond.current_k[1], dt)
+        comp_t1 = compliance_val(bond.current_k[2], dt)
+        comp_t2 = compliance_val(bond.current_k[3], dt)
         compliance = @SMatrix [comp_n 0.0 0.0; 0.0 comp_t1 0.0; 0.0 0.0 comp_t2]
 
         bond.effective_mass = inv(K + compliance + EPS_MASS * I)
-        bond.bias_vec = -SVector(err_n, err_s1, err_s2) * (BAUMGARTE / dt)
-        bond.lambda = SVector(0.0, 0.0, 0.0)
 
         bond.age += 1
     end
@@ -306,18 +299,27 @@ function solve_bond!(bond::FaceBond, bA::Body, bB::Body, dt::Float64)
         return
     end
 
-    if bond.effective_mass == ZERO_MAT3 && bond.bias_vec == SVector(0.0, 0.0, 0.0)
+    if bond.effective_mass == ZERO_MAT3
         return
     end
+
+    # Calculate constraint error
+    pA_w = bA.pos + bond.rA
+    pB_w = bB.pos + bond.rB
+    dp = pA_w - pB_w
+
+    err_n = dot(bond.n_curr, dp) - bond.rest_length[1]
+    err_s1 = dot(bond.t1_curr, dp) - bond.rest_length[2]
+    err_s2 = dot(bond.t2_curr, dp) - bond.rest_length[3]
+
+    bias = SVector(err_n, err_s1, err_s2) * (BAUMGARTE / dt)
 
     vA = bA.vel + cross(bA.ang_vel, bond.rA)
     vB = bB.vel + cross(bB.ang_vel, bond.rB)
     v_rel = vA - vB
 
     rel_vec = SVector(dot(bond.n_curr, v_rel), dot(bond.t1_curr, v_rel), dot(bond.t2_curr, v_rel))
-    delta = bond.effective_mass * (bond.bias_vec - rel_vec)
-
-    bond.lambda += delta
+    delta = bond.effective_mass * (-bias - rel_vec)
 
     impulse = bond.n_curr * delta[1] + bond.t1_curr * delta[2] + bond.t2_curr * delta[3]
 
@@ -357,29 +359,34 @@ function commit_bond_damage!(bonds::Vector{FaceBond}, bodies::Vector{Body})
         d_n_val = max(err_n, 0.0)
         d_s_val = sqrt(err_s1^2 + err_s2^2)
 
+        # Update strain for paraview
+        strain = sqrt((d_n_val / delta_nc)^2 + (d_s_val / delta_sc)^2)
+        bond.current_eff_strain = strain
+
         if !bond.is_cohesive
             Psi = (d_n_val / delta_n0)^2 + (d_s_val / delta_s0)^2
             if Psi >= 1.0
                 bond.is_cohesive = true
-                bond.lam_max_committed = sqrt(Psi)
+                bond.max_eff_strain = sqrt(Psi)
             end
         end
 
         if bond.is_cohesive
-            lam = sqrt((d_n_val / delta_nc)^2 + (d_s_val / delta_sc)^2)
-            bond.lam_current = max(bond.lam_max_committed, lam)
+            # TODO Should this be max or current ???
+            bond.current_eff_strain = max(bond.max_eff_strain, strain)
 
-            if bond.lam_current >= 1.0
+            if bond.current_eff_strain >= 1.0
                 bond.is_broken = true
                 bond.damage = 1.0
             else
-                lam_cr = (delta_n0 / delta_nc)
+                strain_cr = (delta_n0 / delta_nc)
                 if d_s_val > 1e-9
-                    lam_cr = sqrt(((d_n_val / delta_nc)^2 + (d_s_val / delta_sc)^2) /
-                                  ((d_n_val / delta_n0)^2 + (d_s_val / delta_s0)^2))
+                    strain_cr = sqrt(((d_n_val / delta_nc)^2 + (d_s_val / delta_sc)^2) /
+                                     ((d_n_val / delta_n0)^2 + (d_s_val / delta_s0)^2))
                 end
-                if bond.lam_max_committed > lam_cr
-                    bond.damage = clamp((bond.lam_max_committed - lam_cr) / (1.0 - lam_cr), 0.0, 1.0)
+
+                if bond.max_eff_strain > strain_cr
+                    bond.damage = clamp((bond.max_eff_strain - strain_cr) / (1.0 - strain_cr), 0.0, 1.0)
                 else
                     bond.damage = 0.0
                 end

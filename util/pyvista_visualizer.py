@@ -25,6 +25,7 @@ You can also pass a custom actor builder mapping to support more body types:
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import copy
 import pickle
 import time
@@ -45,6 +46,26 @@ from tqdm import tqdm
 
 _DEFAULT_RECORDING_DIR = Path("output/frames_list")
 _SAVE_INDEX_WIDTH = 2
+
+
+@dataclass
+class SimulationSetup:
+    """
+    Container describing a simulation without binding to a specific solver backend.
+    """
+
+    bodies: List[object]
+    constraints: List[object] = field(default_factory=list)
+    dt: float = 1 / 60
+    iterations: int = 15
+    gravity: float = -9.81
+    friction: float = 0.3
+    sync_bodies: bool = True
+    python_solver_params: Dict[str, object] = field(default_factory=dict)
+    headless_steps: Optional[int] = None
+    default_save_stem: Optional[str] = None
+    headless_kwargs: Dict[str, object] = field(default_factory=dict)
+    viewer_kwargs: Dict[str, object] = field(default_factory=dict)
 
 
 def _derive_default_stem(explicit: Optional[str] = None) -> str:
@@ -334,6 +355,84 @@ def _deserialize_contact_frames(
 
 # ---------- public API ----------
 
+def build_solver_from_setup(
+    setup: SimulationSetup,
+    solver_type: str = "hybrid",
+):
+    """
+    Create a solver instance from a SimulationSetup for the requested backend.
+    Returns (solver, bodies_for_viewer).
+    """
+
+    solver_choice = (solver_type or "hybrid").lower()
+    bodies = list(setup.bodies)
+    constraints = list(setup.constraints or [])
+
+    if solver_choice == "hybrid":
+        from solver.hybrid_solver import HybridWorld
+
+        solver = HybridWorld(
+            bodies,
+            constraints,
+            dt=setup.dt,
+            iterations=setup.iterations,
+            gravity=setup.gravity,
+            friction=setup.friction,
+            sync_bodies=setup.sync_bodies,
+        )
+        body_list = bodies
+    elif solver_choice == "python":
+        from solver.solver_4 import Solver
+
+        solver = Solver(dt=setup.dt, num_iterations=setup.iterations, gravity=setup.gravity)
+        python_params = {
+            "mu": 0.3,
+            "post_stabilize": True,
+            "beta": 10000,
+            "alpha": 0.95,
+            "gamma": 0.99,
+            "debug_contacts": False,
+        }
+        python_params.update(setup.python_solver_params or {})
+        for attr, value in python_params.items():
+            if hasattr(solver, attr):
+                setattr(solver, attr, value)
+        add_body = getattr(solver, "add_body", None)
+        if callable(add_body):
+            for body in bodies:
+                add_body(body)
+        if constraints:
+            add_constraints = getattr(solver, "add_persistent_constraints", None)
+            if callable(add_constraints):
+                add_constraints(constraints)
+        body_list = list(getattr(solver, "bodies", bodies))
+    else:
+        raise ValueError(f"Unknown solver type '{solver_type}' (expected 'hybrid' or 'python')")
+
+    return solver, body_list
+
+
+def run_simulation(setup: SimulationSetup, solver_type: str = "hybrid"):
+    """
+    Build the requested solver and launch the configured visualizer.
+    """
+
+    solver, viewer_bodies = build_solver_from_setup(setup, solver_type=solver_type)
+    if setup.headless_steps is not None:
+        headless_opts = dict(setup.headless_kwargs or {})
+        if "default_save_stem" not in headless_opts and setup.default_save_stem:
+            headless_opts["default_save_stem"] = setup.default_save_stem
+        return run_solver_headless(
+            solver,
+            viewer_bodies,
+            num_steps=int(setup.headless_steps),
+            **headless_opts,
+        )
+
+    viewer_opts = dict(setup.viewer_kwargs or {})
+    return run_visualizer(solver, viewer_bodies, **viewer_opts)
+
+
 def run_visualizer(
     solver,
     bodies: Iterable[object],
@@ -350,6 +449,8 @@ def run_visualizer(
     contact_point_radius: float = 0.03,
     contact_point_color: str = "yellow",
     update_interval: int = 2,
+    target_fps: float = 30.0,
+    steps_per_frame: Optional[int] = None,
     pause_key: str = "space",
     step_key: Optional[str] = "Right",
     back_key: Optional[str] = "Left",
@@ -364,6 +465,7 @@ def run_visualizer(
     - solver: object with .step() and .contact_constraints (optional)
     - bodies: iterable of body objects; supported: box_3D, rect_2D (fallback cube otherwise)
     - actor_builders: optional mapping {BodyType: (plotter, body, color)->(actor, update)}
+    - target_fps/steps_per_frame: control how many physics steps run before each render
     """
 
     if theme:
@@ -413,7 +515,7 @@ def run_visualizer(
     updaters: List[Callable[[], None]] = []
     bodies_list = list(bodies)
     for i, b in enumerate(bodies_list):
-        _, update = make_actor(plotter, b, palette[i % len(palette)])
+        _, update = make_actor(plotter, b, palette[b.assembly_id])
         updaters.append(update)
 
     # HUD and controls
@@ -542,25 +644,39 @@ def run_visualizer(
     frames = 0
     iter_count = 0
 
+    def _sim_steps_per_frame() -> int:
+        if steps_per_frame is not None:
+            return max(1, int(steps_per_frame))
+        dt = getattr(solver, "dt", None)
+        if dt and target_fps > 0:
+            try:
+                est = (1.0 / float(target_fps)) / float(dt)
+                return max(1, int(round(est)))
+            except Exception:
+                return 1
+        return 1
+
     while _window_is_open(plotter):
+        sim_steps = _sim_steps_per_frame()
         if not paused["flag"]:
-            solver.step()
+            for _ in range(sim_steps):
+                solver.step()
 
-            # Optional compatibility hooks if user bodies expose these
-            for b in bodies_list:
-                if hasattr(b, "pos") and getattr(b, "position", None) is not None and b.position.shape[0] >= 3:
-                    b.pos = b.position[:3].copy()
-                if (
-                    hasattr(b, "integrate_orientation")
-                    and getattr(b, "velocity", None) is not None
-                    and b.velocity.shape[0] >= 6
-                    and not getattr(b, "static", False)
-                ):
-                    b.linear_vel = b.velocity[:3]
-                    b.ang_vel = b.velocity[3:6]
-                    b.integrate_orientation(getattr(solver, "dt", 0.0))
+                # Optional compatibility hooks if user bodies expose these
+                for b in bodies_list:
+                    if hasattr(b, "pos") and getattr(b, "position", None) is not None and b.position.shape[0] >= 3:
+                        b.pos = b.position[:3].copy()
+                    if (
+                        hasattr(b, "integrate_orientation")
+                        and getattr(b, "velocity", None) is not None
+                        and b.velocity.shape[0] >= 6
+                        and not getattr(b, "static", False)
+                    ):
+                        b.linear_vel = b.velocity[:3]
+                        b.ang_vel = b.velocity[3:6]
+                        b.integrate_orientation(getattr(solver, "dt", 0.0))
 
-        iter_count += 1
+        iter_count += sim_steps if not paused["flag"] else 1
         if iter_count % max(1, int(update_interval)) == 0:
             # Contacts overlay
             if paused["flag"] and contact_overlay["show"]:
@@ -700,17 +816,23 @@ def _load_recording(save_path: str):
     return bodies, frames, metadata, contact_frames
 
 
-def run_visualizer_headless(
+def run_solver_headless(
     solver,
     bodies: Iterable[object],
     num_steps: int,
     *,
+    # Standard save options
     save_path: Optional[Union[str, Path, bool]] = None,
     default_save_stem: Optional[str] = None,
     record_interval: int = 1,
     show_progress: bool = True,
     prompt_viewer: bool = True,
     viewer_kwargs: Optional[Dict[str, object]] = None,
+
+    # Binary save 
+    export_binary: bool = False,
+    export_dir: Optional[Union[str, Path]] = "output/raw_data", # Should have same dir as test name & number
+    steps_per_export: int = 1,
 ):
     """
     Run the solver headlessly for a fixed number of steps, recording body poses.
@@ -727,82 +849,101 @@ def run_visualizer_headless(
 
     if num_steps <= 0:
         raise ValueError("num_steps must be positive")
-    if record_interval <= 0:
-        raise ValueError("record_interval must be positive")
+    
+    # if record_interval <= 0:
+    #     raise ValueError("record_interval must be positive")
+
+    use_binary = export_binary and hasattr(solver, "write_frame")
+    if use_binary:
+        export_path = Path(export_dir)
+        export_path.mkdir(parents=True, exist_ok=True)
+        print(f"[data export] Binary export enabled, set to: {export_path}")
+
+    record_legacy = (save_path is not False) and (not use_binary)
 
     save_target: Optional[Path] = None
-    if save_path is not False:
+    frames: List[List[np.ndarray]] = []
+    contact_frames: List[List[Dict[str, object]]] = []
+
+    if record_legacy:
         base = _base_save_path(None if save_path is None else save_path, default_save_stem)
         save_target, conflict = _unique_save_path(base, always_number=save_path is None)
         if conflict is not None:
-            print(f"[pyvista] WARNING: '{conflict}' exists; saving as '{save_target}' instead.")
+            print(f"[data export] WARNING: '{conflict}' exists. Saving as '{save_target}' instead.")
 
-    bodies_list = list(bodies)
-    if not bodies_list:
-        raise ValueError("No bodies were provided to record")
+        bodies_list = list(bodies)
+        if not bodies_list:
+            raise ValueError("No bodies were provided to record")
+        frames.append([[b.position.copy() for b in bodies_list]])
+        contact_frames.append(_snapshot_contact_constraints(getattr(solver, "contact_constraints", [])))
+        
+    progress_bar = tqdm(total=num_steps, desc="Simulating", unit="step") if show_progress else None
 
-    frames: List[List[np.ndarray]] = [[b.position.copy() for b in bodies_list]]
-    contact_frames: List[List[Dict[str, object]]] = [
-        _snapshot_contact_constraints(getattr(solver, "contact_constraints", []))
-    ]
+    total_loops = num_steps // steps_per_export
+    start_time = time.time()
 
-    progress_bar = None
-    if show_progress:
-        progress_bar = tqdm(total=num_steps, desc="Simulating", unit="step")
-
-    for step_idx in range(num_steps):
-        solver.step()
+    for loop_idx in range(total_loops):
+        if hasattr(solver, "step_many"):
+            solver.step_many(steps_per_export)
+        else:
+            for _ in range(steps_per_export):
+                solver.step()
         if progress_bar:
-            progress_bar.update(1)
-        should_record = ((step_idx + 1) % record_interval == 0) or (step_idx + 1 == num_steps)
+            progress_bar.update(steps_per_export)
+
+        should_record = ((loop_idx + 1) % record_interval == 0)
+        
         if should_record:
-            frames.append([b.position.copy() for b in bodies_list])
-            contact_frames.append(
-                _snapshot_contact_constraints(getattr(solver, "contact_constraints", []))
-            )
+            if use_binary:
+                filename = export_path / f"frame_{loop_idx:04d}.bin"
+                solver.write_frame(str(filename))
+
+            if record_legacy:
+                frames.append([b.position.copy() for b in bodies_list])
+                contact_frames.append(_snapshot_contact_constraints(getattr(solver, "contact_constraints", [])))
 
     if progress_bar:
         progress_bar.close()
 
+    total_time = time.time() - start_time
+    print(f"[data export] Simulation finished in {total_time:.2f}s ({num_steps/total_time:.1f} steps/s)")
+
     result = {
-        "frames": frames,
-        "num_frames": len(frames),
         "num_steps": num_steps,
         "record_interval": record_interval,
-        "contact_frames": contact_frames,
     }
-    if save_target:
+    if record_legacy and save_target:
         metadata = {
             "num_frames": len(frames),
-            "num_steps": num_steps,
-            "record_interval": record_interval,
             "dt": getattr(solver, "dt", 0.0),
         }
         saved_path = _save_recording(save_target, bodies_list, frames, metadata, contact_frames)
         result["saved_file"] = saved_path
 
-    if prompt_viewer and frames:
-        try:
-            answer = input("Open PyVista replay viewer now? [y/N]: ")
-        except EOFError:
-            answer = ""
-        answer = (answer or "").strip().lower()
-        if answer in {"y", "yes"}:
-            viewer_kwargs = viewer_kwargs or {}
-            replay_bodies = [copy.deepcopy(b) for b in bodies_list]
-            playback_contacts = _deserialize_contact_frames(contact_frames, len(frames))
-            playback_solver = _PlaybackSolver(
-                replay_bodies,
-                frames,
-                getattr(solver, "dt", 0.0),
-                playback_contacts,
-            )
-            run_visualizer(
-                playback_solver,
-                replay_bodies,
-                initial_paused=True,
-                **viewer_kwargs,
-            )
+        if prompt_viewer and frames:
+            try:
+                answer = input("Open PyVista replay viewer now? [y/N]: ")
+            except EOFError:
+                answer = ""
+            answer = (answer or "").strip().lower()
+            if answer in {"y", "yes"}:
+                viewer_kwargs = viewer_kwargs or {}
+                replay_bodies = [copy.deepcopy(b) for b in bodies_list]
+                playback_contacts = _deserialize_contact_frames(contact_frames, len(frames))
+                playback_solver = _PlaybackSolver(
+                    replay_bodies,
+                    frames,
+                    getattr(solver, "dt", 0.0),
+                    playback_contacts,
+                )
+                run_visualizer(
+                    playback_solver,
+                    replay_bodies,
+                    initial_paused=True,
+                    **viewer_kwargs,
+                )
+        elif use_binary:
+            print(f"[data export] Run 'process_data.py' to generate visualizaiton from: {export_path}")
 
     return result
 
@@ -838,4 +979,11 @@ def run_visualizer_from_save(
         "contact_frames": contact_records,
     }
 
-__all__ = ["run_visualizer", "run_visualizer_headless", "run_visualizer_from_save"]
+__all__ = [
+    "SimulationSetup",
+    "build_solver_from_setup",
+    "run_simulation",
+    "run_visualizer",
+    "run_solver_headless",
+    "run_visualizer_from_save",
+]
