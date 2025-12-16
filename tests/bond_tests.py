@@ -1,4 +1,4 @@
-import solver.constraints as const
+import py_solver.constraints as const
 from geometry.primitives import box_3D
 
 cube1 = box_3D(

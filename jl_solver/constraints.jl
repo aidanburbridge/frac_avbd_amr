@@ -373,7 +373,7 @@ function commit_bond_damage!(bonds::Vector{FaceBond}, bodies::Vector{Body})
 
         if bond.is_cohesive
             # TODO Should this be max or current ???
-            bond.current_eff_strain = max(bond.max_eff_strain, strain)
+            bond.max_eff_strain = max(bond.max_eff_strain, strain)
 
             if bond.current_eff_strain >= 1.0
                 bond.is_broken = true

@@ -1,5 +1,5 @@
 from geometry.primitives import box_3D
-from solver.solver_4 import Solver
+from py_solver.solver_4 import Solver
 from util.pyvista_visualizer import run_visualizer, run_solver_headless
 import geometry.voxelizer as vox
 import geometry.octree as oct

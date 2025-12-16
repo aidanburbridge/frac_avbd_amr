@@ -5,7 +5,7 @@ from typing import Iterable, Optional, Tuple
 
 import numpy as np
 
-from solver.constraints import FaceBondPoint
+from geometry.bond_data import BondData, rows_from_bonds, bonds_from_facebondpoints
 
 
 class HybridSolver:
@@ -28,7 +28,7 @@ class HybridSolver:
     # Bridge bootstrap
     # ------------------------------------------------------------------ #
     def _load_bridge(self, project: Optional[str]):
-        bridge_path = Path(__file__).resolve().parent / "Julia" / "physics_bridge.jl"
+        bridge_path = Path(__file__).resolve().parent / "physics_bridge.jl"
 
         # Prefer juliacall; fall back to the legacy PyJulia API if needed.
         try:
@@ -175,37 +175,32 @@ def _body_arrays(
 
 
 def _bond_rows(constraints: Iterable[object], idx_map: dict[int, int]) -> np.ndarray:
+    # Prefer directly provided BondData
+    bonddata = [c for c in constraints if isinstance(c, BondData)]
+    if bonddata:
+        return rows_from_bonds(bonddata)
+
+    # Fallback: convert FaceBondPoint constraints
     rows = []
     for con in constraints:
-        if not isinstance(con, FaceBondPoint) or con.is_broken:
+        # Late import to avoid hard dependency when only using BondData
+        try:
+            from py_solver.constraints import FaceBondPoint  # type: ignore
+        except ImportError:
+            FaceBondPoint = tuple()  # type: ignore
+
+        if not isinstance(con, FaceBondPoint) or getattr(con, "is_broken", False):
             continue
 
-        a_idx = idx_map.get(id(con.bodyA))
-        b_idx = idx_map.get(id(con.bodyB))
+        a_idx = idx_map.get(id(getattr(con, "bodyA", None)))
+        b_idx = idx_map.get(id(getattr(con, "bodyB", None)))
         if a_idx is None or b_idx is None:
             continue
 
-        pA = np.asarray(con.pA_local, dtype=float).reshape(3)
-        pB = np.asarray(con.pB_local, dtype=float).reshape(3)
-        n_world = con.bodyA.rotmat() @ np.asarray(con.n_local, dtype=float).reshape(3)
-        kn = float(con.stiffness[0])
-        kt = float(con.stiffness[1])
-        area = float(getattr(con, "area", 1.0))
-        tensile = float(getattr(con, "tensile_strength", kn * area))
-        Gc = float(getattr(con, "fracture_energy", 0.0))
-
-        row = np.zeros(16, dtype=np.float64)
-        row[0] = a_idx
-        row[1] = b_idx
-        row[2:5] = pA
-        row[5:8] = pB
-        row[8:11] = n_world
-        row[11] = kn
-        row[12] = kt
-        row[13] = area
-        row[14] = tensile
-        row[15] = Gc
-        rows.append(row)
+        # Convert via BondData helper to reuse flattening
+        bond_list = bonds_from_facebondpoints([con], idx_map)
+        if bond_list:
+            rows.append(bond_list[0].as_row())
 
     if not rows:
         return np.zeros((0, 16), dtype=np.float64)

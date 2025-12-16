@@ -4,10 +4,10 @@ from dataclasses import dataclass
 import numpy as np
 from typing import Optional
 from tqdm import trange
-from solver.constraints import FaceBondPoint, build_face_bonds
 
 # Project specific
-from geometry.primitives import box_3D, box_face_vectors
+from geometry.primitives import box_3D
+from geometry.bond_data import BondData
 
 ### -------------------- Data structures -------------------- ###
 @dataclass(frozen=True)                                         # Freeze class so values can't change -> must make new leaves instead
@@ -172,7 +172,7 @@ def octree_refine(
                 lf = new_leaf_set[key]
                 L = lf.level
                 for (nL, ni, nj, nk) in _leaf_neighbors6(lf):
-                    nb = _find_leaf_neighbor(leaf_maps, (nL, ni, nj, nk))
+                    nb = _find_leaf_neighbor(leaf_maps, nL, ni, nj, nk)
                     if nb is None:
                         continue
                 if nb.level + 1 < L:                            # If neighbor is more than 1 level lower, split it
@@ -278,50 +278,166 @@ def build_constraints_from_tree(
         E: float,
         nu: float,
         tensile_strength: float,
-        fracture_toughness: float) -> list[FaceBondPoint]:
+        fracture_toughness: float) -> list[BondData]:
     """
-    Creates a list of bonds between adjacent octree voxels belonging to the same solidbody.
-    Only generates bonds in the positive neighbor direction to not create duplicates.
+    Creates a list of bonds between adjacent octree voxels using D3Q26 connectivity.
+    Axial neighbors get 4 Gauss-point bonds; edge/corner neighbors get single
+    truss-style bonds scaled for isotropy.
     """
-    # Only work at high level - no refinement should be possible until later refinement stage (makes sense to me)
-    pos_dirs = [(1,0,0),(0,1,0),(0,0,1)]
-    all_dirs = pos_dirs + [(-1,0,0),(0,-1,0),(0,0,-1)]
-    bonds = []
 
-    occ = set(lf.key() for lf in leaves) # WHY?
-
+    # TODO mix quadrature face points and the edges and corners
+    
+    # Surface check directions (Face neighbors only)
+    axial_dirs = [(1,0,0),(0,1,0),(0,0,1),(-1,0,0),(0,-1,0),(0,0,-1)]
+    
+    bonds: list[BondData] = []
+    seen_pairs = set()  # track (min_id, max_id) to prevent duplicates
+    
+    occ = set(lf.key() for lf in leaves)
     dsu = DSU(len(bodies))
+    level_maps = _index_by_level(leaves)
+
+    shear_ratio = 1.0 / (2.0 * (1.0 + nu))
+
+    # Map squared distance (int) to stiffness scale factor for diagonals
+    # 2 (Face diag) -> 0.5
+    # 3 (Body diag) -> 0.25
+    # Axial (1) handled separately with quadrature
+    scale_map = {2: 0.5, 3: 0.25}
+
+    # Convert fracture toughness (K_Ic) to fracture energy Gc
+    fracture_energy = (fracture_toughness ** 2 * (1.0 - nu ** 2)) / E
 
     for lf in leaves:
         a_idx = leaf_key_to_body_index.get(lf.key())
-        if a_idx is None:
-            # No leaf here - skip
+        if a_idx is None: 
             continue
+            
         L, i, j, k = lf.level, lf.i, lf.j, lf.k
+        body_A = bodies[a_idx]
+        h = body_A.size[0]
 
-        # 1) Surface check - add surface flag for collision (no collision for internal voxels)
-        is_surface = any((L, i+di, j+dj, k+dk) not in occ for (di,dj,dk) in all_dirs) # if any adjacent cells not in occ then set is_surface to true
-        bodies[a_idx].collidable = is_surface
+        # 1) Surface check (for collision flags)
+        is_surface = any((L, i+di, j+dj, k+dk) not in occ for (di,dj,dk) in axial_dirs)
+        body_A.collidable = is_surface
 
-        # 2) Positive neighbor check - bond forming
-        for ni, nj, nk in pos_dirs:
-            # Check if leaf has neighboring cells in +X,+Y,+Z directions
-            b_key = (L, i+ni, j+nj, k+nk)
-            b_idx = leaf_key_to_body_index.get(b_key)
-            if b_idx is None:
-                # No neighbor is here
-                continue
-            A = bodies[a_idx]
-            B = bodies[b_idx]
-            bonds.extend(build_face_bonds(
-                A,
-                B,
-                E,
-                nu,
-                tensile_strength=tensile_strength,
-                fracture_toughness=fracture_toughness,
-            ))
-            dsu.union(a_idx, b_idx)
+        # 2) Full 26-Neighbor Loop
+        # We iterate -1, 0, 1 for all axes to catch every possible neighbor
+        for ni in (-1, 0, 1):
+            for nj in (-1, 0, 1):
+                for nk in (-1, 0, 1):
+                    # Skip self
+                    if ni == 0 and nj == 0 and nk == 0:
+                        continue
+                    
+                    # Calculate squared distance in grid units (1, 2, or 3)
+                    dist_sq_int = ni*ni + nj*nj + nk*nk
+                    
+                    # If dist_sq_int > 3, it's not a valid 26-neighbor (shouldn't happen with -1..1 loop)
+                    if dist_sq_int not in (1, 2, 3):
+                        continue
+
+                    # Check neighbor existence (robust across levels)
+                    nb_leaf = _find_leaf_neighbor(level_maps, L, i+ni, j+nj, k+nk)
+                    if nb_leaf is None:
+                        continue
+
+                    b_idx = leaf_key_to_body_index.get(nb_leaf.key())
+                    if b_idx is None:
+                        continue
+
+                    # --- Duplicate Check ---
+                    pair_id = (a_idx, b_idx) if a_idx < b_idx else (b_idx, a_idx)
+                    if pair_id in seen_pairs:
+                        continue
+                    seen_pairs.add(pair_id)
+
+                    body_B = bodies[b_idx]
+                    dsu.union(a_idx, b_idx)
+
+                    if dist_sq_int == 1:
+                        # === AXIAL BOND (Face-to-Face) with quadrature points ===
+                        xi = 1.0 / np.sqrt(3)
+                        w_share = 0.25
+
+                        G = E / (2.0 * (1.0 + nu))
+
+                        vec_sep = body_B.get_center() - body_A.get_center()
+                        axis_idx = int(np.argmax(np.abs(vec_sep)))
+                        sgn = 1.0 if vec_sep[axis_idx] >= 0.0 else -1.0
+
+                        hA = 0.5 * np.asarray(body_A.size, dtype=float)
+                        hB = 0.5 * np.asarray(body_B.size, dtype=float)
+
+                        n_world = np.zeros(3)
+                        n_world[axis_idx] = sgn
+
+                        t1i, t2i = [d for d in range(3) if d != axis_idx]
+
+                        face_area = (2.0 * hA[t1i]) * (2.0 * hA[t2i])
+                        h_norm = hA[axis_idx] + hB[axis_idx]
+
+                        k_n_total = E * face_area / max(h_norm, 1e-12)
+                        k_t_total = G * face_area / max(h_norm, 1e-12)
+
+                        for s1 in (-1.0, 1.0):
+                            for s2 in (-1.0, 1.0):
+                                pA_local = np.zeros(3)
+                                pB_local = np.zeros(3)
+                                pA_local[axis_idx] = sgn * hA[axis_idx]
+                                pB_local[axis_idx] = -sgn * hB[axis_idx]
+                                pA_local[t1i] = s1 * xi * hA[t1i]
+                                pA_local[t2i] = s2 * xi * hA[t2i]
+                                pB_local[t1i] = s1 * xi * hB[t1i]
+                                pB_local[t2i] = s2 * xi * hB[t2i]
+
+                                bonds.append(
+                                    BondData(
+                                        idxA=a_idx,
+                                        idxB=b_idx,
+                                        pA_local=pA_local,
+                                        pB_local=pB_local,
+                                        normal=n_world,
+                                        k_n=k_n_total * w_share,
+                                        k_t=k_t_total * w_share,
+                                        area=face_area * w_share,
+                                        tensile_strength=tensile_strength,
+                                        fracture_energy=fracture_energy,
+                                    )
+                                )
+                    else:
+                        # === DIAGONAL BOND (Edge/Corner) ===
+                        scale_factor = scale_map[dist_sq_int]
+
+                        dir_vec = np.array([ni, nj, nk], dtype=float)
+                        dist = np.sqrt(float(dist_sq_int))
+                        n_world = dir_vec / dist
+
+                        pA_local = n_world * (dist * h * 0.5)
+                        pB_local = -(n_world * (dist * h * 0.5))
+
+                        area = (h ** 2) / dist
+                        k_base = (E * area) / (dist * h)
+
+                        kn = k_base * scale_factor
+                        kt = kn * shear_ratio
+                        tensile = tensile_strength * scale_factor
+
+                        bonds.append(
+                            BondData(
+                                idxA=a_idx,
+                                idxB=b_idx,
+                                pA_local=pA_local,
+                                pB_local=pB_local,
+                                normal=n_world,
+                                k_n=kn,
+                                k_t=kt,
+                                area=area,
+                                tensile_strength=tensile,
+                                fracture_energy=fracture_energy,
+                            )
+                        )
+                    dsu.union(a_idx, b_idx)
     
     for idx, b in enumerate(bodies):
         b.assembly_id = int(dsu.find_root(idx))

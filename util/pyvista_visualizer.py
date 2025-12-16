@@ -39,7 +39,8 @@ import pyvista as pv
 import vtk
 
 from geometry.primitives import rect_2D, box_3D
-from solver.constraints import ContactConstraint
+from geometry.bond_data import BondData, facebondpoint_from_bonddata
+from py_solver.constraints import ContactConstraint
 
 from tqdm import tqdm
 
@@ -369,7 +370,7 @@ def build_solver_from_setup(
     constraints = list(setup.constraints or [])
 
     if solver_choice == "hybrid":
-        from solver.hybrid_solver import HybridWorld
+        from jl_solver.hybrid_solver import HybridWorld
 
         solver = HybridWorld(
             bodies,
@@ -382,7 +383,16 @@ def build_solver_from_setup(
         )
         body_list = bodies
     elif solver_choice == "python":
-        from solver.solver_4 import Solver
+        from py_solver.solver_4 import Solver
+
+        # Convert BondData into FaceBondPoint for the Python solver
+        converted_constraints = []
+        for con in constraints:
+            if isinstance(con, BondData):
+                converted_constraints.append(facebondpoint_from_bonddata(con, bodies))
+            else:
+                converted_constraints.append(con)
+        constraints = converted_constraints
 
         solver = Solver(dt=setup.dt, num_iterations=setup.iterations, gravity=setup.gravity)
         python_params = {
@@ -879,17 +889,22 @@ def run_solver_headless(
         
     progress_bar = tqdm(total=num_steps, desc="Simulating", unit="step") if show_progress else None
 
-    total_loops = num_steps // steps_per_export
     start_time = time.time()
+    steps_done = 0
+    loop_idx = 0
 
-    for loop_idx in range(total_loops):
+    while steps_done < num_steps:
+        chunk = min(steps_per_export, num_steps - steps_done)
+
         if hasattr(solver, "step_many"):
-            solver.step_many(steps_per_export)
+            solver.step_many(chunk)
         else:
-            for _ in range(steps_per_export):
+            for _ in range(chunk):
                 solver.step()
+
+        steps_done += chunk
         if progress_bar:
-            progress_bar.update(steps_per_export)
+            progress_bar.update(chunk)
 
         should_record = ((loop_idx + 1) % record_interval == 0)
         
@@ -902,10 +917,14 @@ def run_solver_headless(
                 frames.append([b.position.copy() for b in bodies_list])
                 contact_frames.append(_snapshot_contact_constraints(getattr(solver, "contact_constraints", [])))
 
+        loop_idx += 1
+
     if progress_bar:
         progress_bar.close()
 
     total_time = time.time() - start_time
+    if total_time <= 0.0:
+        total_time = 1e-12
     print(f"[data export] Simulation finished in {total_time:.2f}s ({num_steps/total_time:.1f} steps/s)")
 
     result = {

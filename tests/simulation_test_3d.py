@@ -4,8 +4,8 @@ import numpy as np
 
 # Project imports (your current layout)
 from geometry.primitives import rect_2D, box_3D
-from solver.solver_3 import Solver
-from solver.constraints import ContactConstraint
+from py_solver.solver_3 import Solver
+from py_solver.constraints import ContactConstraint
 
 from util.time_profiler import PhaseProfiler
 

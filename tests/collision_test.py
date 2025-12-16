@@ -1,6 +1,6 @@
 from geometry.primitives import box_3D
 import pyvista as pv
-from solver import collisions, constraints
+from py_solver import collisions, constraints
 import numpy as np
 
 # wrong way

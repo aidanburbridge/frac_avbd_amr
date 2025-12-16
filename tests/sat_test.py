@@ -1,6 +1,6 @@
 from geometry.primitives import box_3D
 import pyvista as pv
-from solver import collisions
+from py_solver import collisions
 import numpy as np
 
 

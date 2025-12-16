@@ -10,19 +10,19 @@ import numpy as np
 from util.voxel_assembly import VoxelAssembly
 from util.pyvista_visualizer import SimulationSetup
 
-STL_PATH = r"C:\Users\aidan\Documents\TUM\Thesis\ISO 20753 Type A1 v1.stl"
+STL_PATH = r"C:\Users\aidan\Documents\TUM\Thesis\D3Q26 Test.stl"
 LENGTH = 0.170
-VOXEL_RES = 500
+VOXEL_RES = 5
 
 # Shared solver params
-DT_PHYSICS = 1 / 2000
+DT_PHYSICS = 1 / 100
 DT_RENDER = 1/60
 STEPS_PER = int(DT_RENDER / DT_PHYSICS)
-ITER = 50
+ITER = 15
 GRAV = 0.0
 FRICTION = 0.0
 PULL_RATE = 0.010
-GRIP_DISTANCE = 0.02
+GRIP_DISTANCE = 0.2
 PYTHON_SOLVER_PARAMS = {
     "mu": 0.3,
     "post_stabilize": True,
@@ -60,7 +60,7 @@ def build_setup()-> SimulationSetup:
         E=2e9,
         nu=0.3,
         tensile_strength=80e6,
-        fracture_toughness=5e5,
+        fracture_toughness=1000,
     )
     print(f"Number of beam bonds: {len(beam_bonds)}")
 
@@ -90,7 +90,7 @@ def build_setup()-> SimulationSetup:
         friction=FRICTION,
         sync_bodies=True,
         python_solver_params=PYTHON_SOLVER_PARAMS,
-        headless_steps=4000,
+        headless_steps=20,
         headless_kwargs={
             "steps_per_export": STEPS_PER,
             "show_progress": True,

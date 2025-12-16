@@ -33,7 +33,8 @@ from geometry.primitives import (
     quat_normalize,
     quat_to_rotmat,
 )
-from solver.constraints import Constraint, FaceBondPoint
+from geometry.bond_data import BondData
+from py_solver.constraints import Constraint, FaceBondPoint
 
 
 _FACE_KEY_MAP = {
@@ -112,11 +113,16 @@ def _rotate_constraint_frames(constraints: Iterable[Constraint], R: np.ndarray) 
             constr.n = _normalize(R @ n)
             constr.t1 = _normalize(R @ t1)
             constr.t2 = _normalize(R @ t2)
+        elif isinstance(constr, BondData):
+            constr.normal = _normalize(R @ np.asarray(constr.normal, dtype=float))
 
 
 def _scale_constraint_anchors(constraints: Iterable[Constraint], scale: float) -> None:
     for constr in constraints:
         if isinstance(constr, FaceBondPoint):
+            constr.pA_local = np.asarray(constr.pA_local, dtype=float) * scale
+            constr.pB_local = np.asarray(constr.pB_local, dtype=float) * scale
+        elif isinstance(constr, BondData):
             constr.pA_local = np.asarray(constr.pA_local, dtype=float) * scale
             constr.pB_local = np.asarray(constr.pB_local, dtype=float) * scale
 
