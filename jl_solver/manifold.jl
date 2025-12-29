@@ -4,10 +4,10 @@ module ManifoldHandling
 using LinearAlgebra
 using StaticArrays
 
-using ..Collisions: Contact
-using ..Constraints: ContactConstraint, reset_contact!
+using ..Collisions: Contact, Body
+using ..AVBDConstraints: ContactConstraint
 
-export Manifold, update_manifold!, init_manifold
+export Manifold, init_manifold, update_manifold_dynamic!
 
 const MAX_CONTACTS = 4
 const DIST_EPS = 2e-3
@@ -21,11 +21,7 @@ mutable struct Manifold
 end
 
 function init_manifold(a::Int, b::Int)
-    buf = Vector{ContactConstraint}(undef, MAX_CONTACTS)
-    for i in 1:MAX_CONTACTS
-        buf[i] = ContactConstraint()
-    end
-    return Manifold(a, b, buf, 0)
+    return Manifold(a, b, ContactConstraint[], 0)
 end
 
 @inline function proximity(c::Contact, old_con::ContactConstraint)
@@ -36,51 +32,54 @@ end
     return dot(c.normal, old_con.normal) > COS_EPS
 end
 
-function update_manifold!(manifold::Manifold, contacts::Vector{Contact}, start_idx::Int, count::Int,
-    friction::Float64, active_buffer::Vector{ContactConstraint}, active_offset::Int)
-    old_count = manifold.count
-    used = MVector{MAX_CONTACTS,Bool}(false, false, false, false)
+function update_manifold_dynamic!(manifold::Manifold, contacts::Vector{Contact}, friction::Float64, bodies::Vector{Body})
+    used_old = MVector{MAX_CONTACTS,Bool}(false, false, false, false)
 
+    contact_count = min(length(contacts), MAX_CONTACTS)
+    new_constraints = Vector{ContactConstraint}(undef, contact_count)
     new_count = 0
-    out_idx = active_offset
 
-    for i in 0:(count - 1)
-        c = contacts[start_idx + i]
-        match_idx = 0
-
-        for j in 1:old_count
-            if used[j]
-                continue
-            end
-            old = manifold.constraints[j]
-            if c.feature_id == old.feature_id || proximity(c, old)
-                match_idx = j
-                used[j] = true
-                break
-            end
-        end
-
+    old_count = min(manifold.count, MAX_CONTACTS)
+    for i in 1:contact_count
+        c = contacts[i]
         new_count += 1
-        target = manifold.constraints[new_count]
 
-        if match_idx == 0
-            target.lambda_n = 0.0
-            target.lambda_t1 = 0.0
-            target.lambda_t2 = 0.0
-        else
-            matched = manifold.constraints[match_idx]
-            target.lambda_n = matched.lambda_n
-            target.lambda_t1 = matched.lambda_t1
-            target.lambda_t2 = matched.lambda_t2
+        # Find match in previous frame's manifold data
+        match_idx = 0
+        for j in 1:old_count
+            if !used_old[j]
+                old_con = manifold.constraints[j]
+                if c.feature_id == old_con.feature_id || proximity(c, old_con)
+                    match_idx = j
+                    used_old[j] = true
+                    break
+                end
+            end
         end
 
-        reset_contact!(target, c, friction)
-        out_idx += 1
-        active_buffer[out_idx] = target
+        # Create new constraint
+        bA = bodies[c.body_idx_a + 1]
+        bB = bodies[c.body_idx_b + 1]
+
+        con = ContactConstraint(bA, bB, c.point, c.normal, c.depth, friction; feature_id=c.feature_id)
+
+        # Copy old values over
+        if match_idx != 0
+            old = manifold.constraints[match_idx]
+            con.lambda = old.lambda
+            con.penalty_k = old.penalty_k
+        end
+
+        new_constraints[new_count] = con
+    end
+
+    resize!(manifold.constraints, new_count)
+
+    for i in 1:new_count
+        manifold.constraints[i] = new_constraints[i]
     end
 
     manifold.count = new_count
-    return out_idx
 end
 
 end # module

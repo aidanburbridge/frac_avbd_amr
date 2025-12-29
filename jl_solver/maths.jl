@@ -3,7 +3,7 @@ module Maths
 using LinearAlgebra
 using StaticArrays
 
-export quat_to_rotmat, quat_mul, quat_inv, quat_to_rotvec, rotvec_to_quat
+export quat_to_rotmat, quat_mul, quat_inv, quat_to_rotvec, rotvec_to_quat, delta_twist_from
 export rotate_vec, transform_point, inv_transform_point, orthonormal_basis
 export Vec3, Mat3, Quat, FLOAT
 
@@ -12,6 +12,20 @@ const FLOAT = Float64
 const Vec3 = SVector{3,FLOAT}
 const Mat3 = SMatrix{3,3,FLOAT,9}
 const Quat = SVector{4,FLOAT}
+
+
+function delta_twist_from(b, from_pos::Vec3, from_quat::Quat)
+    dx = b.pos - from_pos
+
+    q_rel = quat_mul(b.quat, quat_inv(from_quat))
+
+    d_th = @SVector [q_rel[2] * 2.0, q_rel[3] * 2.0, q_rel[4] * 2.0]
+
+    # TODO maybe I should make this better - check python primitivies.py
+
+    return vcat(dx, d_th)
+
+end
 
 # ---------- Quaternion Operations ---------- #
 @inline function quat_to_rotmat(q::Quat)
@@ -54,6 +68,13 @@ end
     c = cos(half_angle)
     return Quat(c, axis[1] * s, axis[2] * s, axis[3] * s)
 end
+
+@inline function integrate_quat(q::Quat, ang_vel::Vec3, dt)
+    dq = Quat(0.0, ang_vel[1], ang_vel[2], ang_vel[3])
+    return normalize(q + quat_mul(dq, q) * (0.5 * dt))
+end
+
+
 
 # ---------- Orthonormal basis helper ----------
 @inline function orthonormal_basis(n::Vec3)
@@ -101,4 +122,4 @@ end
     return rotate_vec(diff, quat_inv(rot))
 end
 
-end
+end # module end

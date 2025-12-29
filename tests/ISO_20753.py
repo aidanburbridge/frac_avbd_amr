@@ -5,7 +5,6 @@ ISO 20753 tensile test with dog bone STL.
 
 import geometry.voxelizer as vox
 import geometry.octree as oct
-import numpy as np
 
 from util.voxel_assembly import VoxelAssembly
 from util.pyvista_visualizer import SimulationSetup
@@ -21,8 +20,10 @@ STEPS_PER = int(DT_RENDER / DT_PHYSICS)
 ITER = 50
 GRAV = 0.0
 FRICTION = 0.0
-PULL_RATE = 0.010
-GRIP_DISTANCE = 0.02
+#PULL_RATE = 0.010
+PULL_RATE = 10
+#GRIP_DISTANCE = 0.02
+GRIP_DISTANCE = 20
 PYTHON_SOLVER_PARAMS = {
     "mu": 0.3,
     "post_stabilize": True,
@@ -34,24 +35,36 @@ PYTHON_SOLVER_PARAMS = {
 
 def build_setup()-> SimulationSetup:
 
-    stlvox = vox.STLVoxelizer(STL_PATH)
-    occ, raw_origin, raw_h = stlvox.voxelize_to_resolution(VOXEL_RES)
+    stlvox = vox.STLVoxelizer(STL_PATH, flood_fill=False)
+    occ, raw_origin, raw_h = stlvox.voxelize_to_h(2)
 
-    raw_len = np.max(stlvox.mesh.extents)
-    scale_factor = LENGTH / raw_len
+    # print(f"DEBUG: Trimesh generated {occ.sum()} raw voxels")
 
-    phys_h = raw_h * scale_factor
-    phys_origin = raw_origin * scale_factor
 
-    leaves, h_base = oct.octree_from_occ(occ, phys_h)
-    boxes, mapping = oct.instantiate_boxes_from_tree(
+    # raw_len = np.max(stlvox.mesh.extents)
+
+    # scale_factor = LENGTH / raw_len
+
+    # phys_h = raw_h * scale_factor
+    # phys_origin = raw_origin * scale_factor
+
+    #leaves, h_base = oct.octree_from_occ(occ, phys_h)
+    leaves, h_base = oct.octree_from_occ(occ, raw_h)
+
+
+    print(f"DEBUG: Octree generated {len(leaves)} leaves")
+
+    boxes, mapping = oct.instantiate_boxes_from_tree( # error here...
         leaves,
-        phys_origin,
+        raw_origin,
+        #phys_origin,
         h_base,
         density=1150.0,
         penalty_gain=1e6,
         static=False
     )
+
+    print(f"DEBUG: Instantiated {len(boxes)} bodies")
 
     beam_bonds = oct.build_constraints_from_tree(
         leaves,
@@ -90,7 +103,7 @@ def build_setup()-> SimulationSetup:
         friction=FRICTION,
         sync_bodies=True,
         python_solver_params=PYTHON_SOLVER_PARAMS,
-        headless_steps=4000,
+        headless_steps=1000,
         headless_kwargs={
             "steps_per_export": STEPS_PER,
             "show_progress": True,

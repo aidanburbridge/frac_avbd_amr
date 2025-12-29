@@ -4,9 +4,13 @@ using LinearAlgebra
 using StaticArrays
 
 # Load the Core
-include("physics_core.jl")
 include("maths.jl")
-using .PhysicsCore
+include("collisions.jl")
+include("avbd_constraints.jl")
+include("manifold.jl")
+include("avbd_core.jl")
+
+using .AVBDCore
 using .Maths
 
 # --- Interface Functions ---
@@ -25,20 +29,20 @@ function init_system(
 )
     # Create the SimulationState object
     # This object stays in Julia memory
-    sim = PhysicsCore.init_simulation(pos, vel, masses, bond_data, dt, gravity, iters; friction=friction, sizes=sizes, assembly_ids=assembly_ids)
+    sim = AVBDCore.init_simulation(pos, vel, masses, bond_data, dt, gravity, iters; friction=friction, sizes=sizes, assembly_ids=assembly_ids)
     return sim
 end
 
-function step_batch!(sim::PhysicsCore.SimulationState, steps::Int)
+function step_batch!(sim::AVBDCore.SimulationState, steps::Int)
     for _ in 1:steps
-        PhysicsCore.step_simulation!(sim)
+        AVBDCore.step_simulation!(sim)
     end
 end
 
 # Python cannot access `!`-suffixed names directly; provide a stable alias.
-step_batch(sim::PhysicsCore.SimulationState, steps::Int) = step_batch!(sim, steps)
+step_batch(sim::AVBDCore.SimulationState, steps::Int) = step_batch!(sim, steps)
 
-function get_positions(sim::PhysicsCore.SimulationState)
+function get_positions(sim::AVBDCore.SimulationState)
     # Extract positions to return to Python for rendering
     n = length(sim.bodies)
     data = zeros(FLOAT, n, 7)
@@ -56,13 +60,13 @@ function get_positions(sim::PhysicsCore.SimulationState)
     return data
 end
 
-function write_frame(sim::PhysicsCore.SimulationState, filename::String)
+function write_frame(sim::AVBDCore.SimulationState, filename::String)
 
     open(filename, "w") do io
 
         # Number of bodies and bonds
         n_bodies = length(sim.bodies)
-        active_bonds = [b for b in sim.bond_buffer if !b.is_broken]
+        active_bonds = [b for b in sim.persistent_constraints if !b.is_broken]
         n_bonds = length(active_bonds)
 
         write(io, Int32(n_bodies))
@@ -104,8 +108,8 @@ function write_frame(sim::PhysicsCore.SimulationState, filename::String)
 
         # Bond data (strain/stress)
         for b in active_bonds
-            write(io, Int32(b.body_idx_a))
-            write(io, Int32(b.body_idx_b))
+            write(io, Int32(b.bodyA.id))
+            write(io, Int32(b.bodyB.id))
 
             write(io, Float32(b.max_eff_strain))
             write(io, Float32(b.current_eff_strain))
@@ -113,41 +117,44 @@ function write_frame(sim::PhysicsCore.SimulationState, filename::String)
     end
 end
 
-function get_visualization_data(sim::PhysicsCore.SimulationState)
+function get_visualization_data(sim::AVBDCore.SimulationState)
     n_bodies = length(sim.bodies)
     # Need to create stress tensor - symmetric
     stress_data = zeros(FLOAT, n_bodies, 6)
 
-    active_bonds = [b for b in sim.bond_buffer if !b.is_broken]
+    active_bonds = [b for b in sim.persistent_constraints if !b.is_broken]
     bond_data = zeros(FLOAT, length(active_bonds), 4)
 
     for (i, bond) in enumerate(active_bonds)
-        bA = sim.bodies[bond.body_idx_a+1]
-        bB = sim.bodies[bond.body_idx_b+1]
+        bA = bond.bodyA
+        bB = bond.bodyB
 
         # World geometry
-        n, t1, t2 = PhysicsCore.Constraints.bond_basis_world(bond, bA)
+        R_A = quat_to_rotmat(bA.quat)
+        n = R_A * bond.n_local
+        t1 = R_A * bond.t1_local
+        t2 = R_A * bond.t2_local
         pA = transform_point(bond.pA_local, bA.pos, bA.quat)
         pB = transform_point(bond.pB_local, bB.pos, bB.quat)
         dp = pA - pB
 
         # Force calculation (F = -k*x)
-        err = Vec3(dot(n, dp), dot(t1, dp), dot(t2, dp)) # basically x
-        f_local = -bond.current_k .* err
+        err = bond.C
+        f_local = -bond.penalty_k .* err
         F_world = n * f_local[1] + t1 * f_local[2] + t2 * f_local[3]
 
         # stress calculation
         rA = pA - bA.pos
         volA = bA.size[1] * bA.size[2] * bA.size[3]
-        _acc_stress!(stress_data, bond.body_idx_a + 1, rA, F_world, volA)
+        _acc_stress!(stress_data, bA.id + 1, rA, F_world, volA)
 
         rB = pB - bB.pos
         volB = bB.size[1] * bB.size[2] * bB.size[3]
-        _acc_stress!(stress_data, bond.body_idx_b + 1, rB, -F_world, volB)
+        _acc_stress!(stress_data, bB.id + 1, rB, -F_world, volB)
 
         # Bond metadata
-        bond_data[i, 1] = Float64(bond.body_idx_a)
-        bond_data[i, 2] = Float64(bond.body_idx_b)
+        bond_data[i, 1] = Float64(bA.id)
+        bond_data[i, 2] = Float64(bB.id)
         bond_data[i, 3] = bond.current_eff_strain
         bond_data[i, 4] = bond.max_eff_strain
     end

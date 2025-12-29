@@ -8,7 +8,7 @@ include("maths.jl")
 using .Maths: Vec3, Mat3, Quat, quat_to_rotmat
 
 export Body, Contact, AABB, BroadPhaseState
-export update_rotation!, update_inv_inertia_world!, broad_phase!, sat_check, build_manifold!, get_collisions!
+export update_rotation!, update_inv_inertia_world!, broad_phase!, sat_check, build_manifold!, get_collisions!, get_collisions
 
 # --- Constants ---
 const TOL_AXIS = 1e-12
@@ -36,6 +36,10 @@ mutable struct Body
 
     pos_prev::Vec3
     quat_prev::Quat
+    pos0::Vec3
+    quat0::Quat
+    pos_inertia::Vec3
+    quat_inertia::Quat
     rot_mat::Mat3
 
     function Body(id, asm_id, static, pos, quat, size, mass; vel=Vec3(0, 0, 0), ang_vel=Vec3(0, 0, 0))
@@ -43,7 +47,9 @@ mutable struct Body
         m_val = static ? Inf : mass
         inv_m = static ? 0.0 : 1.0 / m_val
 
-        sx = size[1]; sy = size[2]; sz = size[3]
+        sx = size[1]
+        sy = size[2]
+        sz = size[3]
         ixx = (1.0 / 12.0) * m_val * (sy^2 + sz^2)
         iyy = (1.0 / 12.0) * m_val * (sx^2 + sz^2)
         izz = (1.0 / 12.0) * m_val * (sx^2 + sy^2)
@@ -54,7 +60,7 @@ mutable struct Body
 
         new(id, asm_id, static, pos, quat, size, vel, ang_vel,
             m_val, inv_m, inertia_diag, inv_diag, inv_world,
-            pos, quat, R)
+            pos, quat, pos, quat, pos, quat, R)
     end
 end
 
@@ -536,6 +542,14 @@ function get_collisions!(state::BroadPhaseState, bodies::Vector{Body}, contacts:
         end
     end
     return count
+end
+
+function get_collisions(bodies::Vector{Body})
+    n = length(bodies)
+    state = BroadPhaseState(n)
+    contacts = Vector{Contact}(undef, max(4 * n, 16))
+    count = get_collisions!(state, bodies, contacts)
+    return contacts[1:count]
 end
 
 end # module
