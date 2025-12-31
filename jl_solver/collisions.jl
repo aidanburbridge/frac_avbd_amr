@@ -206,7 +206,7 @@ function broad_phase!(state::BroadPhaseState, bodies::Vector{Body})
                 other_idx = active[j]
                 b1 = bodies[idx]
                 b2 = bodies[other_idx]
-                if b1.assembly_id > 0 && b1.assembly_id == b2.assembly_id
+                if b1.assembly_id >= 0 && b2.assembly_id >= 0 && b1.assembly_id == b2.assembly_id
                     continue
                 end
                 aabb1 = aabbs[idx]

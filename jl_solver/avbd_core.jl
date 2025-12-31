@@ -128,6 +128,13 @@ function warm_start!(sim::SimulationState)
         if !sim.stabilize
             con.lambda = con.lambda .* (sim.alpha * sim.gamma)
         end
+        pk = con.penalty_k
+        for r in 1:3
+            if !isinf(con.stiffness[r])
+                pk = setindex(pk, min(pk[r], con.stiffness[r]), r)
+            end
+        end
+        con.penalty_k = pk
 
         # Build incidence_map
         push!(sim.incidence_map[con.bodyA.id+1], con)
@@ -154,6 +161,9 @@ function primal_solve!(b::Body, constraints::Vector{AbstractConstraint}, invdt2:
 
     for con in constraints
         compute_constraint!(con, alpha)
+        if isa(con, ContactConstraint)
+            AVBDConstraints.update_bounds!(con)
+        end
 
         isA = (con.bodyA == b)
         J_block = isA ? con.JA : con.JB
@@ -164,8 +174,12 @@ function primal_solve!(b::Body, constraints::Vector{AbstractConstraint}, invdt2:
 
             J_row = J_block[r, :]
 
-            f_mag = k_val * con.C[r] + con.lambda[r]
-            f_mag = clamp(f_mag, con.f_min[r], con.f_max[r])
+            if isinf(con.stiffness[r])
+                f_mag = k_val * con.C[r] + con.lambda[r]
+                f_mag = clamp(f_mag, con.f_min[r], con.f_max[r])
+            else
+                f_mag = k_val * con.C[r]
+            end
 
             H += (J_row * J_row') * k_val
             F -= J_row * f_mag
@@ -190,18 +204,26 @@ function dual_update!(sim::SimulationState, alpha::Float64)
     for con in sim.active_constraints
         compute_constraint!(con, alpha)
 
+        pk = con.penalty_k
+        lam = con.lambda
         for r in 1:3
-            # Update lambda
-            sigma = con.lambda[r] + con.penalty_k[r] * con.C[r]
-            con.lambda = setindex(con.lambda, clamp(sigma, con.f_min[r], con.f_max[r]), r)
+            if isinf(con.stiffness[r])
+                sigma = lam[r] + pk[r] * con.C[r]
+                lam = setindex(lam, clamp(sigma, con.f_min[r], con.f_max[r]), r)
 
-            # Update stiffness
-            if con.lambda[r] > con.f_min[r] && con.lambda[r] < con.f_max[r]
-                new_k = con.penalty_k[r] + sim.beta * abs(con.C[r])
+                if lam[r] > con.f_min[r] && lam[r] < con.f_max[r]
+                    new_k = pk[r] + sim.beta * abs(con.C[r])
+                    new_k = min(new_k, con.k_max[r])
+                    pk = setindex(pk, new_k, r)
+                end
+            else
+                new_k = pk[r] + sim.beta * abs(con.C[r])
                 new_k = min(new_k, min(con.k_max[r], con.stiffness[r]))
-                con.penalty_k = setindex(con.penalty_k, new_k, r)
+                pk = setindex(pk, new_k, r)
             end
         end
+        con.penalty_k = pk
+        con.lambda = lam
 
         if isa(con, ContactConstraint)
             AVBDConstraints.update_bounds!(con)
@@ -314,7 +336,7 @@ function step_simulation!(sim::SimulationState)
 
     # TODO CHECK time diffrence between running with collision detection and contact constraints vs. just bonds
     # Build contact constraints
-    #detect_collisions!(sim)
+    detect_collisions!(sim)
 
     # warm start constraints
     warm_start!(sim) # Python builds incident map here - inside the constraint loop 

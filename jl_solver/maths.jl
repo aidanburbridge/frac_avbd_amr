@@ -26,11 +26,12 @@ end
 function delta_twist_from(b, from_pos::Vec3, from_quat::Quat)
     dx = b.pos - from_pos
 
-    q_rel = quat_mul(b.quat, quat_inv(from_quat))
-
-    d_th = @SVector [q_rel[2] * 2.0, q_rel[3] * 2.0, q_rel[4] * 2.0]
-
-    # TODO maybe I should make this better - check python primitivies.py
+    q_src = from_quat
+    if dot(b.quat, q_src) < 0.0
+        q_src = -q_src
+    end
+    q_rel = quat_mul(b.quat, quat_inv(q_src))
+    d_th = quat_to_rotvec(q_rel)
 
     return vcat(dx, d_th)
 

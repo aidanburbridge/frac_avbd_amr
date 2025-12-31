@@ -73,23 +73,25 @@ function initialize!(con::ContactConstraint)
     pA_world = con.point
     pB_world = pA_world - con.normal * con.depth
 
-    rA = pA_world - con.bodyA.pos
-    rB = pB_world - con.bodyB.pos
+    rA0 = pA_world - con.bodyA.pos0
+    rB0 = pB_world - con.bodyB.pos0
 
     # Build jacobians
-    JA_row1 = vcat(dirs[1], cross(rA, dirs[1]))'
-    JA_row2 = vcat(dirs[2], cross(rA, dirs[2]))'
-    JA_row3 = vcat(dirs[3], cross(rA, dirs[3]))'
+    JA_row1 = vcat(dirs[1], cross(rA0, dirs[1]))'
+    JA_row2 = vcat(dirs[2], cross(rA0, dirs[2]))'
+    JA_row3 = vcat(dirs[3], cross(rA0, dirs[3]))'
 
-    JB_row1 = vcat(-dirs[1], -cross(rB, dirs[1]))'
-    JB_row2 = vcat(-dirs[2], -cross(rB, dirs[2]))'
-    JB_row3 = vcat(-dirs[3], -cross(rB, dirs[3]))'
+    JB_row1 = vcat(-dirs[1], -cross(rB0, dirs[1]))'
+    JB_row2 = vcat(-dirs[2], -cross(rB0, dirs[2]))'
+    JB_row3 = vcat(-dirs[3], -cross(rB0, dirs[3]))'
 
     con.JA = vcat(JA_row1, JA_row2, JA_row3)
     con.JB = vcat(JB_row1, JB_row2, JB_row3)
 
     margin = 5e-4
-    sep = pA_world - pB_world
+    pA0 = con.bodyA.pos + rA0
+    pB0 = con.bodyB.pos + rB0
+    sep = pA0 - pB0
 
     c_n = dot(con.normal, sep) - margin
     c_t1 = dot(t1, sep)
@@ -102,8 +104,8 @@ function initialize!(con::ContactConstraint)
 end
 
 function compute_constraint!(con::ContactConstraint, alpha::Float64)
-    dA = delta_twist_from(con.bodyA, con.bodyA.pos_inertia, con.bodyA.quat_inertia)
-    dB = delta_twist_from(con.bodyB, con.bodyB.pos_inertia, con.bodyB.quat_inertia)
+    dA = delta_twist_from(con.bodyA, con.bodyA.pos0, con.bodyA.quat0)
+    dB = delta_twist_from(con.bodyB, con.bodyB.pos0, con.bodyB.quat0)
 
     con.C = (1.0 - alpha) * con.C0 + con.JA * dA + con.JB * dB
 end
@@ -257,20 +259,35 @@ function initialize!(con::BondConstraint) #TODO do I put in the body list here? 
 end
 
 function compute_constraint!(con::BondConstraint, alpha::Float64)
+
     if con.is_broken
         con.C = @SVector zeros(3)
         con.penalty_k = @SVector zeros(3)
         return
     end # TODO should I just replace with con.is_broken && return 
 
-    pA = con.bodyA.pos + rotate_vec(con.pA_local, con.bodyA.quat)
-    pB = con.bodyB.pos + rotate_vec(con.pB_local, con.bodyB.quat)
+    rA = rotate_vec(con.pA_local, con.bodyA.quat)
+    rB = rotate_vec(con.pB_local, con.bodyB.quat)
+    pA = con.bodyA.pos + rA
+    pB = con.bodyB.pos + rB
     dp = pA - pB
 
     rotA = quat_to_rotmat(con.bodyA.quat)
     n_curr = rotA * con.n_local
     t1_curr = rotA * con.t1_local
     t2_curr = rotA * con.t2_local
+
+    dirs = @SVector [n_curr, t1_curr, t2_curr]
+
+    JA_row1 = vcat(dirs[1], cross(rA, dirs[1]))'
+    JA_row2 = vcat(dirs[2], cross(rA, dirs[2]))'
+    JA_row3 = vcat(dirs[3], cross(rA, dirs[3]))'
+    con.JA = vcat(JA_row1, JA_row2, JA_row3)
+
+    JB_row1 = vcat(-dirs[1], -cross(rB, dirs[1]))'
+    JB_row2 = vcat(-dirs[2], -cross(rB, dirs[2]))'
+    JB_row3 = vcat(-dirs[3], -cross(rB, dirs[3]))'
+    con.JB = vcat(JB_row1, JB_row2, JB_row3)
 
     c1 = dot(n_curr, dp) - con.rest[1]
     c2 = dot(t1_curr, dp) - con.rest[2]
@@ -294,7 +311,8 @@ function compute_constraint!(con::BondConstraint, alpha::Float64)
 
     if con.is_cohesive
         strain = sqrt((d_n / dnc)^2 + (d_s / dsc)^2)
-        strain_curr = max(con.max_committed_strain, strain) # is this irreversible damage?
+        strain_curr = max(con.max_committed_strain, strain) # irreversible damage
+        con.current_eff_strain = strain_curr
 
         if strain_curr >= 1.0
             con.damage = 1.0
@@ -329,7 +347,7 @@ function commit_bond_damage!(con::BondConstraint)
         # Update max strain at end of time step once settled (energy minimized)
         con.max_committed_strain = max(con.max_committed_strain, con.current_eff_strain)
 
-        if con.damage >= 1.0
+        if con.max_committed_strain >= 1.0
             con.is_broken = true
             con.penalty_k = @SVector zeros(3)
         end
