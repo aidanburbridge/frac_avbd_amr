@@ -869,6 +869,8 @@ def run_solver_headless(
         export_path.mkdir(parents=True, exist_ok=True)
         print(f"[data export] Binary export enabled, set to: {export_path}")
 
+        solver.write_frame(str(export_path / "frame_0000.bin"))
+
     record_legacy = (save_path is not False) and (not use_binary)
 
     save_target: Optional[Path] = None
@@ -910,7 +912,8 @@ def run_solver_headless(
         
         if should_record:
             if use_binary:
-                filename = export_path / f"frame_{loop_idx:04d}.bin"
+                frame_idx = loop_idx + 1
+                filename = export_path / f"frame_{frame_idx:04d}.bin"
                 solver.write_frame(str(filename))
 
             if record_legacy:

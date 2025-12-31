@@ -157,6 +157,7 @@ mutable struct BondConstraint <: AbstractConstraint
     rest::Vec3
     is_broken::Bool
     is_cohesive::Bool
+    rest_initialized::Bool
     damage::Float64
 
     # Fracture histroy
@@ -205,7 +206,7 @@ mutable struct BondConstraint <: AbstractConstraint
         kmax = @SVector fill(1e12, 3)
 
         new(bA, bB, pA, pB, n_loc, t1_loc, t2_loc, zeros_Vec3, zeros_J, zeros_J,
-            zeros_Vec3, false, false, 0.0, 0.0, 0.0, 0.0, zeros_Vec3, stiff,
+            zeros_Vec3, false, false, false, 0.0, 0.0, 0.0, 0.0, zeros_Vec3, stiff,
             stiff, kmin, kmax, fmin, fmax, limits)
 
     end
@@ -229,6 +230,17 @@ function initialize!(con::BondConstraint) #TODO do I put in the body list here? 
     rA = rotate_vec(con.pA_local, con.bodyA.quat)
     rB = rotate_vec(con.pB_local, con.bodyB.quat)
 
+    #TODO do I need to initialize the rest length like I do in python?
+
+    pA = con.bodyA.pos + rotate_vec(con.pA_local, con.bodyA.quat)
+    pB = con.bodyB.pos + rotate_vec(con.pB_local, con.bodyB.quat)
+    dp = pA - pB
+
+    if !con.rest_initialized
+        con.rest = @SVector [dot(n_curr, dp), dot(t1_curr, dp), dot(t2_curr, dp)]
+        con.rest_initialized = true
+    end
+
     # Build jacobians
     JA_row1 = vcat(dirs[1], cross(rA, dirs[1]))'
     JA_row2 = vcat(dirs[2], cross(rA, dirs[2]))'
@@ -241,8 +253,6 @@ function initialize!(con::BondConstraint) #TODO do I put in the body list here? 
     con.JB = vcat(JB_row1, JB_row2, JB_row3)
 
     con.penalty_k = con.stiffness * (1.0 - con.damage)
-
-    #TODO do I need to initialize the rest length like I do in python?
 
 end
 

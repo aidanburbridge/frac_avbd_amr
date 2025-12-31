@@ -5,6 +5,7 @@ ISO 20753 tensile test with dog bone STL.
 
 import geometry.voxelizer as vox
 import geometry.octree as oct
+import numpy as np
 
 from util.voxel_assembly import VoxelAssembly
 from util.pyvista_visualizer import SimulationSetup
@@ -14,16 +15,16 @@ LENGTH = 0.170
 VOXEL_RES = 500
 
 # Shared solver params
-DT_PHYSICS = 1 / 2000
+DT_PHYSICS = 1/1000
 DT_RENDER = 1/60
 STEPS_PER = int(DT_RENDER / DT_PHYSICS)
 ITER = 50
 GRAV = 0.0
 FRICTION = 0.0
-#PULL_RATE = 0.010
-PULL_RATE = 10
-#GRIP_DISTANCE = 0.02
-GRIP_DISTANCE = 20
+PULL_RATE = 0.010
+#PULL_RATE = 10
+GRIP_DISTANCE = 0.02
+#GRIP_DISTANCE = 20
 PYTHON_SOLVER_PARAMS = {
     "mu": 0.3,
     "post_stabilize": True,
@@ -36,28 +37,28 @@ PYTHON_SOLVER_PARAMS = {
 def build_setup()-> SimulationSetup:
 
     stlvox = vox.STLVoxelizer(STL_PATH, flood_fill=False)
-    occ, raw_origin, raw_h = stlvox.voxelize_to_h(2)
-
+    #occ, raw_origin, raw_h = stlvox.voxelize_to_h(2)
+    occ, raw_origin, raw_h = stlvox.voxelize_to_resolution(VOXEL_RES)
     # print(f"DEBUG: Trimesh generated {occ.sum()} raw voxels")
 
 
-    # raw_len = np.max(stlvox.mesh.extents)
+    raw_len = np.max(stlvox.mesh.extents)
 
-    # scale_factor = LENGTH / raw_len
+    scale_factor = LENGTH / raw_len
 
-    # phys_h = raw_h * scale_factor
-    # phys_origin = raw_origin * scale_factor
+    phys_h = raw_h * scale_factor
+    phys_origin = raw_origin * scale_factor
 
-    #leaves, h_base = oct.octree_from_occ(occ, phys_h)
-    leaves, h_base = oct.octree_from_occ(occ, raw_h)
+    leaves, h_base = oct.octree_from_occ(occ, phys_h)
+    #leaves, h_base = oct.octree_from_occ(occ, raw_h)
 
 
     print(f"DEBUG: Octree generated {len(leaves)} leaves")
 
-    boxes, mapping = oct.instantiate_boxes_from_tree( # error here...
+    boxes, mapping = oct.instantiate_boxes_from_tree(
         leaves,
-        raw_origin,
-        #phys_origin,
+        #raw_origin,
+        phys_origin,
         h_base,
         density=1150.0,
         penalty_gain=1e6,
@@ -70,7 +71,8 @@ def build_setup()-> SimulationSetup:
         leaves,
         boxes,
         mapping,
-        E=2e9,
+        #E=2e9,
+        E = 1e5,
         nu=0.3,
         tensile_strength=80e6,
         fracture_toughness=5e5,
@@ -103,7 +105,7 @@ def build_setup()-> SimulationSetup:
         friction=FRICTION,
         sync_bodies=True,
         python_solver_params=PYTHON_SOLVER_PARAMS,
-        headless_steps=1000,
+        headless_steps=200,
         headless_kwargs={
             "steps_per_export": STEPS_PER,
             "show_progress": True,

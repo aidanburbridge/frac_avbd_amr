@@ -58,8 +58,8 @@ function update_manifold_dynamic!(manifold::Manifold, contacts::Vector{Contact},
         end
 
         # Create new constraint
-        bA = bodies[c.body_idx_a + 1]
-        bB = bodies[c.body_idx_b + 1]
+        bA = bodies[c.body_idx_a+1]
+        bB = bodies[c.body_idx_b+1]
 
         con = ContactConstraint(bA, bB, c.point, c.normal, c.depth, friction; feature_id=c.feature_id)
 

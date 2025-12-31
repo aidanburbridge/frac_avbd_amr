@@ -1,6 +1,7 @@
 module Maths
 
 using LinearAlgebra
+import LinearAlgebra: normalize
 using StaticArrays
 
 export quat_to_rotmat, quat_mul, quat_inv, quat_to_rotvec, rotvec_to_quat, delta_twist_from
@@ -12,6 +13,14 @@ const FLOAT = Float64
 const Vec3 = SVector{3,FLOAT}
 const Mat3 = SMatrix{3,3,FLOAT,9}
 const Quat = SVector{4,FLOAT}
+
+@inline function normalize(q::Quat)
+    n = norm(q)
+    if n == 0.0 || !isfinite(n)
+        return Quat(1.0, 0.0, 0.0, 0.0)
+    end
+    return q / n
+end
 
 
 function delta_twist_from(b, from_pos::Vec3, from_quat::Quat)
@@ -73,7 +82,6 @@ end
     dq = Quat(0.0, ang_vel[1], ang_vel[2], ang_vel[3])
     return normalize(q + quat_mul(dq, q) * (0.5 * dt))
 end
-
 
 
 # ---------- Orthonormal basis helper ----------
