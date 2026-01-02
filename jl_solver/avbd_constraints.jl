@@ -5,13 +5,12 @@ using StaticArrays
 import ..Maths: Vec3, Quat, transform_point, quat_mul, integrate_quat, orthonormal_basis, rotate_vec, quat_to_rotmat, quat_inv, quat_to_rotvec, delta_twist_from
 import ..Collisions: Body
 
-export AbstractConstraint, ContactConstraint, BondConstraint, initialize!, compute_constraint!, update_bounds!, commit_bond_damage!
+export ContactConstraint, BondConstraint, initialize!, compute_constraint!, update_bounds!, commit_bond_damage! #AbstractConstraint, 
 
 ##### ---------- Contact Constraint ---------- #####
 
-abstract type AbstractConstraint end
-
-mutable struct ContactConstraint <: AbstractConstraint
+#abstract type AbstractConstraint end
+mutable struct ContactConstraint # <: AbstractConstraint
     bodyA::Body
     bodyB::Body
 
@@ -139,7 +138,7 @@ end
 
 ##### ---------- Bond Constraint ---------- #####
 
-mutable struct BondConstraint <: AbstractConstraint
+mutable struct BondConstraint# <: AbstractConstraint
     bodyA::Body
     bodyB::Body
 

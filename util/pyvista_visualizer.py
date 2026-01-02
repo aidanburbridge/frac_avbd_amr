@@ -843,6 +843,8 @@ def run_solver_headless(
     export_binary: bool = False,
     export_dir: Optional[Union[str, Path]] = "output/raw_data", # Should have same dir as test name & number
     steps_per_export: int = 1,
+    profile_timings: bool = False,
+    profile_interval: int = 1,
 ):
     """
     Run the solver headlessly for a fixed number of steps, recording body poses.
@@ -890,6 +892,10 @@ def run_solver_headless(
         contact_frames.append(_snapshot_contact_constraints(getattr(solver, "contact_constraints", [])))
         
     progress_bar = tqdm(total=num_steps, desc="Simulating", unit="step") if show_progress else None
+    timing_samples: List[object] = []
+    profile_interval = max(1, int(profile_interval))
+    has_step_timed = profile_timings and callable(getattr(solver, "step_timed", None))
+    next_profile_step = 1
 
     start_time = time.time()
     steps_done = 0
@@ -897,16 +903,42 @@ def run_solver_headless(
 
     while steps_done < num_steps:
         chunk = min(steps_per_export, num_steps - steps_done)
+        chunk_done = 0
 
-        if hasattr(solver, "step_many"):
-            solver.step_many(chunk)
+        if has_step_timed:
+            while chunk_done < chunk:
+                steps_to_sample = next_profile_step - steps_done
+                if steps_to_sample <= 0:
+                    next_profile_step = steps_done + 1
+                    steps_to_sample = 1
+
+                if steps_to_sample > 1:
+                    fast_steps = min(steps_to_sample - 1, chunk - chunk_done)
+                    if fast_steps > 0:
+                        if hasattr(solver, "step_many"):
+                            solver.step_many(fast_steps)
+                        else:
+                            for _ in range(fast_steps):
+                                solver.step()
+                        steps_done += fast_steps
+                        chunk_done += fast_steps
+                        continue
+
+                timing_samples.append(solver.step_timed())
+                steps_done += 1
+                chunk_done += 1
+                next_profile_step += profile_interval
         else:
-            for _ in range(chunk):
-                solver.step()
+            if hasattr(solver, "step_many"):
+                solver.step_many(chunk)
+            else:
+                for _ in range(chunk):
+                    solver.step()
+            steps_done += chunk
+            chunk_done = chunk
 
-        steps_done += chunk
         if progress_bar:
-            progress_bar.update(chunk)
+            progress_bar.update(chunk_done)
 
         should_record = ((loop_idx + 1) % record_interval == 0)
         
@@ -934,6 +966,8 @@ def run_solver_headless(
         "num_steps": num_steps,
         "record_interval": record_interval,
     }
+    if timing_samples:
+        result["timing_samples"] = timing_samples
     if record_legacy and save_target:
         metadata = {
             "num_frames": len(frames),

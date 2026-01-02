@@ -356,12 +356,9 @@ def build_constraints_from_tree(
                     dsu.union(a_idx, b_idx)
 
                     if dist_sq_int == 1:
-                        # === AXIAL BOND (Face-to-Face) with quadrature points ===
-                        xi = 1.0 / np.sqrt(3)
-                        w_share = 0.25
-
-                        G = E / (2.0 * (1.0 + nu))
-
+                        # === AXIAL BOND (Face-to-Face) - STANDARD SINGLE BOND ===
+                        
+                        # Calculate geometric properties
                         vec_sep = body_B.get_center() - body_A.get_center()
                         axis_idx = int(np.argmax(np.abs(vec_sep)))
                         sgn = 1.0 if vec_sep[axis_idx] >= 0.0 else -1.0
@@ -369,42 +366,43 @@ def build_constraints_from_tree(
                         hA = 0.5 * np.asarray(body_A.size, dtype=float)
                         hB = 0.5 * np.asarray(body_B.size, dtype=float)
 
+                        # Normal pointing from A to B
                         n_world = np.zeros(3)
                         n_world[axis_idx] = sgn
 
+                        # Face area for stiffness scaling
                         t1i, t2i = [d for d in range(3) if d != axis_idx]
-
                         face_area = (2.0 * hA[t1i]) * (2.0 * hA[t2i])
                         h_norm = hA[axis_idx] + hB[axis_idx]
 
-                        k_n_total = E * face_area / max(h_norm, 1e-12)
-                        k_t_total = G * face_area / max(h_norm, 1e-12)
+                        # Standard Stiffness (E * A / L)
+                        G = E / (2.0 * (1.0 + nu))
+                        k_n = E * face_area / max(h_norm, 1e-12)
+                        k_t = G * face_area / max(h_norm, 1e-12)
 
-                        for s1 in (-1.0, 1.0):
-                            for s2 in (-1.0, 1.0):
-                                pA_local = np.zeros(3)
-                                pB_local = np.zeros(3)
-                                pA_local[axis_idx] = sgn * hA[axis_idx]
-                                pB_local[axis_idx] = -sgn * hB[axis_idx]
-                                pA_local[t1i] = s1 * xi * hA[t1i]
-                                pA_local[t2i] = s2 * xi * hA[t2i]
-                                pB_local[t1i] = s1 * xi * hB[t1i]
-                                pB_local[t2i] = s2 * xi * hB[t2i]
+                        # Anchor points (Center of the face)
+                        pA_local = np.zeros(3)
+                        pB_local = np.zeros(3)
+                        
+                        # Set the component along the axis to the face surface
+                        pA_local[axis_idx] = sgn * hA[axis_idx]
+                        pB_local[axis_idx] = -sgn * hB[axis_idx]
+                        # Tangent components remain 0.0 (Center of face)
 
-                                bonds.append(
-                                    BondData(
-                                        idxA=a_idx,
-                                        idxB=b_idx,
-                                        pA_local=pA_local,
-                                        pB_local=pB_local,
-                                        normal=n_world,
-                                        k_n=k_n_total * w_share,
-                                        k_t=k_t_total * w_share,
-                                        area=face_area * w_share,
-                                        tensile_strength=tensile_strength,
-                                        fracture_energy=fracture_energy,
-                                    )
-                                )
+                        bonds.append(
+                            BondData(
+                                idxA=a_idx,
+                                idxB=b_idx,
+                                pA_local=pA_local,
+                                pB_local=pB_local,
+                                normal=n_world,
+                                k_n=k_n,
+                                k_t=k_t,
+                                area=face_area,
+                                tensile_strength=tensile_strength,
+                                fracture_energy=fracture_energy,
+                            )
+                        )
                     else:
                         # === DIAGONAL BOND (Edge/Corner) ===
                         scale_factor = scale_map[dist_sq_int]

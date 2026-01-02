@@ -118,7 +118,10 @@ def main(argv: list[str] | None = None):
         json.dump(manifest, f, indent=2)
 
     # 4. Run
-    run_simulation(setup, solver_type=args.solver)
+    result = run_simulation(setup, solver_type=args.solver)
+
+    samples = result.get("timing_samples", [])
+    print(samples[:3]) 
     
     # 5. Suggest Next Step
     print(f"\n[Run Manager] Done. To visualize:")

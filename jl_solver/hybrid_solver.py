@@ -117,6 +117,11 @@ class HybridSolver:
             raise RuntimeError("Call initialize(...) before stepping the simulation.")
         self._bridge.step_batch(self._sim, int(steps))
 
+    def step_timed(self):
+        if self._sim is None:
+            raise RuntimeError("Call initialize(...) before stepping the simulation.")
+        return self._bridge.step_timed(self._sim)
+
     def get_state(self) -> np.ndarray:
 
         # TODO add in stress data from bridge
@@ -253,6 +258,12 @@ class HybridWorld:
         self._solver.step(1)
         if self._sync_bodies:
             self._update_bodies(self._solver.get_state())
+
+    def step_timed(self):
+        timings = self._solver.step_timed()
+        if self._sync_bodies:
+            self._update_bodies(self._solver.get_state())
+        return timings
 
     def step_many(self, steps: int) -> None:
         self._solver.step(int(steps))

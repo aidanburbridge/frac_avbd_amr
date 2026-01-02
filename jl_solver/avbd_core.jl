@@ -16,11 +16,14 @@ mutable struct SimulationState
     bodies::Vector{Body}
     manifolds::Dict{Tuple{Int,Int},Manifold}
 
-    persistent_constraints::Vector{BondConstraint}
-    active_constraints::Vector{AbstractConstraint}
+    bond_constraints::Vector{BondConstraint}
+    contact_constraints::Vector{ContactConstraint}
+
+    bond_incidence::Vector{Vector{BondConstraint}}
+    contact_incidence::Vector{Vector{ContactConstraint}}
 
     # Body ID -> list of constraints affecting body
-    incidence_map::Vector{Vector{AbstractConstraint}} # Incident map of constraints on bodies - needed? - better way to do this?
+    #incidence_map::Vector{Vector{AbstractConstraint}} # Incident map of constraints on bodies - needed? - better way to do this?
 
     # Solver settings
     dt::Float64
@@ -36,12 +39,18 @@ mutable struct SimulationState
 
     #TODO where do these values get set? In HybridSolver? I am setting them as default values 
     function SimulationState(bodies, dt; grav=-9.81, iters=10, mu=0.6, b=10.0, g=0.99, al=0.95, stabil=true)
-        per_cons = Vector{BondConstraint}()
-        act_cons = Vector{AbstractConstraint}()
-        inc_map = Vector{Vector{AbstractConstraint}}()
+        # Initialize constraint vectors
+        bond_cons = Vector{BondConstraint}()
+        contact_cons = Vector{ContactConstraint}()
+
+        # Initialize constraint maps
+        bond_map = Vector{Vector{BondConstraint}}()
+        contact_map = Vector{Vector{ContactConstraint}}()
+
         manifolds = Dict{Tuple{Int,Int},Manifold}()
 
-        new(bodies, manifolds, per_cons, act_cons, inc_map, dt, grav, mu, iters, Float64(b), Float64(g), Float64(al), stabil)
+        new(bodies, manifolds, bond_cons, contact_cons, bond_map, contact_map,
+            dt, grav, mu, iters, Float64(b), Float64(g), Float64(al), stabil)
 
     end
 end
@@ -58,6 +67,16 @@ function predict_inertia!(sim::SimulationState) # Why do I pass dt and gravity i
         if b.is_static
             b.pos_inertia = b.pos
             b.quat_inertia = b.quat
+            update_rotation!(b)
+            update_inv_inertia_world!(b)
+            continue
+        end
+
+        if b.inv_mass == 0.0
+            b.pos_inertia = b.pos + b.vel * dt
+            b.quat_inertia = integrate_quat(b.quat, b.ang_vel, dt)
+            b.pos = b.pos_inertia
+            b.quat = b.quat_inertia
             update_rotation!(b)
             update_inv_inertia_world!(b)
             continue
@@ -80,10 +99,14 @@ function predict_inertia!(sim::SimulationState) # Why do I pass dt and gravity i
 end
 
 function detect_collisions!(sim::SimulationState)
-    empty!(sim.active_constraints)
-    append!(sim.active_constraints, sim.persistent_constraints)
+
+    # Clear the contacts
+    empty!(sim.contact_constraints)
+
+    #append!(sim.active_constraints, sim.persistent_constraints)
 
     raw_contacts = get_collisions(sim.bodies)
+    raw_count = length(raw_contacts)
 
     pair_groups = Dict{Tuple{Int,Int},Vector{Contact}}()
 
@@ -105,29 +128,74 @@ function detect_collisions!(sim::SimulationState)
             init_manifold(key[1], key[2])
         end
         update_manifold_dynamic!(manifold, contacts, sim.friction, sim.bodies)
-        append!(sim.active_constraints, manifold.constraints[1:manifold.count])
+        append!(sim.contact_constraints, manifold.constraints[1:manifold.count])
     end
+    return raw_count
 end
 
 function warm_start!(sim::SimulationState)
     # Clear incidence map
     num_bodies = length(sim.bodies)
-    if length(sim.incidence_map) < num_bodies
-        resize!(sim.incidence_map, num_bodies)
+
+    current_len = length(sim.bond_incidence)
+    if current_len < num_bodies
+        resize!(sim.bond_incidence, num_bodies)
+        resize!(sim.contact_incidence, num_bodies)
+        # Initialize new
+        for i in 1:num_bodies # TODO WHAT is the logic behind this? why not current_len?
+            #for i in (current_len+1):num_bodies
+            if !isassigned(sim.bond_incidence, i) # If not assigned, assign 
+                sim.bond_incidence[i] = BondConstraint[]
+                sim.contact_incidence[i] = ContactConstraint[]
+            end
+        end
     end
 
     for i in 1:num_bodies
-        sim.incidence_map[i] = AbstractConstraint[]
+        empty!(sim.bond_incidence[i])
+        empty!(sim.contact_incidence[i])
     end
 
-    # Loop over all constraints
-    for con in sim.active_constraints
-        initialize!(con)
+    # Loop bonds first
+    for con in sim.bond_constraints
 
+        # Skip broken bonds
+        if con.is_broken
+            continue
+        end
+
+        initialize!(con)
         con.penalty_k = clamp.(con.penalty_k .* sim.gamma, con.k_min, con.k_max)
         if !sim.stabilize
             con.lambda = con.lambda .* (sim.alpha * sim.gamma)
         end
+
+        pk = con.penalty_k
+        for r in 1:3
+            if !isinf(con.stiffness[r])
+                pk = setindex(pk, min(pk[r], con.stiffness[r]), r)
+            end
+        end
+
+        con.penalty_k = pk
+
+        # Build incidence_map
+        push!(sim.bond_incidence[con.bodyA.id+1], con)
+        push!(sim.bond_incidence[con.bodyB.id+1], con)
+
+    end
+
+    # Loop contacts
+    for con in sim.contact_constraints
+
+        initialize!(con)
+
+        con.penalty_k = clamp.(con.penalty_k .* sim.gamma, con.k_min, con.k_max)
+
+        if !sim.stabilize
+            con.lambda = con.lambda .* (sim.alpha * sim.gamma)
+        end
+
         pk = con.penalty_k
         for r in 1:3
             if !isinf(con.stiffness[r])
@@ -137,15 +205,21 @@ function warm_start!(sim::SimulationState)
         con.penalty_k = pk
 
         # Build incidence_map
-        push!(sim.incidence_map[con.bodyA.id+1], con)
-        push!(sim.incidence_map[con.bodyB.id+1], con)
+        push!(sim.contact_incidence[con.bodyA.id+1], con)
+        push!(sim.contact_incidence[con.bodyB.id+1], con)
     end
 end
 
-function primal_solve!(b::Body, constraints::Vector{AbstractConstraint}, invdt2::Float64, alpha::Float64)
+function primal_solve!(b::Body, bonds::Vector{BondConstraint}, contacts::Vector{ContactConstraint}, invdt2::Float64, alpha::Float64)
+
+    if b.inv_mass == 0.0
+        return
+    end
+
     if !isfinite(b.mass) || b.mass <= 0.0 || !all(isfinite, b.inertia_diag)
         return
     end
+
     m_val = b.mass * invdt2
     I_val = b.inertia_diag * invdt2
 
@@ -159,11 +233,38 @@ function primal_solve!(b::Body, constraints::Vector{AbstractConstraint}, invdt2:
     d_twist = delta_twist_from(b, b.pos_inertia, b.quat_inertia)
     F = H * (-d_twist)
 
-    for con in constraints
-        compute_constraint!(con, alpha)
-        if isa(con, ContactConstraint)
-            AVBDConstraints.update_bounds!(con)
+    for con in bonds
+
+        if con.is_broken
+            continue
         end
+
+        compute_constraint!(con, alpha)
+
+        isA = (con.bodyA == b)
+        J_block = isA ? con.JA : con.JB
+
+        for r in 1:3
+            k_val = con.penalty_k[r]
+            k_val <= 0.0 && continue
+
+            J_row = J_block[r, :]
+
+            if isinf(con.stiffness[r])
+                f_mag = k_val * con.C[r] + con.lambda[r]
+                f_mag = clamp(f_mag, con.f_min[r], con.f_max[r])
+            else
+                f_mag = k_val * con.C[r]
+            end
+
+            H += (J_row * J_row') * k_val
+            F -= J_row * f_mag
+        end
+    end
+
+    for con in contacts
+        compute_constraint!(con, alpha)
+        AVBDConstraints.update_bounds!(con)
 
         isA = (con.bodyA == b)
         J_block = isA ? con.JA : con.JB
@@ -200,12 +301,32 @@ end
 
 function dual_update!(sim::SimulationState, alpha::Float64)
 
+    for con in sim.bond_constraints
+
+        if con.is_broken
+            continue
+        end
+
+        compute_constraint!(con, alpha)
+
+        pk = con.penalty_k
+
+        for r in 1:3
+            new_k = pk[r] + sim.beta * abs(con.C[r])
+            new_k = min(new_k, min(con.k_max[r], con.stiffness[r]))
+            pk = setindex(pk, new_k, r)
+        end
+        con.penalty_k = pk
+    end
+
     #Threads.@threads 
-    for con in sim.active_constraints
+    for con in sim.contact_constraints
+
         compute_constraint!(con, alpha)
 
         pk = con.penalty_k
         lam = con.lambda
+
         for r in 1:3
             if isinf(con.stiffness[r])
                 sigma = lam[r] + pk[r] * con.C[r]
@@ -225,15 +346,18 @@ function dual_update!(sim::SimulationState, alpha::Float64)
         con.penalty_k = pk
         con.lambda = lam
 
-        if isa(con, ContactConstraint)
-            AVBDConstraints.update_bounds!(con)
-        end
+        AVBDConstraints.update_bounds!(con)
     end
 end
 
 function update_vel!(sim::SimulationState, invdt::Float64)
     for b in sim.bodies
         b.is_static && continue
+
+        # dont update kinematic bodies, let them keep moving @ set velocity
+        if b.inv_mass == 0.0
+            continue
+        end
 
         b.vel = (b.pos - b.pos0) * invdt
 
@@ -280,7 +404,7 @@ function init_simulation(
 
     n_bonds = size(bond_data, 1)
     if n_bonds > 0
-        sizehint!(sim.persistent_constraints, n_bonds)
+        sizehint!(sim.bond_constraints, n_bonds)
         for i in 1:n_bonds
             row = @view bond_data[i, :]
             idxA = Int(row[1])
@@ -296,7 +420,7 @@ function init_simulation(
             bA = bodies[idxA+1]
             bB = bodies[idxB+1]
             bond = BondConstraint(bA, bB, pA, pB, n_w, kn, kt, area, tensile, Gc)
-            push!(sim.persistent_constraints, bond)
+            push!(sim.bond_constraints, bond)
         end
     end
 
@@ -304,15 +428,12 @@ function init_simulation(
 end
 
 function damage_bonds!(sim::SimulationState)
-    idx_to_remove = Int[]
 
-    for (i, bond) in enumerate(sim.persistent_constraints)
-        commit_bond_damage!(bond)
-        if bond.is_broken
-            push!(idx_to_remove, i)
+    for bond in sim.bond_constraints
+        if !bond.is_broken
+            commit_bond_damage!(bond)
         end
     end
-    deleteat!(sim.persistent_constraints, idx_to_remove)
 end
 
 @inline function assert_finite_body!(b, tag)
@@ -354,9 +475,14 @@ function step_simulation!(sim::SimulationState)
             # solve constriants not in loop but via linear algebra
             body.is_static && continue
 
-            primal_solve!(body, sim.incidence_map[body.id+1], inv_dt2, alpha_eff)
+            primal_solve!(body,
+                sim.bond_incidence[body.id+1],
+                sim.contact_incidence[body.id+1],
+                inv_dt2, alpha_eff)
+
             assert_finite_body!(body, "after primal_solve it=$it")
         end
+
         # dual update
         if it <= sim.iterations
             dual_update!(sim, alpha_eff)
@@ -371,6 +497,100 @@ function step_simulation!(sim::SimulationState)
 
     # Update & break some bonds
     damage_bonds!(sim)
+end
+
+@inline function ns_to_ms(ns::Integer)
+    return float(ns) / 1e6
+end
+
+function step_simulation_timed!(sim::SimulationState)
+    t0 = time_ns()
+
+    dt = sim.dt
+    inv_dt = 1 / dt
+    inv_dt2 = 1 / (dt * dt)
+
+    # Inertial solve
+    predict_inertia!(sim)
+    for b in sim.bodies
+        assert_finite_body!(b, "after predict_inertia")
+    end
+    t1 = time_ns()
+
+    # Build contact constraints
+    raw_contacts = detect_collisions!(sim)
+    t2 = time_ns()
+
+    # warm start constraints
+    warm_start!(sim)
+    for b in sim.bodies
+        assert_finite_body!(b, "after warm_start")
+    end
+    t3 = time_ns()
+
+    active_constraints = length(sim.contact_constraints) + length(sim.bond_constraints)
+
+    bond_count = length(sim.bond_constraints)
+    contact_count = length(sim.contact_constraints)
+
+    total_iters = sim.iterations + (sim.stabilize ? 1 : 0)
+    primal_ns = UInt64(0)
+    dual_ns = UInt64(0)
+
+    for it = 1:total_iters
+        alpha_eff = sim.stabilize ? (it <= sim.iterations ? 1.0 : 0.0) : sim.alpha
+
+        it_start = time_ns()
+        for body in sim.bodies
+            body.is_static && continue
+
+            primal_solve!(body,
+                sim.bond_incidence[body.id+1],
+                sim.contact_incidence[body.id+1],
+                inv_dt2, alpha_eff)
+
+            assert_finite_body!(body, "after primal_solve it=$it")
+        end
+
+        it_mid = time_ns()
+
+        if it <= sim.iterations
+            dual_update!(sim, alpha_eff)
+            for b in sim.bodies
+                assert_finite_body!(b, "after dual_update it=$it")
+            end
+        end
+        it_end = time_ns()
+
+        primal_ns += it_mid - it_start
+        dual_ns += it_end - it_mid
+    end
+    t4 = time_ns()
+
+    # Velocity derivation from new positions
+    update_vel!(sim, inv_dt)
+    t5 = time_ns()
+
+    # Update & break some bonds
+    damage_bonds!(sim)
+    t6 = time_ns()
+
+    return (
+        total_ms=ns_to_ms(t6 - t0),
+        predict_ms=ns_to_ms(t1 - t0),
+        detect_ms=ns_to_ms(t2 - t1),
+        warm_ms=ns_to_ms(t3 - t2),
+        primal_ms=ns_to_ms(primal_ns),
+        dual_ms=ns_to_ms(dual_ns),
+        update_vel_ms=ns_to_ms(t5 - t4),
+        damage_ms=ns_to_ms(t6 - t5),
+        bodies=length(sim.bodies),
+        active_constraints=active_constraints,
+        persistent_constraints=bond_count,
+        contact_constraints=contact_count,
+        raw_contacts=raw_contacts,
+        total_iters=total_iters,
+    )
 end
 
 end # module end

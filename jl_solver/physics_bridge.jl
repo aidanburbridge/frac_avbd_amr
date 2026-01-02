@@ -42,6 +42,10 @@ end
 # Python cannot access `!`-suffixed names directly; provide a stable alias.
 step_batch(sim::AVBDCore.SimulationState, steps::Int) = step_batch!(sim, steps)
 
+function step_timed(sim::AVBDCore.SimulationState)
+    return AVBDCore.step_simulation_timed!(sim)
+end
+
 function get_positions(sim::AVBDCore.SimulationState)
     # Extract positions to return to Python for rendering
     n = length(sim.bodies)
@@ -66,7 +70,7 @@ function write_frame(sim::AVBDCore.SimulationState, filename::String)
 
         # Number of bodies and bonds
         n_bodies = length(sim.bodies)
-        active_bonds = [b for b in sim.persistent_constraints if !b.is_broken]
+        active_bonds = [b for b in sim.bond_constraints if !b.is_broken]
         n_bonds = length(active_bonds)
 
         write(io, Int32(n_bodies))
@@ -122,7 +126,7 @@ function get_visualization_data(sim::AVBDCore.SimulationState)
     # Need to create stress tensor - symmetric
     stress_data = zeros(FLOAT, n_bodies, 6)
 
-    active_bonds = [b for b in sim.persistent_constraints if !b.is_broken]
+    active_bonds = [b for b in sim.bond_constraints if !b.is_broken]
     bond_data = zeros(FLOAT, length(active_bonds), 4)
 
     for (i, bond) in enumerate(active_bonds)

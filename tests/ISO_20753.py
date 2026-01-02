@@ -12,16 +12,16 @@ from util.pyvista_visualizer import SimulationSetup
 
 STL_PATH = r"C:\Users\aidan\Documents\TUM\Thesis\ISO 20753 Type A1 v1.stl"
 LENGTH = 0.170
-VOXEL_RES = 500
+VOXEL_RES = 2000
 
 # Shared solver params
 DT_PHYSICS = 1/1000
 DT_RENDER = 1/60
 STEPS_PER = int(DT_RENDER / DT_PHYSICS)
-ITER = 50
+ITER = 20
 GRAV = 0.0
 FRICTION = 0.0
-PULL_RATE = 0.010
+PULL_RATE = 0.015
 #PULL_RATE = 10
 GRIP_DISTANCE = 0.02
 #GRIP_DISTANCE = 20
@@ -105,9 +105,10 @@ def build_setup()-> SimulationSetup:
         friction=FRICTION,
         sync_bodies=True,
         python_solver_params=PYTHON_SOLVER_PARAMS,
-        headless_steps=200,
+        headless_steps=2000,
         headless_kwargs={
             "steps_per_export": STEPS_PER,
             "show_progress": True,
+            "profile_timings": True,
         }
     )
