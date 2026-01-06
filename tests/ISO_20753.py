@@ -8,23 +8,30 @@ import geometry.octree as oct
 import numpy as np
 
 from util.voxel_assembly import VoxelAssembly
-from util.pyvista_visualizer import SimulationSetup
+from util.simulate import SimulationSetup
 
 STL_PATH = r"C:\Users\aidan\Documents\TUM\Thesis\ISO 20753 Type A1 v1.stl"
 LENGTH = 0.170
-VOXEL_RES = 2000
+VOXEL_RES = 1000
 
 # Shared solver params
-DT_PHYSICS = 1/1000
+DT_PHYSICS = 1/2000
 DT_RENDER = 1/60
 STEPS_PER = int(DT_RENDER / DT_PHYSICS)
-ITER = 20
+ITER = 30
 GRAV = 0.0
 FRICTION = 0.0
-PULL_RATE = 0.015
+PULL_RATE = 0.010
 #PULL_RATE = 10
 GRIP_DISTANCE = 0.02
 #GRIP_DISTANCE = 20
+E_MODULUS = 2e9
+NU = 0.3
+TENSILE_STRENGTH = 80e5
+FRACTURE_TOUGHNESS = 5e4
+DENSITY = 1150.0
+PENALTY_GAIN = 1e6
+STEPS = 2000
 PYTHON_SOLVER_PARAMS = {
     "mu": 0.3,
     "post_stabilize": True,
@@ -60,8 +67,8 @@ def build_setup()-> SimulationSetup:
         #raw_origin,
         phys_origin,
         h_base,
-        density=1150.0,
-        penalty_gain=1e6,
+        density=DENSITY,
+        penalty_gain=PENALTY_GAIN,
         static=False
     )
 
@@ -71,11 +78,11 @@ def build_setup()-> SimulationSetup:
         leaves,
         boxes,
         mapping,
-        E=2e9,
+        E=E_MODULUS,
         #E = 1e5,
-        nu=0.3,
-        tensile_strength=80e6,
-        fracture_toughness=5e5,
+        nu=NU,
+        tensile_strength=TENSILE_STRENGTH,
+        fracture_toughness=FRACTURE_TOUGHNESS,
     )
     print(f"Number of beam bonds: {len(beam_bonds)}")
 
@@ -105,7 +112,18 @@ def build_setup()-> SimulationSetup:
         friction=FRICTION,
         sync_bodies=True,
         python_solver_params=PYTHON_SOLVER_PARAMS,
-        headless_steps=2000,
+        metadata={
+            "dt_physics": DT_PHYSICS,
+            "dt_render": DT_RENDER,
+            "E": E_MODULUS,
+            "nu": NU,
+            "tensile_strength": TENSILE_STRENGTH,
+            "fracture_toughness": FRACTURE_TOUGHNESS,
+            "density": DENSITY,
+            "penalty_gain": PENALTY_GAIN,
+            "h_base": h_base,
+        },
+        headless_steps=STEPS,
         headless_kwargs={
             "steps_per_export": STEPS_PER,
             "show_progress": True,

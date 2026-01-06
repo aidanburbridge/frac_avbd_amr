@@ -298,20 +298,22 @@ function compute_constraint!(con::BondConstraint, alpha::Float64)
     d_s = sqrt(con.C[2]^2 + con.C[3]^2) # shear
 
     dn0, ds0, dnc, dsc = con.limits
+    strain = sqrt((d_n / dnc)^2 + (d_s / dsc)^2)
+    con.current_eff_strain = strain
+    con.max_eff_strain = max(con.max_eff_strain, strain)
 
     if !con.is_cohesive && !con.is_broken
         Psi = (d_n / dn0)^2 + (d_s / ds0)^2
         if Psi >= 1.0
             con.is_cohesive = true
-            strain = sqrt((d_n / dnc)^2 + (d_s / dsc)^2)
-            con.max_committed_strain = strain
+            con.max_committed_strain = max(con.max_committed_strain, strain)
         end
     end
 
     if con.is_cohesive
-        strain = sqrt((d_n / dnc)^2 + (d_s / dsc)^2)
         strain_curr = max(con.max_committed_strain, strain) # irreversible damage
         con.current_eff_strain = strain_curr
+        con.max_eff_strain = max(con.max_eff_strain, strain_curr)
 
         if strain_curr >= 1.0
             con.damage = 1.0

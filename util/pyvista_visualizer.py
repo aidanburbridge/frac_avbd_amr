@@ -63,6 +63,7 @@ class SimulationSetup:
     friction: float = 0.3
     sync_bodies: bool = True
     python_solver_params: Dict[str, object] = field(default_factory=dict)
+    metadata: Dict[str, object] = field(default_factory=dict)
     headless_steps: Optional[int] = None
     default_save_stem: Optional[str] = None
     headless_kwargs: Dict[str, object] = field(default_factory=dict)
