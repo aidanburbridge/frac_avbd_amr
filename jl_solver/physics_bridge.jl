@@ -142,9 +142,10 @@ function get_visualization_data(sim::AVBDCore.SimulationState)
         pB = transform_point(bond.pB_local, bB.pos, bB.quat)
         dp = pA - pB
 
-        # Force calculation (F = -k*x)
+        # Force calculation (F = -k*x) using material stiffness (not solver bank)
         err = bond.C
-        f_local = -bond.penalty_k .* err
+        k_mat = err[1] > 0 ? (bond.stiffness * (1.0 - bond.damage)) : bond.stiffness
+        f_local = -k_mat .* err
         F_world = n * f_local[1] + t1 * f_local[2] + t2 * f_local[3]
 
         # stress calculation

@@ -18,7 +18,7 @@ VOXEL_RES = 1000
 DT_PHYSICS = 1/2000
 DT_RENDER = 1/60
 STEPS_PER = int(DT_RENDER / DT_PHYSICS)
-ITER = 30
+ITER = 50
 GRAV = 0.0
 FRICTION = 0.0
 PULL_RATE = 0.010
@@ -34,8 +34,8 @@ PENALTY_GAIN = 1e6
 STEPS = 2000
 PYTHON_SOLVER_PARAMS = {
     "mu": 0.3,
-    "post_stabilize": True,
-    "beta": 10000,
+    "post_stabilize": False,
+    "beta": 10,
     "alpha": 0.95,
     "gamma": 0.99,
     "debug_contacts": False,

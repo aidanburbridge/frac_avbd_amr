@@ -12,6 +12,12 @@ using ..ManifoldHandling: Manifold, init_manifold, update_manifold_dynamic!
 
 export SimulationState, init_simulation, step_simulation!
 
+# TODO things to implement
+# - have damage only apply to tension -> leave the stiffness of compresison untouched
+# - ensure both compressive and tensile strain and stress are exported to the visualizer
+# - need to somehow stabilize the fracture through 
+# - early out for fast convergences
+
 mutable struct SimulationState
     bodies::Vector{Body}
     manifolds::Dict{Tuple{Int,Int},Manifold}
@@ -164,20 +170,12 @@ function warm_start!(sim::SimulationState)
             continue
         end
 
+        # TODO split warm start between compression and tension
         initialize!(con)
-        con.penalty_k = clamp.(con.penalty_k .* sim.gamma, con.k_min, con.k_max)
-        if !sim.stabilize
-            con.lambda = con.lambda .* (sim.alpha * sim.gamma)
-        end
 
-        pk = con.penalty_k
-        for r in 1:3
-            if !isinf(con.stiffness[r])
-                pk = setindex(pk, min(pk[r], con.stiffness[r]), r)
-            end
-        end
-
-        con.penalty_k = pk
+        # Decay both tension and compression
+        con.k_tension = clamp.(con.k_tension .* sim.gamma, con.k_min, con.k_max)
+        con.k_compression = clamp.(con.k_compression .* sim.gamma, con.k_min, con.k_max)
 
         # Build incidence_map
         push!(sim.bond_incidence[con.bodyA.id+1], con)
@@ -235,27 +233,22 @@ function primal_solve!(b::Body, bonds::Vector{BondConstraint}, contacts::Vector{
 
     for con in bonds
 
-        if con.is_broken
-            continue
-        end
+        C_loc, JA, JB, k_limit = eval_bond(con)
 
-        compute_constraint!(con, alpha)
+        isA = (con.bodyA.id == b.id)
+        J_block = isA ? JA : JB
 
-        isA = (con.bodyA == b)
-        J_block = isA ? con.JA : con.JB
+        # Check if in tension or compression
+        in_tension = C_loc[1] > 0
+        current_k = in_tension ? con.k_tension : con.k_compression
 
+        # Should not have penalty_k anymore but select based on which state it is in, tension or compression
         for r in 1:3
-            k_val = con.penalty_k[r]
+            k_val = min(current_k[r], k_limit[r])
             k_val <= 0.0 && continue
 
             J_row = J_block[r, :]
-
-            if isinf(con.stiffness[r])
-                f_mag = k_val * con.C[r] + con.lambda[r]
-                f_mag = clamp(f_mag, con.f_min[r], con.f_max[r])
-            else
-                f_mag = k_val * con.C[r]
-            end
+            f_mag = k_val * C_loc[r]
 
             H += (J_row * J_row') * k_val
             F -= J_row * f_mag
@@ -266,7 +259,7 @@ function primal_solve!(b::Body, bonds::Vector{BondConstraint}, contacts::Vector{
         compute_constraint!(con, alpha)
         AVBDConstraints.update_bounds!(con)
 
-        isA = (con.bodyA == b)
+        isA = (con.bodyA.id == b.id)
         J_block = isA ? con.JA : con.JB
 
         for r in 1:3
@@ -307,16 +300,28 @@ function dual_update!(sim::SimulationState, alpha::Float64)
             continue
         end
 
-        compute_constraint!(con, alpha)
+        C_loc, _, _, k_limit = eval_bond(con) # get effective stiffness from evaluating the damaged bond
 
-        pk = con.penalty_k
+        # Check load type
+        in_tension = C_loc[1] > 0
 
-        for r in 1:3
-            new_k = pk[r] + sim.beta * abs(con.C[r])
-            new_k = min(new_k, min(con.k_max[r], con.stiffness[r]))
-            pk = setindex(pk, new_k, r)
+        if in_tension
+            pk = con.k_tension
+            for r in 1:3
+                new_k = pk[r] + sim.beta * abs(C_loc[r])
+                new_k = min(new_k, min(con.k_max[r], k_limit[r]))
+                pk = setindex(pk, new_k, r)
+            end
+            con.k_tension = pk
+        else
+            pk = con.k_compression
+            for r in 1:3
+                new_k = pk[r] + sim.beta * abs(C_loc[r])
+                new_k = min(new_k, min(con.k_max[r], k_limit[r]))
+                pk = setindex(pk, new_k, r)
+            end
+            con.k_compression = pk
         end
-        con.penalty_k = pk
     end
 
     #Threads.@threads 
@@ -431,7 +436,7 @@ function damage_bonds!(sim::SimulationState)
 
     for bond in sim.bond_constraints
         if !bond.is_broken
-            commit_bond_damage!(bond)
+            update_bond_state!(bond)
         end
     end
 end
@@ -441,7 +446,6 @@ end
         error("Non-finite body $(b.id) at $tag: pos=$(b.pos) quat=$(b.quat)")
     end
 end
-
 
 function step_simulation!(sim::SimulationState)
 
@@ -475,10 +479,11 @@ function step_simulation!(sim::SimulationState)
             # solve constriants not in loop but via linear algebra
             body.is_static && continue
 
+            # TODO include a L-scheme term here that adds numerical inertia
             primal_solve!(body,
                 sim.bond_incidence[body.id+1],
                 sim.contact_incidence[body.id+1],
-                inv_dt2, alpha_eff)
+                inv_dt2, alpha_eff)  # Uses eval_bond
 
             assert_finite_body!(body, "after primal_solve it=$it")
         end
@@ -492,105 +497,14 @@ function step_simulation!(sim::SimulationState)
         end
     end
 
+    # Update & break some bonds
     # Velocity derivation from new positions
+    damage_bonds!(sim) # commits bond damage
     update_vel!(sim, inv_dt)
 
-    # Update & break some bonds
-    damage_bonds!(sim)
+    # TODO insert more iterations after committing bond damage to smooth damage - staggered approach
+
 end
 
-@inline function ns_to_ms(ns::Integer)
-    return float(ns) / 1e6
-end
-
-function step_simulation_timed!(sim::SimulationState)
-    t0 = time_ns()
-
-    dt = sim.dt
-    inv_dt = 1 / dt
-    inv_dt2 = 1 / (dt * dt)
-
-    # Inertial solve
-    predict_inertia!(sim)
-    for b in sim.bodies
-        assert_finite_body!(b, "after predict_inertia")
-    end
-    t1 = time_ns()
-
-    # Build contact constraints
-    raw_contacts = detect_collisions!(sim)
-    t2 = time_ns()
-
-    # warm start constraints
-    warm_start!(sim)
-    for b in sim.bodies
-        assert_finite_body!(b, "after warm_start")
-    end
-    t3 = time_ns()
-
-    active_constraints = length(sim.contact_constraints) + length(sim.bond_constraints)
-
-    bond_count = length(sim.bond_constraints)
-    contact_count = length(sim.contact_constraints)
-
-    total_iters = sim.iterations + (sim.stabilize ? 1 : 0)
-    primal_ns = UInt64(0)
-    dual_ns = UInt64(0)
-
-    for it = 1:total_iters
-        alpha_eff = sim.stabilize ? (it <= sim.iterations ? 1.0 : 0.0) : sim.alpha
-
-        it_start = time_ns()
-        for body in sim.bodies
-            body.is_static && continue
-
-            primal_solve!(body,
-                sim.bond_incidence[body.id+1],
-                sim.contact_incidence[body.id+1],
-                inv_dt2, alpha_eff)
-
-            assert_finite_body!(body, "after primal_solve it=$it")
-        end
-
-        it_mid = time_ns()
-
-        if it <= sim.iterations
-            dual_update!(sim, alpha_eff)
-            for b in sim.bodies
-                assert_finite_body!(b, "after dual_update it=$it")
-            end
-        end
-        it_end = time_ns()
-
-        primal_ns += it_mid - it_start
-        dual_ns += it_end - it_mid
-    end
-    t4 = time_ns()
-
-    # Velocity derivation from new positions
-    update_vel!(sim, inv_dt)
-    t5 = time_ns()
-
-    # Update & break some bonds
-    damage_bonds!(sim)
-    t6 = time_ns()
-
-    return (
-        total_ms=ns_to_ms(t6 - t0),
-        predict_ms=ns_to_ms(t1 - t0),
-        detect_ms=ns_to_ms(t2 - t1),
-        warm_ms=ns_to_ms(t3 - t2),
-        primal_ms=ns_to_ms(primal_ns),
-        dual_ms=ns_to_ms(dual_ns),
-        update_vel_ms=ns_to_ms(t5 - t4),
-        damage_ms=ns_to_ms(t6 - t5),
-        bodies=length(sim.bodies),
-        active_constraints=active_constraints,
-        persistent_constraints=bond_count,
-        contact_constraints=contact_count,
-        raw_contacts=raw_contacts,
-        total_iters=total_iters,
-    )
-end
 
 end # module end

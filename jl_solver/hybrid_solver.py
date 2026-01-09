@@ -140,7 +140,7 @@ class HybridSolver:
 
         if self._sim is None:
             # Return empty arrays
-            return np.zeros((0, 6)), np.zeros((0, 4))
+            return np.zeros((0, 6)), np.zeros((0, 6))
         
         # Julia bridge function        
         stress_jl, bond_jl = self._bridge.get_visualization_data(self._sim)

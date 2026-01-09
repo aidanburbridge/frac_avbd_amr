@@ -5,12 +5,11 @@ using StaticArrays
 import ..Maths: Vec3, Quat, transform_point, quat_mul, integrate_quat, orthonormal_basis, rotate_vec, quat_to_rotmat, quat_inv, quat_to_rotvec, delta_twist_from
 import ..Collisions: Body
 
-export ContactConstraint, BondConstraint, initialize!, compute_constraint!, update_bounds!, commit_bond_damage! #AbstractConstraint, 
+export ContactConstraint, BondConstraint, initialize!, compute_constraint!, update_bounds!, commit_bond_damage!, eval_bond, update_bond_state!, bond_k_eff #AbstractConstraint, 
 
 ##### ---------- Contact Constraint ---------- #####
 
-#abstract type AbstractConstraint end
-mutable struct ContactConstraint # <: AbstractConstraint
+mutable struct ContactConstraint
     bodyA::Body
     bodyB::Body
 
@@ -138,7 +137,7 @@ end
 
 ##### ---------- Bond Constraint ---------- #####
 
-mutable struct BondConstraint# <: AbstractConstraint
+mutable struct BondConstraint
     bodyA::Body
     bodyB::Body
 
@@ -167,11 +166,11 @@ mutable struct BondConstraint# <: AbstractConstraint
     max_committed_strain::Float64 # CCM calls this lambda, but switched for 'strain' to avoid confusion
 
     # Solver values
-    lambda::Vec3
-    penalty_k::Vec3
+    k_tension::Vec3
+    k_compression::Vec3
 
     # Material config/values
-    stiffness::Vec3
+    stiffness::Vec3 # base material stiffness (E) will NOT be damaged, use for compression
     k_min::Vec3
     k_max::Vec3
     f_min::Vec3
@@ -207,7 +206,7 @@ mutable struct BondConstraint# <: AbstractConstraint
         kmax = @SVector fill(1e12, 3)
 
         new(bA, bB, pA, pB, n_loc, t1_loc, t2_loc, zeros_Vec3, zeros_J, zeros_J,
-            zeros_Vec3, false, false, false, 0.0, 0.0, 0.0, 0.0, zeros_Vec3, stiff,
+            zeros_Vec3, false, false, false, 0.0, 0.0, 0.0, 0.0, stiff, stiff,
             stiff, kmin, kmax, fmin, fmax, limits)
 
     end
@@ -217,7 +216,7 @@ end
 
 function initialize!(con::BondConstraint) #TODO do I put in the body list here? bonds do not have bodies?
     if con.is_broken
-        con.penalty_k = @SVector zeros(3)
+        con.k_tension = @SVector zeros(3)
         return
     end
 
@@ -240,6 +239,8 @@ function initialize!(con::BondConstraint) #TODO do I put in the body list here? 
     if !con.rest_initialized
         con.rest = @SVector [dot(n_curr, dp), dot(t1_curr, dp), dot(t2_curr, dp)]
         con.rest_initialized = true
+        con.k_tension = con.stiffness * (1.0 - con.damage)
+        con.k_compression = con.stiffness
     end
 
     # Build jacobians
@@ -253,18 +254,20 @@ function initialize!(con::BondConstraint) #TODO do I put in the body list here? 
     JB_row3 = vcat(-dirs[3], -cross(rB, dirs[3]))'
     con.JB = vcat(JB_row1, JB_row2, JB_row3)
 
-    con.penalty_k = con.stiffness * (1.0 - con.damage)
-
 end
 
-function compute_constraint!(con::BondConstraint, alpha::Float64)
+
+function eval_bond(con::BondConstraint)
+    # This function purely evaluates C, JA, JB, and K_eff
+    # Does NOT modify any values
 
     if con.is_broken
-        con.C = @SVector zeros(3)
-        con.penalty_k = @SVector zeros(3)
-        return
-    end # TODO should I just replace with con.is_broken && return 
+        z3 = @SVector zeros(3)
+        zJ = @SMatrix zeros(3, 6)
+        return z3, zJ, zJ, z3
+    end
 
+    # Read-Only kinematic values
     rA = rotate_vec(con.pA_local, con.bodyA.quat)
     rB = rotate_vec(con.pB_local, con.bodyB.quat)
     pA = con.bodyA.pos + rA
@@ -278,31 +281,67 @@ function compute_constraint!(con::BondConstraint, alpha::Float64)
 
     dirs = @SVector [n_curr, t1_curr, t2_curr]
 
-    JA_row1 = vcat(dirs[1], cross(rA, dirs[1]))'
-    JA_row2 = vcat(dirs[2], cross(rA, dirs[2]))'
-    JA_row3 = vcat(dirs[3], cross(rA, dirs[3]))'
-    con.JA = vcat(JA_row1, JA_row2, JA_row3)
+    # Helper to build 3x6 J for a body
+    function make_J(r_vec, sign)
+        rows = MMatrix{3,6,Float64}(undef)
+        for i in 1:3
+            rows[i, 1:3] = dirs[i] * sign
+            rows[i, 4:6] = cross(r_vec, dirs[i]) * sign
+        end
+        return SMatrix(rows)
+    end
 
-    JB_row1 = vcat(-dirs[1], -cross(rB, dirs[1]))'
-    JB_row2 = vcat(-dirs[2], -cross(rB, dirs[2]))'
-    JB_row3 = vcat(-dirs[3], -cross(rB, dirs[3]))'
-    con.JB = vcat(JB_row1, JB_row2, JB_row3)
+    JA = make_J(rA, 1.0)
+    JB = make_J(rB, -1.0)
 
     c1 = dot(n_curr, dp) - con.rest[1]
     c2 = dot(t1_curr, dp) - con.rest[2]
     c3 = dot(t2_curr, dp) - con.rest[3]
 
-    con.C = @SVector [c1, c2, c3]
+    C = @SVector [c1, c2, c3]
 
-    d_n = max(con.C[1], 0.0) # tension 
-    d_s = sqrt(con.C[2]^2 + con.C[3]^2) # shear
+    # Check for tension or compression, return associated stiffness
+    if c1 > 0
+        k_limit = con.stiffness * (1.0 - con.damage)
+        return C, JA, JB, k_limit
+        #k_eff = con.stiffness * (1.0 - con.damage) # TODO should I just say con.penalty_k??
+    else
+        return C, JA, JB, con.stiffness
+    end
+
+end
+
+# Update bond state - only once at the end of step_simulation
+function update_bond_state!(con::BondConstraint)
+
+    if con.is_broken
+        return
+    end
+
+    rA = rotate_vec(con.pA_local, con.bodyA.quat)
+    rB = rotate_vec(con.pB_local, con.bodyB.quat)
+    pA = con.bodyA.pos + rA
+    pB = con.bodyB.pos + rB
+    dp = pA - pB
+
+    rotA = quat_to_rotmat(con.bodyA.quat)
+    c_n = dot(rotA * con.n_local, dp) - con.rest[1]
+    c_t1 = dot(rotA * con.t1_local, dp) - con.rest[2]
+    c_t2 = dot(rotA * con.t2_local, dp) - con.rest[3]
+    con.C = @SVector [c_n, c_t1, c_t2]
+
+    d_n = max(c_n, 0.0)
+    d_s = sqrt(c_t1^2 + c_t2^2)
 
     dn0, ds0, dnc, dsc = con.limits
     strain = sqrt((d_n / dnc)^2 + (d_s / dsc)^2)
+
+    # 2. Update History
     con.current_eff_strain = strain
     con.max_eff_strain = max(con.max_eff_strain, strain)
 
-    if !con.is_cohesive && !con.is_broken
+    # 3. Cohesion & Damage Evolution
+    if !con.is_cohesive
         Psi = (d_n / dn0)^2 + (d_s / ds0)^2
         if Psi >= 1.0
             con.is_cohesive = true
@@ -311,46 +350,22 @@ function compute_constraint!(con::BondConstraint, alpha::Float64)
     end
 
     if con.is_cohesive
-        strain_curr = max(con.max_committed_strain, strain) # irreversible damage
-        con.current_eff_strain = strain_curr
-        con.max_eff_strain = max(con.max_eff_strain, strain_curr)
+        con.max_committed_strain = max(con.max_committed_strain, strain)
 
-        if strain_curr >= 1.0
+        if con.max_committed_strain >= 1.0
+            con.is_broken = true
             con.damage = 1.0
-            con.penalty_k = @SVector zeros(3)
+            con.k_tension = @SVector zeros(3)
         else
+            # Linear softening (or replace with your specific curve)
             numer = (d_n / dnc)^2 + (d_s / dsc)^2
             denom = (d_n / dn0)^2 + (d_s / ds0)^2
-
-            curr_lam_cr = (denom > 1e-12) ? sqrt(numer / denom) : (dn0 / dnc) # inline zero check
+            curr_lam_cr = (denom > 1e-12) ? sqrt(numer / denom) : (dn0 / dnc)
 
             if con.max_committed_strain > curr_lam_cr
                 d = (con.max_committed_strain - curr_lam_cr) / (1.0 - curr_lam_cr)
                 con.damage = clamp(d, 0.0, 1.0)
-            else
-                con.damage = 0.0
             end
-
-            con.penalty_k = con.stiffness * (1.0 - con.damage)
-        end
-    end
-end
-
-function compute_JA!(con::BondConstraint)
-end
-
-function compute_JB!(con::BondConstraint)
-end
-
-function commit_bond_damage!(con::BondConstraint)
-    # TODO do I run compute_constraint here first? -> Yes?
-    if con.is_cohesive
-        # Update max strain at end of time step once settled (energy minimized)
-        con.max_committed_strain = max(con.max_committed_strain, con.current_eff_strain)
-
-        if con.max_committed_strain >= 1.0
-            con.is_broken = true
-            con.penalty_k = @SVector zeros(3)
         end
     end
 

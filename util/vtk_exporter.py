@@ -15,7 +15,7 @@ class VTKExporter:
         Args:
             bodies: List of python Body objects (must be synced with current positions)
             stress_tensor: (N, 6) [XX, YY, ZZ, XY, YZ, ZX] from solver
-            bond_data: (M, 4) [IdxA, IdxB, Strain, MaxStrain] from solver
+            bond_data: (M, 6) [IdxA, IdxB, Strain, MaxStrain, Tensile, Compression] from solver
         """
         
         # --- 1. Export Voxels (Unstructured Grid) ---
@@ -69,6 +69,8 @@ class VTKExporter:
             lines = []
             strains = []
             max_strains = []
+            tensile_strains = []
+            compressive_strains = []
             
             # Pre-calculate centers for speed
             centers = np.array([b.position[:3] for b in bodies])
@@ -76,7 +78,10 @@ class VTKExporter:
             pt_off = 0
             for row in bond_data:
                 idxA, idxB = int(row[0]), int(row[1])
-                curr, max_s = row[2], row[3]
+                curr = row[2] if len(row) > 2 else 0.0
+                max_s = row[3] if len(row) > 3 else 0.0
+                tensile = row[4] if len(row) > 4 else 0.0
+                compressive = row[5] if len(row) > 5 else 0.0
                 
                 # Safety check
                 if idxA < len(centers) and idxB < len(centers):
@@ -88,6 +93,8 @@ class VTKExporter:
                     
                     strains.append(curr)
                     max_strains.append(max_s)
+                    tensile_strains.append(tensile)
+                    compressive_strains.append(compressive)
             
             if line_pts:
                 # Build a PolyData without the default per-point vertices so cell
@@ -97,6 +104,8 @@ class VTKExporter:
                 poly.lines = np.hstack(lines)
                 poly.cell_data["Strain"] = np.array(strains)
                 poly.cell_data["Max_Strain"] = np.array(max_strains)
+                poly.cell_data["Tensile_Strain"] = np.array(tensile_strains)
+                poly.cell_data["Compression_Strain"] = np.array(compressive_strains)
                 
                 filename = self.save_dir / f"bonds_{self.frame_count:04d}.vtp"
                 poly.save(filename)

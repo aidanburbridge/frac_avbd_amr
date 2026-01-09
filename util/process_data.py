@@ -74,21 +74,30 @@ def process_frame(file_path, exporter):
             ids.append(b['id'])
             stress_tensor[idx] = b['stress']
         # --- BONDS ---
-        # Layout: IdxA(1i), IdxB(1i), MaxStrain(1f), CurrStrain(1f) = 16 bytes
-        bond_bytes = f.read(n_bonds * 16)
+        # Layout: IdxA(1i), IdxB(1i), MaxStrain(1f), CurrStrain(1f), Tensile(1f), Compression(1f) = 24 bytes
+        bond_bytes = f.read(n_bonds * 24)
         
 
         bond_export = []
         if n_bonds > 0:
-            dt_bond = np.dtype([('idxA', 'i4'), ('idxB', 'i4'), ('max_strain', 'f4'), ('curr_strain', 'f4')])
+            dt_bond = np.dtype([
+                ('idxA', 'i4'),
+                ('idxB', 'i4'),
+                ('max_strain', 'f4'),
+                ('curr_strain', 'f4'),
+                ('tensile', 'f4'),
+                ('compression', 'f4'),
+            ])
             raw_bonds = np.frombuffer(bond_bytes, dtype=dt_bond)
 
-            # Exporter expects: [idxA, idxB, current_strain, max_strain]
+            # Exporter expects: [idxA, idxB, current_strain, max_strain, tensile, compression]
             bond_export = np.column_stack((
                 raw_bonds['idxA'],
                 raw_bonds['idxB'],
                 raw_bonds['curr_strain'],
-                raw_bonds['max_strain']
+                raw_bonds['max_strain'],
+                raw_bonds['tensile'],
+                raw_bonds['compression'],
             ))
 
         # Export
