@@ -18,6 +18,8 @@ export SimulationState, init_simulation, step_simulation!
 # - need to somehow stabilize the fracture through 
 # - early out for fast convergences
 
+EARLY_OUT_TOL = 1e-5 # TODO have this as a parameter as a fraction of h (voxel size) ~0.1% 
+
 mutable struct SimulationState
     bodies::Vector{Body}
     manifolds::Dict{Tuple{Int,Int},Manifold}
@@ -293,6 +295,8 @@ function primal_solve!(b::Body, bonds::Vector{BondConstraint}, contacts::Vector{
 end
 
 function dual_update!(sim::SimulationState, alpha::Float64)
+    # Dual update will now return a max constraint violation 
+    max_violation = 0.0
 
     for con in sim.bond_constraints
 
@@ -301,6 +305,9 @@ function dual_update!(sim::SimulationState, alpha::Float64)
         end
 
         C_loc, _, _, k_limit = eval_bond(con) # get effective stiffness from evaluating the damaged bond
+
+        # Check maximum violation of bonds
+        max_violation = max(max_violation, maximum(abs.(C_loc)))
 
         # Check load type
         in_tension = C_loc[1] > 0
@@ -329,6 +336,9 @@ function dual_update!(sim::SimulationState, alpha::Float64)
 
         compute_constraint!(con, alpha)
 
+        # Check max violation contacts
+        max_violation = max(max_violation, maximum(abs.(con.C)))
+
         pk = con.penalty_k
         lam = con.lambda
 
@@ -353,6 +363,8 @@ function dual_update!(sim::SimulationState, alpha::Float64)
 
         AVBDConstraints.update_bounds!(con)
     end
+
+    return max_violation
 end
 
 function update_vel!(sim::SimulationState, invdt::Float64)
@@ -471,6 +483,8 @@ function step_simulation!(sim::SimulationState)
 
     total_iters = sim.iterations + (sim.stabilize ? 1 : 0)
 
+    curr_max_violation = Inf
+
     for it = 1:total_iters
         alpha_eff = sim.stabilize ? (it <= sim.iterations ? 1.0 : 0.0) : sim.alpha
         # Loop over bodies aka primal loop
@@ -489,12 +503,19 @@ function step_simulation!(sim::SimulationState)
         end
 
         # dual update
-        if it <= sim.iterations
-            dual_update!(sim, alpha_eff)
+        if it <= sim.iterations # Why less than or equal to?
+            curr_max_violation = dual_update!(sim, alpha_eff)
+
+            # Early out - skip prescribed num of iterations if below tolerance
+            if curr_max_violation < EARLY_OUT_TOL
+                break
+            end
             for b in sim.bodies
                 assert_finite_body!(b, "after dual_update it=$it")
             end
         end
+
+
     end
 
     # Update & break some bonds
@@ -505,6 +526,5 @@ function step_simulation!(sim::SimulationState)
     # TODO insert more iterations after committing bond damage to smooth damage - staggered approach
 
 end
-
 
 end # module end

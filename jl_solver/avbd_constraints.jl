@@ -256,7 +256,6 @@ function initialize!(con::BondConstraint) #TODO do I put in the body list here? 
 
 end
 
-
 function eval_bond(con::BondConstraint)
     # This function purely evaluates C, JA, JB, and K_eff
     # Does NOT modify any values
