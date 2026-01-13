@@ -215,10 +215,11 @@ end
 # ---------- Bond Constraint Functions ---------- #
 
 function initialize!(con::BondConstraint) #TODO do I put in the body list here? bonds do not have bodies?
-    if con.is_broken
-        con.k_tension = @SVector zeros(3)
-        return
-    end
+    # if con.is_broken
+    #     con.k_tension = @SVector zeros(3)
+
+    #     return
+    # end
 
     R_A = quat_to_rotmat(con.bodyA.quat) #Unless body has update rotmat in struct
     n_curr = R_A * con.n_local
@@ -243,6 +244,14 @@ function initialize!(con::BondConstraint) #TODO do I put in the body list here? 
         con.k_compression = con.stiffness
     end
 
+    if con.is_broken
+        con.k_tension = @SVector zeros(3)
+        con.k_compression = con.stiffness # Ensure compression is ready
+    else
+        con.k_tension = con.stiffness * (1.0 - con.damage)
+        con.k_compression = con.stiffness
+    end
+
     # Build jacobians
     JA_row1 = vcat(dirs[1], cross(rA, dirs[1]))'
     JA_row2 = vcat(dirs[2], cross(rA, dirs[2]))'
@@ -260,11 +269,11 @@ function eval_bond(con::BondConstraint)
     # This function purely evaluates C, JA, JB, and K_eff
     # Does NOT modify any values
 
-    if con.is_broken
-        z3 = @SVector zeros(3)
-        zJ = @SMatrix zeros(3, 6)
-        return z3, zJ, zJ, z3
-    end
+    # if con.is_broken
+    #     z3 = @SVector zeros(3)
+    #     zJ = @SMatrix zeros(3, 6)
+    #     return z3, zJ, zJ, z3
+    # end
 
     # Read-Only kinematic values
     rA = rotate_vec(con.pA_local, con.bodyA.quat)
@@ -301,8 +310,12 @@ function eval_bond(con::BondConstraint)
 
     # Check for tension or compression, return associated stiffness
     if c1 > 0
-        k_limit = con.stiffness * (1.0 - con.damage)
-        return C, JA, JB, k_limit
+        if con.is_broken
+            return C, JA, JB, (@SVector zeros(3))
+        else
+            k_limit = con.stiffness * (1.0 - con.damage)
+            return C, JA, JB, k_limit
+        end
         #k_eff = con.stiffness * (1.0 - con.damage) # TODO should I just say con.penalty_k??
     else
         return C, JA, JB, con.stiffness

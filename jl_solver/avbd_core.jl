@@ -18,7 +18,10 @@ export SimulationState, init_simulation, step_simulation!
 # - need to somehow stabilize the fracture through 
 # - early out for fast convergences
 
-EARLY_OUT_TOL = 1e-5 # TODO have this as a parameter as a fraction of h (voxel size) ~0.1% 
+const EARLY_OUT_TOL = 1e-5 # TODO have this as a parameter as a fraction of h (voxel size) ~0.1% 
+# Change iters to these values - lock them in as same 
+# const INNER_ITERS = 5
+# const MAX_DAMAGE_PASSES = 5
 
 mutable struct SimulationState
     bodies::Vector{Body}
@@ -445,12 +448,20 @@ function init_simulation(
 end
 
 function damage_bonds!(sim::SimulationState)
-
+    changed = false
     for bond in sim.bond_constraints
         if !bond.is_broken
+            was_broken = bond.is_broken
+            old_damage = bond.damage
+
             update_bond_state!(bond)
+
+            if bond.is_broken != was_broken || abs(bond.damage - old_damage) > 1e-4
+                changed = true
+            end
         end
     end
+    return changed
 end
 
 @inline function assert_finite_body!(b, tag)
@@ -481,49 +492,57 @@ function step_simulation!(sim::SimulationState)
         assert_finite_body!(b, "after warm_start")
     end
 
-    total_iters = sim.iterations + (sim.stabilize ? 1 : 0)
+    #total_iters = sim.iterations + (sim.stabilize ? 1 : 0)
+    inner_passes = sim.iterations * 3
+    damage_passes = sim.iterations
 
     curr_max_violation = Inf
 
-    for it = 1:total_iters
-        alpha_eff = sim.stabilize ? (it <= sim.iterations ? 1.0 : 0.0) : sim.alpha
-        # Loop over bodies aka primal loop
-        #Threads.@threads 
-        for body in sim.bodies
-            # solve constriants not in loop but via linear algebra
-            body.is_static && continue
+    for out_it in 1:damage_passes
 
-            # TODO include a L-scheme term here that adds numerical inertia
-            primal_solve!(body,
-                sim.bond_incidence[body.id+1],
-                sim.contact_incidence[body.id+1],
-                inv_dt2, alpha_eff)  # Uses eval_bond
+        for in_it in 1:inner_passes
 
-            assert_finite_body!(body, "after primal_solve it=$it")
-        end
+            alpha_eff = sim.stabilize ? 1.0 : sim.alpha
 
-        # dual update
-        if it <= sim.iterations # Why less than or equal to?
+            # Loop over bodies aka primal loop
+            #Threads.@threads 
+            for body in sim.bodies
+                # solve constriants not in loop but via linear algebra
+                body.is_static && continue
+
+                # TODO include a L-scheme term here that adds numerical inertia
+                primal_solve!(body,
+                    sim.bond_incidence[body.id+1],
+                    sim.contact_incidence[body.id+1],
+                    inv_dt2, alpha_eff)  # Uses eval_bond
+
+                assert_finite_body!(body, "after primal_solve out_it=$out_it in_it=$in_it")
+            end
             curr_max_violation = dual_update!(sim, alpha_eff)
-
-            # Early out - skip prescribed num of iterations if below tolerance
-            if curr_max_violation < EARLY_OUT_TOL
-                break
-            end
-            for b in sim.bodies
-                assert_finite_body!(b, "after dual_update it=$it")
-            end
         end
 
+        topo_changed = damage_bonds!(sim)
+
+        # Early out - skip prescribed num of iterations if below tolerance
+        if !topo_changed && curr_max_violation < EARLY_OUT_TOL
+            break
+        end
 
     end
 
-    # Update & break some bonds
     # Velocity derivation from new positions
-    damage_bonds!(sim) # commits bond damage
     update_vel!(sim, inv_dt)
 
-    # TODO insert more iterations after committing bond damage to smooth damage - staggered approach
+    # Stabilization pass
+    if sim.stabilize
+        alpha_stabil = 0.05
+        for body in sim.bodies
+            body.is_static && continue
+            primal_solve!(body, sim.bond_incidence[body.id+1], sim.contact_incidence[body.id+1], inv_dt2, alpha_stabil)
+        end
+        dual_update!(sim, alpha_stabil)
+    end
+
 
 end
 
