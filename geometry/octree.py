@@ -278,7 +278,9 @@ def build_constraints_from_tree(
         E: float,
         nu: float,
         tensile_strength: float,
-        fracture_toughness: float) -> list[BondData]:
+        fracture_toughness: float,
+        damping_val: float = 0.0,
+        damping: float | None = None) -> list[BondData]:
     """
     Creates a list of bonds between adjacent octree voxels using D3Q26 connectivity.
     Axial neighbors get 4 Gauss-point bonds; edge/corner neighbors get single
@@ -286,6 +288,8 @@ def build_constraints_from_tree(
     """
 
     # TODO mix quadrature face points and the edges and corners
+    if damping is not None:
+        damping_val = damping
     
     # Surface check directions (Face neighbors only)
     axial_dirs = [(1,0,0),(0,1,0),(0,0,1),(-1,0,0),(0,-1,0),(0,0,-1)]
@@ -401,6 +405,7 @@ def build_constraints_from_tree(
                                 area=face_area,
                                 tensile_strength=tensile_strength,
                                 fracture_energy=fracture_energy,
+                                damp_val=damping_val,
                             )
                         )
                     else:
@@ -433,6 +438,7 @@ def build_constraints_from_tree(
                                 area=area,
                                 tensile_strength=tensile,
                                 fracture_energy=fracture_energy,
+                                damp_val=damping_val,
                             )
                         )
                     dsu.union(a_idx, b_idx)

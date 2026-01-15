@@ -32,14 +32,27 @@ FRACTURE_TOUGHNESS = 5e4
 DENSITY = 1150.0
 PENALTY_GAIN = 1e6
 STEPS = 2000
+
+ZETA_DAMP = 0.1
+
 PYTHON_SOLVER_PARAMS = {
     "mu": 0.3,
-    "post_stabilize": True,
+    "post_stabilize": False,
     "beta": 10,
     "alpha": 0.95,
     "gamma": 0.99,
     "debug_contacts": False,
 }
+
+def calc_cfl(density, young_mod, poisson, vox_size):
+    shear_mod = young_mod / (2* ( 1+poisson))
+    wave_speed = np.sqrt(shear_mod/density)
+    dt_cfl = vox_size / wave_speed
+    return dt_cfl
+
+def calc_damping(density, h, stiffness, zeta):
+    mass = h*h*density
+    return 2 * zeta * np.sqrt(mass*stiffness)
 
 def build_setup()-> SimulationSetup:
 
@@ -74,6 +87,9 @@ def build_setup()-> SimulationSetup:
 
     print(f"DEBUG: Instantiated {len(boxes)} bodies")
 
+    visco_val = calc_damping(DENSITY, h_base, E_MODULUS, ZETA_DAMP)
+    cfl = calc_cfl(DENSITY, E_MODULUS, NU, h_base) #2.9330379512351167e-06
+
     beam_bonds = oct.build_constraints_from_tree(
         leaves,
         boxes,
@@ -83,8 +99,11 @@ def build_setup()-> SimulationSetup:
         nu=NU,
         tensile_strength=TENSILE_STRENGTH,
         fracture_toughness=FRACTURE_TOUGHNESS,
+        damping_val=visco_val,
     )
     print(f"Number of beam bonds: {len(beam_bonds)}")
+    print(f"The damping value used for this sim: {visco_val}")
+    print(f"The cfl value used for this sim: {cfl}")
 
     dog_bone = VoxelAssembly(boxes, beam_bonds)
 
@@ -121,6 +140,7 @@ def build_setup()-> SimulationSetup:
             "fracture_toughness": FRACTURE_TOUGHNESS,
             "density": DENSITY,
             "penalty_gain": PENALTY_GAIN,
+            "zeta_damp": ZETA_DAMP,
             "h_base": h_base,
         },
         headless_steps=STEPS,

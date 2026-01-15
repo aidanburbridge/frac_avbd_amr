@@ -23,6 +23,10 @@ const EARLY_OUT_TOL = 1e-5 # TODO have this as a parameter as a fraction of h (v
 # const INNER_ITERS = 5
 # const MAX_DAMAGE_PASSES = 5
 
+# TODO add damping value calculation - or have NN do this??
+# damp_val = 2 * [0.05 - 0.3] * sqrt(k*mass)
+
+
 mutable struct SimulationState
     bodies::Vector{Body}
     manifolds::Dict{Tuple{Int,Int},Manifold}
@@ -213,8 +217,7 @@ function warm_start!(sim::SimulationState)
     end
 end
 
-function primal_solve!(b::Body, bonds::Vector{BondConstraint}, contacts::Vector{ContactConstraint}, invdt2::Float64, alpha::Float64)
-
+function primal_solve!(b::Body, bonds::Vector{BondConstraint}, contacts::Vector{ContactConstraint}, dt::Float64, invdt2::Float64, alpha::Float64)
     if b.inv_mass == 0.0
         return
     end
@@ -238,7 +241,8 @@ function primal_solve!(b::Body, bonds::Vector{BondConstraint}, contacts::Vector{
 
     for con in bonds
 
-        C_loc, JA, JB, k_limit = eval_bond(con)
+        C_loc, JA, JB, k_limit = eval_bond(con, dt)
+        # TODO Do I want damping only in tension or also in compression???
 
         isA = (con.bodyA.id == b.id)
         J_block = isA ? JA : JB
@@ -307,7 +311,7 @@ function dual_update!(sim::SimulationState, alpha::Float64)
             continue
         end
 
-        C_loc, _, _, k_limit = eval_bond(con) # get effective stiffness from evaluating the damaged bond
+        C_loc, _, _, k_limit = eval_bond(con, sim.dt) # get effective stiffness from evaluating the damaged bond
 
         # Check maximum violation of bonds
         max_violation = max(max_violation, maximum(abs.(C_loc)))
@@ -422,6 +426,9 @@ function init_simulation(
 
     sim = SimulationState(bodies, dt; grav=gravity, iters=iterations, mu=friction)
 
+    #HACK adding weibull randomization to the material properties
+    weibull_shape = 5.0
+
     n_bonds = size(bond_data, 1)
     if n_bonds > 0
         sizehint!(sim.bond_constraints, n_bonds)
@@ -435,11 +442,30 @@ function init_simulation(
             kn = row[12]
             kt = row[13]
             area = row[14]
-            tensile = row[15]
-            Gc = row[16]
+
+            U = rand() # Uniform [0,1]
+            random_factor = (-log(U))^(1.0 / weibull_shape)
+
+            tensile = row[15] * random_factor
+            Gc = row[16] * random_factor
+            damp_val = size(bond_data, 2) >= 17 ? row[17] : 0.0
             bA = bodies[idxA+1]
             bB = bodies[idxB+1]
-            bond = BondConstraint(bA, bB, pA, pB, n_w, kn, kt, area, tensile, Gc)
+
+
+            # set bond break steps & avoid infinite mass issues 
+            mass_bond = (bA.mass + bB.mass) / 2
+            if !isfinite(mass_bond) || !isfinite(kt) || kt <= 0
+                bond_break_steps = 10
+            else
+                t_wave = sqrt(mass_bond / kt)
+                calc_steps = ceil(Int, (t_wave / dt) * 1.5)
+                bond_break_steps = clamp(calc_steps, 3, 50)
+            end
+
+
+            bond = BondConstraint(bA, bB, pA, pB, n_w, kn, kt, area, tensile, Gc, damp_val)
+            bond.max_break_steps = bond_break_steps
             push!(sim.bond_constraints, bond)
         end
     end
@@ -447,14 +473,14 @@ function init_simulation(
     return sim
 end
 
-function damage_bonds!(sim::SimulationState)
+function damage_bonds!(sim::SimulationState, dt::Float64)
     changed = false
     for bond in sim.bond_constraints
         if !bond.is_broken
             was_broken = bond.is_broken
             old_damage = bond.damage
 
-            update_bond_state!(bond)
+            update_bond_state!(bond, dt)
 
             if bond.is_broken != was_broken || abs(bond.damage - old_damage) > 1e-4
                 changed = true
@@ -493,10 +519,12 @@ function step_simulation!(sim::SimulationState)
     end
 
     #total_iters = sim.iterations + (sim.stabilize ? 1 : 0)
-    inner_passes = sim.iterations * 3
-    damage_passes = sim.iterations
+    inner_passes = 15# sim.iterations * 5
+    damage_passes = 2 #sim.iterations
 
     curr_max_violation = Inf
+
+    applied_damage = false
 
     for out_it in 1:damage_passes
 
@@ -514,14 +542,17 @@ function step_simulation!(sim::SimulationState)
                 primal_solve!(body,
                     sim.bond_incidence[body.id+1],
                     sim.contact_incidence[body.id+1],
-                    inv_dt2, alpha_eff)  # Uses eval_bond
+                    dt, inv_dt2, alpha_eff)  # Uses eval_bond
 
                 assert_finite_body!(body, "after primal_solve out_it=$out_it in_it=$in_it")
             end
             curr_max_violation = dual_update!(sim, alpha_eff)
         end
-
-        topo_changed = damage_bonds!(sim)
+        topo_changed = false
+        if !applied_damage
+            topo_changed = damage_bonds!(sim, dt)
+            applied_damage = true
+        end
 
         # Early out - skip prescribed num of iterations if below tolerance
         if !topo_changed && curr_max_violation < EARLY_OUT_TOL
@@ -538,7 +569,7 @@ function step_simulation!(sim::SimulationState)
         alpha_stabil = 0.05
         for body in sim.bodies
             body.is_static && continue
-            primal_solve!(body, sim.bond_incidence[body.id+1], sim.contact_incidence[body.id+1], inv_dt2, alpha_stabil)
+            primal_solve!(body, sim.bond_incidence[body.id+1], sim.contact_incidence[body.id+1], dt, inv_dt2, alpha_stabil)
         end
         dual_update!(sim, alpha_stabil)
     end

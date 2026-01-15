@@ -19,7 +19,7 @@ function init_system(
     pos::Matrix{FLOAT},   # (N, 7)
     vel::Matrix{FLOAT},   # (N, 6)
     masses::Vector{FLOAT}, # (N,)
-    bond_data::Matrix{FLOAT}, # (M, 16)
+    bond_data::Matrix{FLOAT}, # (M, 17)
     dt::FLOAT,
     gravity::FLOAT,
     iters::Int;

@@ -27,10 +27,11 @@ class BondData:
     area: float
     tensile_strength: float
     fracture_energy: float
+    damp_val: float = 0.0
 
     def as_row(self) -> np.ndarray:
-        """Flatten into the 16-value row expected by the hybrid/Julia bridge."""
-        row = np.zeros(16, dtype=float)
+        """Flatten into the 17-value row expected by the hybrid/Julia bridge."""
+        row = np.zeros(17, dtype=float)
         row[0] = self.idxA
         row[1] = self.idxB
         row[2:5] = np.asarray(self.pA_local, dtype=float).reshape(3)
@@ -41,6 +42,7 @@ class BondData:
         row[13] = float(self.area)
         row[14] = float(self.tensile_strength)
         row[15] = float(self.fracture_energy)
+        row[16] = float(self.damp_val)
         return row
 
 
@@ -48,7 +50,7 @@ def rows_from_bonds(bonds: Iterable[BondData]) -> np.ndarray:
     """Stack a sequence of BondData into the hybrid solver's row matrix."""
     rows = [b.as_row() for b in bonds]
     if not rows:
-        return np.zeros((0, 16), dtype=float)
+        return np.zeros((0, 17), dtype=float)
     return np.vstack(rows)
 
 
@@ -76,6 +78,7 @@ def bond_from_facebondpoint(con, idxA: int, idxB: int) -> BondData:
         area=float(getattr(con, "area", 1.0)),
         tensile_strength=float(getattr(con, "tensile_strength", con.stiffness[0])),
         fracture_energy=float(getattr(con, "fracture_energy", 0.0)),
+        damp_val=float(getattr(con, "damp_val", 0.0)),
     )
 
 
@@ -87,7 +90,7 @@ def facebondpoint_from_bonddata(bond: BondData, bodies: Sequence[object]):
 
     bodyA = bodies[bond.idxA]
     bodyB = bodies[bond.idxB]
-    return FaceBondPoint(
+    bond_con = FaceBondPoint(
         bodyA,
         bodyB,
         bond.pA_local,
@@ -99,6 +102,8 @@ def facebondpoint_from_bonddata(bond: BondData, bodies: Sequence[object]):
         tensile_strength=bond.tensile_strength,
         fracture_energy=bond.fracture_energy,
     )
+    bond_con.damp_val = float(getattr(bond, "damp_val", 0.0))
+    return bond_con
 
 
 def bonds_from_facebondpoints(constrs: Iterable[object], idx_map: dict[int, int]) -> list[BondData]:

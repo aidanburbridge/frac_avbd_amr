@@ -5,7 +5,7 @@ using StaticArrays
 import ..Maths: Vec3, Quat, transform_point, quat_mul, integrate_quat, orthonormal_basis, rotate_vec, quat_to_rotmat, quat_inv, quat_to_rotvec, delta_twist_from
 import ..Collisions: Body
 
-export ContactConstraint, BondConstraint, initialize!, compute_constraint!, update_bounds!, commit_bond_damage!, eval_bond, update_bond_state!, bond_k_eff #AbstractConstraint, 
+export ContactConstraint, BondConstraint, initialize!, compute_constraint!, update_bounds!, eval_bond, update_bond_state!, bond_k_eff #AbstractConstraint, 
 
 ##### ---------- Contact Constraint ---------- #####
 
@@ -137,6 +137,15 @@ end
 
 ##### ---------- Bond Constraint ---------- #####
 
+#DEBUGGING CONSTANTS
+const DT_PHYSICAL_CFL = 2.9330379512351167e-06  # Your calculated value
+const SIM_DT_ESTIMATE = 1.0 / 4000.0            # Your physics timestep (0.00025)
+
+const SPEED_RATIO = SIM_DT_ESTIMATE / DT_PHYSICAL_CFL
+const TARGET_DAMAGE_PER_FRAME = 0.05
+
+const MAX_DAMAGE_RATE = TARGET_DAMAGE_PER_FRAME / SIM_DT_ESTIMATE
+
 mutable struct BondConstraint
     bodyA::Body
     bodyB::Body
@@ -168,6 +177,7 @@ mutable struct BondConstraint
     # Solver values
     k_tension::Vec3
     k_compression::Vec3
+    damp_val::Float64
 
     # Material config/values
     stiffness::Vec3 # base material stiffness (E) will NOT be damaged, use for compression
@@ -179,7 +189,12 @@ mutable struct BondConstraint
     # CCM fracture limits derived from material params
     limits::SVector{4,Float64} # [delta_n0, delta_s0, delta_nc, delta_sc]
 
-    function BondConstraint(bA::Body, bB::Body, pA::Vec3, pB::Vec3, n_world::Vec3, kn::Float64, kt::Float64, area::Float64, tensile::Float64, Gc::Float64)
+    # Stabilization parameters
+    break_counter::Int # based this on wave speed - CZM? - process zone ahead of crack tip
+    max_break_steps::Int # TODO this must be calculated based on speed of sound 
+    viscosity::Float64
+
+    function BondConstraint(bA::Body, bB::Body, pA::Vec3, pB::Vec3, n_world::Vec3, kn::Float64, kt::Float64, area::Float64, tensile::Float64, Gc::Float64, damp_val::Float64=0.0)
 
         d_n0 = (tensile * area) / kn
         d_s0 = (tensile * area) / kt
@@ -205,10 +220,15 @@ mutable struct BondConstraint
         kmin = @SVector fill(0.0, 3)
         kmax = @SVector fill(1e12, 3)
 
+        # Stabilization terms - TUNE these TODO
+        break_counter = 0
+        max_break_steps = 10
+        viscosity = 1.0
+
         new(bA, bB, pA, pB, n_loc, t1_loc, t2_loc, zeros_Vec3, zeros_J, zeros_J,
             zeros_Vec3, false, false, false, 0.0, 0.0, 0.0, 0.0, stiff, stiff,
-            stiff, kmin, kmax, fmin, fmax, limits)
-
+            damp_val, stiff, kmin, kmax, fmin, fmax, limits,
+            break_counter, max_break_steps, viscosity)
     end
 end
 
@@ -265,15 +285,9 @@ function initialize!(con::BondConstraint) #TODO do I put in the body list here? 
 
 end
 
-function eval_bond(con::BondConstraint)
+function eval_bond(con::BondConstraint, dt::Float64)
     # This function purely evaluates C, JA, JB, and K_eff
     # Does NOT modify any values
-
-    # if con.is_broken
-    #     z3 = @SVector zeros(3)
-    #     zJ = @SMatrix zeros(3, 6)
-    #     return z3, zJ, zJ, z3
-    # end
 
     # Read-Only kinematic values
     rA = rotate_vec(con.pA_local, con.bodyA.quat)
@@ -286,6 +300,12 @@ function eval_bond(con::BondConstraint)
     n_curr = rotA * con.n_local
     t1_curr = rotA * con.t1_local
     t2_curr = rotA * con.t2_local
+
+    # # velocities TODO check if these are okay to use, velocities not updated until end of step
+    # vA = con.bodyA.vel + cross(con.bodyA.ang_vel, rA)
+    # vB = con.bodyB.vel + cross(con.bodyB.ang_vel, rB)
+
+    # vrel = vA - vB
 
     dirs = @SVector [n_curr, t1_curr, t2_curr]
 
@@ -302,29 +322,43 @@ function eval_bond(con::BondConstraint)
     JA = make_J(rA, 1.0)
     JB = make_J(rB, -1.0)
 
+    # constraint violation
     c1 = dot(n_curr, dp) - con.rest[1]
     c2 = dot(t1_curr, dp) - con.rest[2]
     c3 = dot(t2_curr, dp) - con.rest[3]
 
+    # constraint violation derivative wrt time
+    # c1_dot = dot(n_curr, vrel)
+    # c2_dot = dot(t1_curr, vrel)
+    # c3_dot = dot(t2_curr, vrel)
+
     C = @SVector [c1, c2, c3]
+    # C_dot = @SVector [c1_dot, c2_dot, c3_dot]
+
+    # viscosity
+    k_visc = con.viscosity / dt
+
+    # if con.is_broken && con.break_counter >= con.ma
 
     # Check for tension or compression, return associated stiffness
-    if c1 > 0
+    if c1 > 0 # Tension
         if con.is_broken
             return C, JA, JB, (@SVector zeros(3))
         else
             k_limit = con.stiffness * (1.0 - con.damage)
-            return C, JA, JB, k_limit
+            k_total = k_limit .+ k_visc
+            return C, JA, JB, k_total
         end
         #k_eff = con.stiffness * (1.0 - con.damage) # TODO should I just say con.penalty_k??
     else
-        return C, JA, JB, con.stiffness
+        k_total = con.stiffness .+ k_visc
+        return C, JA, JB, k_total
     end
 
 end
 
 # Update bond state - only once at the end of step_simulation
-function update_bond_state!(con::BondConstraint)
+function update_bond_state!(con::BondConstraint, dt::Float64)
 
     if con.is_broken
         return
@@ -363,11 +397,12 @@ function update_bond_state!(con::BondConstraint)
 
     if con.is_cohesive
         con.max_committed_strain = max(con.max_committed_strain, strain)
+    end
 
+    target_damage = 0.0
+    if con.is_cohesive
         if con.max_committed_strain >= 1.0
-            con.is_broken = true
-            con.damage = 1.0
-            con.k_tension = @SVector zeros(3)
+            target_damage = 1.0
         else
             # Linear softening (or replace with your specific curve)
             numer = (d_n / dnc)^2 + (d_s / dsc)^2
@@ -376,8 +411,20 @@ function update_bond_state!(con::BondConstraint)
 
             if con.max_committed_strain > curr_lam_cr
                 d = (con.max_committed_strain - curr_lam_cr) / (1.0 - curr_lam_cr)
-                con.damage = clamp(d, 0.0, 1.0)
+                target_damage = clamp(d, 0.0, 1.0)
             end
+        end
+    end
+
+    # CFL governor: rate-limit damage so cracks cannot propagate instantly.
+    if target_damage > con.damage
+        max_allowed_change = MAX_DAMAGE_RATE * dt
+        con.damage += min(target_damage - con.damage, max_allowed_change)
+
+        if con.damage >= 0.99
+            con.damage = 1.0
+            con.is_broken = true
+            con.k_tension = @SVector zeros(3)
         end
     end
 

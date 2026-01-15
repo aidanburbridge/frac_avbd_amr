@@ -75,7 +75,7 @@ class HybridSolver:
         positions: (N, 7) -> xyz + quaternion (wxyz)
         velocities: (N, 6) -> linear xyz, angular xyz
         masses: (N,)
-        bonds: (M, 16) -> optional face bond table
+        bonds: (M, 17) -> optional face bond table
         sizes: (N, 3) -> optional box extents per body
         """
         pos_arr = np.ascontiguousarray(positions, dtype=np.float64)
@@ -83,9 +83,11 @@ class HybridSolver:
         mass_arr = np.ascontiguousarray(masses, dtype=np.float64)
 
         if bonds is None:
-            bond_arr = np.zeros((0, 16), dtype=np.float64)
+            bond_arr = np.zeros((0, 17), dtype=np.float64)
         else:
             bond_arr = np.ascontiguousarray(bonds, dtype=np.float64)
+            if bond_arr.ndim == 2 and bond_arr.shape[1] == 16:
+                bond_arr = np.hstack((bond_arr, np.zeros((bond_arr.shape[0], 1), dtype=bond_arr.dtype)))
 
         kwargs = {}
         if sizes is not None:
@@ -208,7 +210,7 @@ def _bond_rows(constraints: Iterable[object], idx_map: dict[int, int]) -> np.nda
             rows.append(bond_list[0].as_row())
 
     if not rows:
-        return np.zeros((0, 16), dtype=np.float64)
+        return np.zeros((0, 17), dtype=np.float64)
     return np.vstack(rows)
 
 
