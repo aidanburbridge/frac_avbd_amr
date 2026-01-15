@@ -519,12 +519,10 @@ function step_simulation!(sim::SimulationState)
     end
 
     #total_iters = sim.iterations + (sim.stabilize ? 1 : 0)
-    inner_passes = 15# sim.iterations * 5
-    damage_passes = 2 #sim.iterations
+    inner_passes = sim.iterations
+    damage_passes = sim.iterations
 
     curr_max_violation = Inf
-
-    applied_damage = false
 
     for out_it in 1:damage_passes
 
@@ -548,11 +546,8 @@ function step_simulation!(sim::SimulationState)
             end
             curr_max_violation = dual_update!(sim, alpha_eff)
         end
-        topo_changed = false
-        if !applied_damage
-            topo_changed = damage_bonds!(sim, dt)
-            applied_damage = true
-        end
+
+        topo_changed = damage_bonds!(sim, dt)
 
         # Early out - skip prescribed num of iterations if below tolerance
         if !topo_changed && curr_max_violation < EARLY_OUT_TOL
