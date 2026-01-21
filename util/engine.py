@@ -114,6 +114,8 @@ def run_headless(
 
     # Write initial state (Frame 0)
     solver.write_frame(str(export_path / "frame_0000.bin"))
+    if hasattr(solver, "write_energy_csv"):
+        solver.write_energy_csv(str(export_path / "energy_0000.csv"), 0)
 
     # Setup Loop
     progress_bar = tqdm(total=num_steps, desc="Simulating", unit="step") if show_progress else None
@@ -143,6 +145,9 @@ def run_headless(
         frame_idx += 1
         filename = export_path / f"frame_{frame_idx:04d}.bin"
         solver.write_frame(str(filename))
+        if hasattr(solver, "write_energy_csv"):
+            energy_file = export_path / f"energy_{frame_idx:04d}.csv"
+            solver.write_energy_csv(str(energy_file), frame_idx)
         
         if progress_bar:
             progress_bar.update(chunk)

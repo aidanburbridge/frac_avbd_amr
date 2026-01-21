@@ -8,6 +8,7 @@ include("maths.jl")
 include("collisions.jl")
 include("avbd_constraints.jl")
 include("manifold.jl")
+include("energy.jl")
 include("avbd_core.jl")
 
 using .AVBDCore
@@ -118,6 +119,31 @@ function write_frame(sim::AVBDCore.SimulationState, filename::String)
             write(io, Float32(b.max_eff_strain))
             write(io, Float32(b.current_eff_strain))
         end
+    end
+end
+
+function write_energy_csv(sim::AVBDCore.SimulationState, filename::String, frame_idx::Int)
+    log = sim.energy_log
+
+    if frame_idx == 0 && isempty(log.kinetic)
+        for bond in sim.bond_constraints
+            if !bond.rest_initialized
+                AVBDConstraints.initialize!(bond)
+            end
+        end
+        AVBDCore.log_step!(log, sim.bodies, sim.bond_constraints, sim.contact_constraints, sim.alpha)
+    end
+
+    if isempty(log.kinetic)
+        return
+    end
+
+    idx = length(log.kinetic)
+    t = (idx - 1) * sim.dt
+
+    open(filename, "w") do io
+        write(io, "frame,time,kinetic,bond_potential,contact_potential,fracture_work,mech_energy,accounted_energy\n")
+        write(io, string(frame_idx, ",", t, ",", log.kinetic[idx], ",", log.bond_potential[idx], ",", log.contact_potential[idx], ",", log.fracture_work[idx], ",", log.mech_energy[idx], ",", log.accounted_energy[idx], "\n"))
     end
 end
 

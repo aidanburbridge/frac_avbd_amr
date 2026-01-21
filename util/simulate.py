@@ -155,6 +155,11 @@ def convert_results(run_dir: Path):
     print(f"\n[Exporter] Converting {len(files)} frames to VTK...")
     vtk_dir.mkdir(parents=True, exist_ok=True)
     exporter = VTKExporter(str(vtk_dir))
+
+    energy_files = sorted(list(raw_dir.glob("energy_*.csv")))
+    for csv_path in energy_files:
+        shutil.copy2(csv_path, vtk_dir / csv_path.name)
+
     
     # Reuse buffers to reduce allocs
     dt_head = np.dtype('i4,i4,f4') # n_bodies, n_bonds, dt

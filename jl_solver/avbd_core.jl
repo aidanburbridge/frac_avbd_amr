@@ -9,6 +9,7 @@ using ..Maths: Vec3, Quat, integrate_quat, quat_to_rotvec, quat_mul, quat_inv, r
 import ..Collisions: Body, Contact, get_collisions, update_rotation!, update_inv_inertia_world!
 using ..AVBDConstraints
 using ..ManifoldHandling: Manifold, init_manifold, update_manifold_dynamic!
+using ..Energy
 
 export SimulationState, init_simulation, step_simulation!
 
@@ -37,6 +38,8 @@ mutable struct SimulationState
     bond_incidence::Vector{Vector{BondConstraint}}
     contact_incidence::Vector{Vector{ContactConstraint}}
 
+    energy_log::EnergyLog
+
     # Body ID -> list of constraints affecting body
     #incidence_map::Vector{Vector{AbstractConstraint}} # Incident map of constraints on bodies - needed? - better way to do this?
 
@@ -64,7 +67,9 @@ mutable struct SimulationState
 
         manifolds = Dict{Tuple{Int,Int},Manifold}()
 
-        new(bodies, manifolds, bond_cons, contact_cons, bond_map, contact_map,
+        e_log = EnergyLog()
+
+        new(bodies, manifolds, bond_cons, contact_cons, bond_map, contact_map, e_log,
             dt, grav, mu, iters, Float64(b), Float64(g), Float64(al), stabil)
 
     end
@@ -241,7 +246,9 @@ function primal_solve!(b::Body, bonds::Vector{BondConstraint}, contacts::Vector{
 
     for con in bonds
 
-        C_loc, JA, JB, k_limit = eval_bond(con, dt)
+        con.is_broken && continue
+
+        C_loc, JA, JB, k_phys = eval_bond(con, dt)
         # TODO Do I want damping only in tension or also in compression???
 
         isA = (con.bodyA.id == b.id)
@@ -251,15 +258,27 @@ function primal_solve!(b::Body, bonds::Vector{BondConstraint}, contacts::Vector{
         in_tension = C_loc[1] > 0
         current_k = in_tension ? con.k_tension : con.k_compression
 
+        # Kelvin-Voigt damping
+        #visc_active = con.is_cohesive && in_tension && !con.is_broken
+        #eta = visc_active ? con.viscosity : 0.0
+
+        # Scale bond viscosity with damage
+        eta_eff = 0#con.viscosity * (1.0 - con.damage)
+
         # Should not have penalty_k anymore but select based on which state it is in, tension or compression
         for r in 1:3
-            k_val = min(current_k[r], k_limit[r])
-            k_val <= 0.0 && continue
+            k_el = min(current_k[r], k_phys[r])
+            (k_el <= 0.0) && (eta_eff <= 0.0) && continue
+
+            k_visc = (eta_eff > 0.0) ? (eta_eff / dt) : 0.0
+
+            k_tot = k_el + k_visc
+            k_tot <= 0.0 && continue
 
             J_row = J_block[r, :]
-            f_mag = k_val * C_loc[r]
+            f_mag = k_tot * C_loc[r] - k_visc * con.C_prev[r]
 
-            H += (J_row * J_row') * k_val
+            H += (J_row * J_row') * k_tot
             F -= J_row * f_mag
         end
     end
@@ -383,11 +402,11 @@ function update_vel!(sim::SimulationState, invdt::Float64)
             continue
         end
 
-        b.vel = (b.pos - b.pos0) * invdt
+        b.vel = (b.pos - b.pos0) * invdt #* 0.1 -> velocity issue isolated
 
         q_rel = quat_mul(b.quat, quat_inv(b.quat0))
         d_theta = quat_to_rotvec(q_rel)
-        b.ang_vel = d_theta * invdt
+        b.ang_vel = d_theta * invdt# * 0.1
 
         update_rotation!(b)
         update_inv_inertia_world!(b)
@@ -466,6 +485,11 @@ function init_simulation(
 
             bond = BondConstraint(bA, bB, pA, pB, n_w, kn, kt, area, tensile, Gc, damp_val)
             bond.max_break_steps = bond_break_steps
+
+            # Kelvin-Voigt
+            N = 25
+            tau = N * dt
+            bond.viscosity = kn * tau
             push!(sim.bond_constraints, bond)
         end
     end
@@ -475,12 +499,45 @@ end
 
 function damage_bonds!(sim::SimulationState, dt::Float64)
     changed = false
+
+    function bond_energy(b::BondConstraint)
+        b.is_broken && return 0.0
+
+        # Recalculate C based on current positions (update_bond_state! does this, 
+        # but we need it before update to capture 'Pre-Damage' state)
+        rA = AVBDConstraints.rotate_vec(b.pA_local, b.bodyA.quat)
+        rB = AVBDConstraints.rotate_vec(b.pB_local, b.bodyB.quat)
+        dp = (b.bodyA.pos + rA) - (b.bodyB.pos + rB)
+
+        rotA = AVBDConstraints.quat_to_rotmat(b.bodyA.quat)
+        c_n = dot(rotA * b.n_local, dp) - b.rest[1]
+        c_t1 = dot(rotA * b.t1_local, dp) - b.rest[2]
+        c_t2 = dot(rotA * b.t2_local, dp) - b.rest[3]
+        C_local = @SVector [c_n, c_t1, c_t2]
+
+        k_eff = AVBDConstraints.get_effective_stiffness(b, C_local)
+
+        en = 0.5 * (k_eff[1] * C_local[1]^2 + k_eff[2] * C_local[2]^2 + k_eff[3] * C_local[3]^2)
+        return en
+    end
+
     for bond in sim.bond_constraints
         if !bond.is_broken
             was_broken = bond.is_broken
             old_damage = bond.damage
 
+            # Calculate energy before updating bond
+            E_pre = bond_energy(bond)
+
             update_bond_state!(bond, dt)
+
+            # Calculate energy after update
+            E_post = bond_energy(bond)
+
+            diff = E_pre - E_post
+            if diff > 0
+                record_fracture_work!(sim.energy_log, diff)
+            end
 
             if bond.is_broken != was_broken || abs(bond.damage - old_damage) > 1e-4
                 changed = true
@@ -559,6 +616,8 @@ function step_simulation!(sim::SimulationState)
     # Velocity derivation from new positions
     update_vel!(sim, inv_dt)
 
+    alpha_log = sim.alpha
+
     # Stabilization pass
     if sim.stabilize
         alpha_stabil = 0.05
@@ -567,8 +626,10 @@ function step_simulation!(sim::SimulationState)
             primal_solve!(body, sim.bond_incidence[body.id+1], sim.contact_incidence[body.id+1], dt, inv_dt2, alpha_stabil)
         end
         dual_update!(sim, alpha_stabil)
+        alpha_log = alpha_stabil
     end
 
+    log_step!(sim.energy_log, sim.bodies, sim.bond_constraints, sim.contact_constraints, alpha_log)
 
 end
 

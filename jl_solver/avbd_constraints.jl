@@ -5,7 +5,7 @@ using StaticArrays
 import ..Maths: Vec3, Quat, transform_point, quat_mul, integrate_quat, orthonormal_basis, rotate_vec, quat_to_rotmat, quat_inv, quat_to_rotvec, delta_twist_from
 import ..Collisions: Body
 
-export ContactConstraint, BondConstraint, initialize!, compute_constraint!, update_bounds!, eval_bond, update_bond_state!, bond_k_eff #AbstractConstraint, 
+export ContactConstraint, BondConstraint, initialize!, compute_constraint!, update_bounds!, eval_bond, update_bond_state!, bond_k_eff, get_effective_stiffness #AbstractConstraint, 
 
 ##### ---------- Contact Constraint ---------- #####
 
@@ -193,6 +193,7 @@ mutable struct BondConstraint
     break_counter::Int # based this on wave speed - CZM? - process zone ahead of crack tip
     max_break_steps::Int # TODO this must be calculated based on speed of sound 
     viscosity::Float64
+    C_prev::Vec3
 
     function BondConstraint(bA::Body, bB::Body, pA::Vec3, pB::Vec3, n_world::Vec3, kn::Float64, kt::Float64, area::Float64, tensile::Float64, Gc::Float64, damp_val::Float64=0.0)
 
@@ -223,12 +224,12 @@ mutable struct BondConstraint
         # Stabilization terms - TUNE these TODO
         break_counter = 0
         max_break_steps = 10
-        viscosity = 1.0
+        viscosity = 0.0
 
         new(bA, bB, pA, pB, n_loc, t1_loc, t2_loc, zeros_Vec3, zeros_J, zeros_J,
             zeros_Vec3, false, false, false, 0.0, 0.0, 0.0, 0.0, stiff, stiff,
             damp_val, stiff, kmin, kmax, fmin, fmax, limits,
-            break_counter, max_break_steps, viscosity)
+            break_counter, max_break_steps, viscosity, zeros_Vec3)
     end
 end
 
@@ -262,6 +263,9 @@ function initialize!(con::BondConstraint) #TODO do I put in the body list here? 
         con.rest_initialized = true
         con.k_tension = con.stiffness * (1.0 - con.damage)
         con.k_compression = con.stiffness
+
+        # Previous con
+        con.C_prev = @SVector zeros(3)
     end
 
     if con.is_broken
@@ -332,29 +336,27 @@ function eval_bond(con::BondConstraint, dt::Float64)
     # c2_dot = dot(t1_curr, vrel)
     # c3_dot = dot(t2_curr, vrel)
 
-    C = @SVector [c1, c2, c3]
+    C_local = @SVector [c1, c2, c3]
     # C_dot = @SVector [c1_dot, c2_dot, c3_dot]
 
-    # viscosity
-    k_visc = con.viscosity / dt
-
-    # if con.is_broken && con.break_counter >= con.ma
-
     # Check for tension or compression, return associated stiffness
-    if c1 > 0 # Tension
-        if con.is_broken
-            return C, JA, JB, (@SVector zeros(3))
-        else
-            k_limit = con.stiffness * (1.0 - con.damage)
-            k_total = k_limit .+ k_visc
-            return C, JA, JB, k_total
-        end
-        #k_eff = con.stiffness * (1.0 - con.damage) # TODO should I just say con.penalty_k??
-    else
-        k_total = con.stiffness .+ k_visc
-        return C, JA, JB, k_total
-    end
+    # if c1 > 0 # Tension
+    #     if con.is_broken
+    #         return C, JA, JB, (@SVector zeros(3))
+    #     else
+    #         k_limit = con.stiffness * (1.0 - con.damage)
 
+    #         return C, JA, JB, k_limit
+    #     end
+    #     #k_eff = con.stiffness * (1.0 - con.damage) # TODO should I just say con.penalty_k??
+    # else
+
+    #     return C, JA, JB, con.stiffness
+    # end
+
+    k_eff = get_effective_stiffness(con, C_local)
+
+    return C_local, JA, JB, k_eff
 end
 
 # Update bond state - only once at the end of step_simulation
@@ -397,12 +399,14 @@ function update_bond_state!(con::BondConstraint, dt::Float64)
 
     if con.is_cohesive
         con.max_committed_strain = max(con.max_committed_strain, strain)
-    end
 
-    target_damage = 0.0
-    if con.is_cohesive
+        D_target = con.damage
+
         if con.max_committed_strain >= 1.0
-            target_damage = 1.0
+            # con.is_broken = true
+            # con.damage = 1.0
+            # con.k_tension = @SVector zeros(3)
+            D_target = 1.0 # fully broken
         else
             # Linear softening (or replace with your specific curve)
             numer = (d_n / dnc)^2 + (d_s / dsc)^2
@@ -411,22 +415,29 @@ function update_bond_state!(con::BondConstraint, dt::Float64)
 
             if con.max_committed_strain > curr_lam_cr
                 d = (con.max_committed_strain - curr_lam_cr) / (1.0 - curr_lam_cr)
-                target_damage = clamp(d, 0.0, 1.0)
+                D_target = clamp(d, 0.0, 1.0)
             end
         end
-    end
 
-    # CFL governor: rate-limit damage so cracks cannot propagate instantly.
-    if target_damage > con.damage
-        max_allowed_change = MAX_DAMAGE_RATE * dt
-        con.damage += min(target_damage - con.damage, max_allowed_change)
+        # Rate limiting damage applying
+        oldD = con.damage
+        con.damage = relaxed_damage_update(con.damage, D_target, con.max_break_steps)
 
-        if con.damage >= 0.99
-            con.damage = 1.0
+        # track active damping
+        if con.damage > (oldD + 1e-12)
+            con.break_counter += 1
+        end
+
+        if con.damage >= (1.0 - 1e-6)
             con.is_broken = true
+            con.damage = 1.0
             con.k_tension = @SVector zeros(3)
         end
+
     end
+
+    # Added for Kelvin-Voigt damping
+    con.C_prev = con.C
 
 end
 
@@ -454,6 +465,32 @@ function get_delta_twist(b::Body, from_pos::Vec3, from_quat::Quat)
     d_th = quat_to_rotvec(q_rel)
 
     return vcat(dx, d_th)
+end
+
+@inline function relaxed_damage_update(D::Float64, D_target::Float64, max_break_steps::Int)
+    # monotonic damage
+    D_target = clamp(D_target, 0.0, 1.0)
+
+    if D_target <= D
+        return D
+    end
+
+    steps = max(max_break_steps, 1)
+    delta_D_max = 1.0 / steps
+    return min(1.0, D + min(D_target - D, delta_D_max))
+end
+
+@inline function get_effective_stiffness(bond::BondConstraint, C_local::Vec3)
+    bond.is_broken && return @SVector zeros(3)
+
+    d_factor = max(0.0, 1.0 - bond.damage)
+
+    k_n = (C_local[1] > 0) ? (bond.stiffness[1] * d_factor) : bond.stiffness[1]
+
+    k_t1 = bond.stiffness[2] * d_factor
+    k_t2 = bond.stiffness[3] * d_factor
+
+    return SVector{3,Float64}(k_n, k_t1, k_t2)
 end
 
 end # module end
