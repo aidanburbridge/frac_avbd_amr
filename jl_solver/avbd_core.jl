@@ -259,11 +259,11 @@ function primal_solve!(b::Body, bonds::Vector{BondConstraint}, contacts::Vector{
         current_k = in_tension ? con.k_tension : con.k_compression
 
         # Kelvin-Voigt damping
-        #visc_active = con.is_cohesive && in_tension && !con.is_broken
-        #eta = visc_active ? con.viscosity : 0.0
+        visc_active = con.is_cohesive && in_tension && !con.is_broken
+        eta = visc_active ? con.viscosity : 0.0
 
         # Scale bond viscosity with damage
-        eta_eff = 0#con.viscosity * (1.0 - con.damage)
+        eta_eff = con.viscosity * (1.0 - con.damage)
 
         # Should not have penalty_k anymore but select based on which state it is in, tension or compression
         for r in 1:3
@@ -577,37 +577,64 @@ function step_simulation!(sim::SimulationState)
 
     #total_iters = sim.iterations + (sim.stabilize ? 1 : 0)
     inner_passes = sim.iterations
-    damage_passes = sim.iterations
+    #damage_passes = sim.iterations
 
     curr_max_violation = Inf
 
-    for out_it in 1:damage_passes
+    # for out_it in 1:damage_passes
 
-        for in_it in 1:inner_passes
+    #     for in_it in 1:inner_passes
 
-            alpha_eff = sim.stabilize ? 1.0 : sim.alpha
+    #         alpha_eff = sim.stabilize ? 1.0 : sim.alpha
 
-            # Loop over bodies aka primal loop
-            #Threads.@threads 
-            for body in sim.bodies
-                # solve constriants not in loop but via linear algebra
-                body.is_static && continue
+    #         # Loop over bodies aka primal loop
+    #         #Threads.@threads 
+    #         for body in sim.bodies
+    #             # solve constriants not in loop but via linear algebra
+    #             body.is_static && continue
 
-                # TODO include a L-scheme term here that adds numerical inertia
-                primal_solve!(body,
-                    sim.bond_incidence[body.id+1],
-                    sim.contact_incidence[body.id+1],
-                    dt, inv_dt2, alpha_eff)  # Uses eval_bond
+    #             # TODO include a L-scheme term here that adds numerical inertia
+    #             primal_solve!(body,
+    #                 sim.bond_incidence[body.id+1],
+    #                 sim.contact_incidence[body.id+1],
+    #                 dt, inv_dt2, alpha_eff)  # Uses eval_bond
 
-                assert_finite_body!(body, "after primal_solve out_it=$out_it in_it=$in_it")
-            end
-            curr_max_violation = dual_update!(sim, alpha_eff)
+    #             assert_finite_body!(body, "after primal_solve out_it=$out_it in_it=$in_it")
+    #         end
+    #         curr_max_violation = dual_update!(sim, alpha_eff)
+    #     end
+
+    #     topo_changed = damage_bonds!(sim, dt)
+
+    #     # Early out - skip prescribed num of iterations if below tolerance
+    #     if !topo_changed && curr_max_violation < EARLY_OUT_TOL
+    #         break
+    #     end
+
+    # end
+
+    for in_it in 1:inner_passes
+
+        alpha_eff = sim.stabilize ? 1.0 : sim.alpha
+
+        # Loop over bodies aka primal loop
+        #Threads.@threads 
+        for body in sim.bodies
+            # solve constriants not in loop but via linear algebra
+            body.is_static && continue
+
+            # TODO include a L-scheme term here that adds numerical inertia
+            primal_solve!(body,
+                sim.bond_incidence[body.id+1],
+                sim.contact_incidence[body.id+1],
+                dt, inv_dt2, alpha_eff)  # Uses eval_bond
+
+            assert_finite_body!(body, "after primal_solve in_it=$in_it")
         end
-
-        topo_changed = damage_bonds!(sim, dt)
+        curr_max_violation = dual_update!(sim, alpha_eff)
 
         # Early out - skip prescribed num of iterations if below tolerance
-        if !topo_changed && curr_max_violation < EARLY_OUT_TOL
+        if curr_max_violation < EARLY_OUT_TOL
             break
         end
 
@@ -628,6 +655,8 @@ function step_simulation!(sim::SimulationState)
         dual_update!(sim, alpha_stabil)
         alpha_log = alpha_stabil
     end
+
+    damage_bonds!(sim, dt)
 
     log_step!(sim.energy_log, sim.bodies, sim.bond_constraints, sim.contact_constraints, alpha_log)
 
