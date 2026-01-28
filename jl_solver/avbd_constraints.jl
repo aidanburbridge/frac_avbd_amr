@@ -162,6 +162,11 @@ mutable struct BondConstraint
     JA::SMatrix{3,6,Float64,18}
     JB::SMatrix{3,6,Float64,18}
 
+    # AVBD solver values (AL)
+    lambda::Vec3
+    penalty_k::Vec3
+    fracture::Vec3
+
     # Bond state
     rest::Vec3
     is_broken::Bool
@@ -216,10 +221,15 @@ mutable struct BondConstraint
         zeros_Vec3 = @SVector zeros(3)
         zeros_J = @SMatrix zeros(3, 6)
 
-        fmin = @SVector fill(-Inf, 3)
-        fmax = @SVector fill(Inf, 3)
-        kmin = @SVector fill(0.0, 3)
+        fracture = @SVector fill(tensile * area, 3)
+        fmin = -fracture
+        fmax = fracture
+
+        kmin = stiff #@SVector fill(0.0, 3)
         kmax = @SVector fill(1e12, 3)
+
+        lambda = zeros_Vec3
+        penalty_k = stiff
 
         # Stabilization terms - TUNE these TODO
         break_counter = 0
@@ -227,6 +237,7 @@ mutable struct BondConstraint
         viscosity = 0.0
 
         new(bA, bB, pA, pB, n_loc, t1_loc, t2_loc, zeros_Vec3, zeros_J, zeros_J,
+            lambda, penalty_k, fracture,
             zeros_Vec3, false, false, false, 0.0, 0.0, 0.0, 0.0, stiff, stiff,
             damp_val, stiff, kmin, kmax, fmin, fmax, limits,
             break_counter, max_break_steps, viscosity, zeros_Vec3)

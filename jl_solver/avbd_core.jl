@@ -184,12 +184,21 @@ function warm_start!(sim::SimulationState)
             continue
         end
 
-        # TODO split warm start between compression and tension
         initialize!(con)
 
-        # Decay both tension and compression
-        con.k_tension = clamp.(con.k_tension .* sim.gamma, con.k_min, con.k_max)
-        con.k_compression = clamp.(con.k_compression .* sim.gamma, con.k_min, con.k_max)
+        con.penalty_k = clamp.(con.penalty_k .* sim.gamma, con.k_min, con.k_max)
+
+        if !sim.stabilize
+            con.lambda = con.lambda .* (sim.alpha * sim.gamma)
+        end
+
+        pk = con.penalty_k
+        for r in 1:3
+            if !isinf(con.stiffness[r])
+                pk = setindex(pk, min(pk[r], con.stiffness[r]), r)
+            end
+        end
+        con.penalty_k = pk
 
         # Build incidence_map
         push!(sim.bond_incidence[con.bodyA.id+1], con)
@@ -248,37 +257,21 @@ function primal_solve!(b::Body, bonds::Vector{BondConstraint}, contacts::Vector{
 
         con.is_broken && continue
 
-        C_loc, JA, JB, k_phys = eval_bond(con, dt)
-        # TODO Do I want damping only in tension or also in compression???
+        C_loc, JA, JB, _ = eval_bond(con, dt)
 
         isA = (con.bodyA.id == b.id)
         J_block = isA ? JA : JB
 
-        # Check if in tension or compression
-        in_tension = C_loc[1] > 0
-        current_k = in_tension ? con.k_tension : con.k_compression
-
-        # Kelvin-Voigt damping
-        visc_active = con.is_cohesive && in_tension && !con.is_broken
-        eta = visc_active ? con.viscosity : 0.0
-
-        # Scale bond viscosity with damage
-        eta_eff = con.viscosity * (1.0 - con.damage)
-
-        # Should not have penalty_k anymore but select based on which state it is in, tension or compression
         for r in 1:3
-            k_el = min(current_k[r], k_phys[r])
-            (k_el <= 0.0) && (eta_eff <= 0.0) && continue
-
-            k_visc = (eta_eff > 0.0) ? (eta_eff / dt) : 0.0
-
-            k_tot = k_el + k_visc
-            k_tot <= 0.0 && continue
+            k_val = con.penalty_k[r]
+            k_val <= 0.0 && continue
 
             J_row = J_block[r, :]
-            f_mag = k_tot * C_loc[r] - k_visc * con.C_prev[r]
 
-            H += (J_row * J_row') * k_tot
+            lambda_base = isinf(con.stiffness[r]) ? con.lambda[r] : 0.0
+            f_mag = clamp(k_val * C_loc[r] + lambda_base, con.f_min[r], con.f_max[r])
+
+            H += (J_row * J_row') * k_val
             F -= J_row * f_mag
         end
     end
@@ -326,34 +319,43 @@ function dual_update!(sim::SimulationState, alpha::Float64)
 
     for con in sim.bond_constraints
 
-        if con.is_broken
-            continue
-        end
+        con.is_broken && continue
 
-        C_loc, _, _, k_limit = eval_bond(con, sim.dt) # get effective stiffness from evaluating the damaged bond
+
+        C_loc, _, _, _ = eval_bond(con, sim.dt)
 
         # Check maximum violation of bonds
         max_violation = max(max_violation, maximum(abs.(C_loc)))
 
-        # Check load type
-        in_tension = C_loc[1] > 0
+        pk = con.penalty_k
+        lam = con.lambda
 
-        if in_tension
-            pk = con.k_tension
-            for r in 1:3
+        for r in 1:3
+            lambda_base = isinf(con.stiffness[r]) ? lam[r] : 0.0
+            sigma = pk[r] * C_loc[r] + lambda_base
+            lam_r = clamp(sigma, con.f_min[r], con.f_max[r])
+            lam = setindex(lam, lam_r, r)
+
+            if abs(lam_r) >= con.fracture[r]
+                con.is_broken = true
+                con.penalty_k = @SVector zeros(3)
+                con.lambda = @SVector zeros(3)
+                break
+            end
+
+            if lam_r > con.f_min[r] && lam_r < con.f_max[r]
                 new_k = pk[r] + sim.beta * abs(C_loc[r])
-                new_k = min(new_k, min(con.k_max[r], k_limit[r]))
+                new_k = min(new_k, con.k_max[r])
+                if !isinf(con.stiffness[r])
+                    new_k = min(new_k, con.stiffness[r])
+                end
                 pk = setindex(pk, new_k, r)
             end
-            con.k_tension = pk
-        else
-            pk = con.k_compression
-            for r in 1:3
-                new_k = pk[r] + sim.beta * abs(C_loc[r])
-                new_k = min(new_k, min(con.k_max[r], k_limit[r]))
-                pk = setindex(pk, new_k, r)
-            end
-            con.k_compression = pk
+        end
+
+        if !con.is_broken
+            con.penalty_k = pk
+            con.lambda = lam
         end
     end
 
@@ -655,8 +657,6 @@ function step_simulation!(sim::SimulationState)
         dual_update!(sim, alpha_stabil)
         alpha_log = alpha_stabil
     end
-
-    damage_bonds!(sim, dt)
 
     log_step!(sim.energy_log, sim.bodies, sim.bond_constraints, sim.contact_constraints, alpha_log)
 

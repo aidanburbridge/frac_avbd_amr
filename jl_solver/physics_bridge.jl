@@ -71,8 +71,8 @@ function write_frame(sim::AVBDCore.SimulationState, filename::String)
 
         # Number of bodies and bonds
         n_bodies = length(sim.bodies)
-        active_bonds = [b for b in sim.bond_constraints if !b.is_broken]
-        n_bonds = length(active_bonds)
+        stress_data, bond_data = get_visualization_data(sim)
+        n_bonds = size(bond_data, 1)
 
         write(io, Int32(n_bodies))
         write(io, Int32(n_bonds))
@@ -81,7 +81,6 @@ function write_frame(sim::AVBDCore.SimulationState, filename::String)
         write(io, Float32(sim.dt))
 
         # Body positional data + per-body stress (68 bytes per body)
-        stress_data, _ = get_visualization_data(sim)
         for (i, b) in enumerate(sim.bodies)
             # Position
             write(io, Float32(b.pos[1]))
@@ -112,12 +111,11 @@ function write_frame(sim::AVBDCore.SimulationState, filename::String)
         end
 
         # Bond data (strain/stress)
-        for b in active_bonds
-            write(io, Int32(b.bodyA.id))
-            write(io, Int32(b.bodyB.id))
-
-            write(io, Float32(b.max_eff_strain))
-            write(io, Float32(b.current_eff_strain))
+        for i in 1:n_bonds
+            write(io, Int32(bond_data[i, 1]))
+            write(io, Int32(bond_data[i, 2]))
+            write(io, Float32(bond_data[i, 4]))
+            write(io, Float32(bond_data[i, 3]))
         end
     end
 end
@@ -156,6 +154,10 @@ function get_visualization_data(sim::AVBDCore.SimulationState)
     bond_data = zeros(FLOAT, length(active_bonds), 4)
 
     for (i, bond) in enumerate(active_bonds)
+        if !bond.rest_initialized
+            AVBDConstraints.initialize!(bond)
+        end
+
         bA = bond.bodyA
         bB = bond.bodyB
 
@@ -166,12 +168,19 @@ function get_visualization_data(sim::AVBDCore.SimulationState)
         t2 = R_A * bond.t2_local
         pA = transform_point(bond.pA_local, bA.pos, bA.quat)
         pB = transform_point(bond.pB_local, bB.pos, bB.quat)
+
         dp = pA - pB
 
-        # Force calculation (F = -k*x) using material stiffness (not solver bank)
-        err = bond.C
-        k_mat = err[1] > 0 ? (bond.stiffness * (1.0 - bond.damage)) : bond.stiffness
-        f_local = -k_mat .* err
+        C_loc, _, _, _ = AVBDConstraints.eval_bond(bond, sim.dt)
+        bond.C = C_loc
+
+        # Force calculation uses the same estimate as the solver (AL-style).
+        f_local = MVector{3,Float64}(undef)
+        for r in 1:3
+            k_val = bond.penalty_k[r]
+            lambda_base = isinf(bond.stiffness[r]) ? bond.lambda[r] : 0.0
+            f_local[r] = clamp(k_val * C_loc[r] + lambda_base, bond.f_min[r], bond.f_max[r])
+        end
         F_world = n * f_local[1] + t1 * f_local[2] + t2 * f_local[3]
 
         # stress calculation
@@ -183,10 +192,19 @@ function get_visualization_data(sim::AVBDCore.SimulationState)
         volB = bB.size[1] * bB.size[2] * bB.size[3]
         _acc_stress!(stress_data, bB.id + 1, rB, -F_world, volB)
 
+        rest_len = max(abs(bond.rest[1]), 1e-12)
+        strain_n = C_loc[1] / rest_len
+        strain_t1 = C_loc[2] / rest_len
+        strain_t2 = C_loc[3] / rest_len
+        eff_strain = sqrt(strain_n^2 + strain_t1^2 + strain_t2^2)
+
+        bond.current_eff_strain = eff_strain
+        bond.max_eff_strain = max(bond.max_eff_strain, eff_strain)
+
         # Bond metadata
         bond_data[i, 1] = Float64(bA.id)
         bond_data[i, 2] = Float64(bB.id)
-        bond_data[i, 3] = bond.current_eff_strain
+        bond_data[i, 3] = eff_strain
         bond_data[i, 4] = bond.max_eff_strain
     end
     return stress_data, bond_data
