@@ -257,10 +257,10 @@ function primal_solve!(b::Body, bonds::Vector{BondConstraint}, contacts::Vector{
 
         con.is_broken && continue
 
-        C_loc, JA, JB, _ = eval_bond(con, dt)
+        eval_bond(con)
 
         isA = (con.bodyA.id == b.id)
-        J_block = isA ? JA : JB
+        J_block = isA ? con.JA : con.JB
 
         for r in 1:3
             k_val = con.penalty_k[r]
@@ -268,8 +268,7 @@ function primal_solve!(b::Body, bonds::Vector{BondConstraint}, contacts::Vector{
 
             J_row = J_block[r, :]
 
-            lambda_base = isinf(con.stiffness[r]) ? con.lambda[r] : 0.0
-            f_mag = clamp(k_val * C_loc[r] + lambda_base, con.f_min[r], con.f_max[r])
+            f_mag = clamp(k_val * con.C[r], con.f_min[r], con.f_max[r])
 
             H += (J_row * J_row') * k_val
             F -= J_row * f_mag
@@ -322,17 +321,17 @@ function dual_update!(sim::SimulationState, alpha::Float64)
         con.is_broken && continue
 
 
-        C_loc, _, _, _ = eval_bond(con, sim.dt)
+        eval_bond(con)
 
         # Check maximum violation of bonds
-        max_violation = max(max_violation, maximum(abs.(C_loc)))
+        max_violation = max(max_violation, maximum(abs.(con.C)))
 
         pk = con.penalty_k
         lam = con.lambda
 
         for r in 1:3
             lambda_base = isinf(con.stiffness[r]) ? lam[r] : 0.0
-            sigma = pk[r] * C_loc[r] + lambda_base
+            sigma = pk[r] * con.C[r] + lambda_base
             lam_r = clamp(sigma, con.f_min[r], con.f_max[r])
             lam = setindex(lam, lam_r, r)
 
@@ -344,7 +343,7 @@ function dual_update!(sim::SimulationState, alpha::Float64)
             end
 
             if lam_r > con.f_min[r] && lam_r < con.f_max[r]
-                new_k = pk[r] + sim.beta * abs(C_loc[r])
+                new_k = pk[r] + sim.beta * abs(con.C[r])
                 new_k = min(new_k, con.k_max[r])
                 if !isinf(con.stiffness[r])
                     new_k = min(new_k, con.stiffness[r])
@@ -517,7 +516,7 @@ function damage_bonds!(sim::SimulationState, dt::Float64)
         c_t2 = dot(rotA * b.t2_local, dp) - b.rest[3]
         C_local = @SVector [c_n, c_t1, c_t2]
 
-        k_eff = AVBDConstraints.get_effective_stiffness(b, C_local)
+        k_eff = AVBDConstraints.get_effective_stiffness(b)
 
         en = 0.5 * (k_eff[1] * C_local[1]^2 + k_eff[2] * C_local[2]^2 + k_eff[3] * C_local[3]^2)
         return en
@@ -579,41 +578,8 @@ function step_simulation!(sim::SimulationState)
 
     #total_iters = sim.iterations + (sim.stabilize ? 1 : 0)
     inner_passes = sim.iterations
-    #damage_passes = sim.iterations
 
     curr_max_violation = Inf
-
-    # for out_it in 1:damage_passes
-
-    #     for in_it in 1:inner_passes
-
-    #         alpha_eff = sim.stabilize ? 1.0 : sim.alpha
-
-    #         # Loop over bodies aka primal loop
-    #         #Threads.@threads 
-    #         for body in sim.bodies
-    #             # solve constriants not in loop but via linear algebra
-    #             body.is_static && continue
-
-    #             # TODO include a L-scheme term here that adds numerical inertia
-    #             primal_solve!(body,
-    #                 sim.bond_incidence[body.id+1],
-    #                 sim.contact_incidence[body.id+1],
-    #                 dt, inv_dt2, alpha_eff)  # Uses eval_bond
-
-    #             assert_finite_body!(body, "after primal_solve out_it=$out_it in_it=$in_it")
-    #         end
-    #         curr_max_violation = dual_update!(sim, alpha_eff)
-    #     end
-
-    #     topo_changed = damage_bonds!(sim, dt)
-
-    #     # Early out - skip prescribed num of iterations if below tolerance
-    #     if !topo_changed && curr_max_violation < EARLY_OUT_TOL
-    #         break
-    #     end
-
-    # end
 
     for in_it in 1:inner_passes
 

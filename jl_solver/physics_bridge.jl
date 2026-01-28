@@ -169,17 +169,16 @@ function get_visualization_data(sim::AVBDCore.SimulationState)
         pA = transform_point(bond.pA_local, bA.pos, bA.quat)
         pB = transform_point(bond.pB_local, bB.pos, bB.quat)
 
-        dp = pA - pB
+        #dp = pA - pB
 
-        C_loc, _, _, _ = AVBDConstraints.eval_bond(bond, sim.dt)
-        bond.C = C_loc
+        #AVBDConstraints.eval_bond(bond)
 
         # Force calculation uses the same estimate as the solver (AL-style).
         f_local = MVector{3,Float64}(undef)
         for r in 1:3
             k_val = bond.penalty_k[r]
             lambda_base = isinf(bond.stiffness[r]) ? bond.lambda[r] : 0.0
-            f_local[r] = clamp(k_val * C_loc[r] + lambda_base, bond.f_min[r], bond.f_max[r])
+            f_local[r] = clamp(k_val * bond.C[r] + lambda_base, bond.f_min[r], bond.f_max[r])
         end
         F_world = n * f_local[1] + t1 * f_local[2] + t2 * f_local[3]
 
@@ -193,9 +192,9 @@ function get_visualization_data(sim::AVBDCore.SimulationState)
         _acc_stress!(stress_data, bB.id + 1, rB, -F_world, volB)
 
         rest_len = max(abs(bond.rest[1]), 1e-12)
-        strain_n = C_loc[1] / rest_len
-        strain_t1 = C_loc[2] / rest_len
-        strain_t2 = C_loc[3] / rest_len
+        strain_n = bond.C[1] / rest_len
+        strain_t1 = bond.C[2] / rest_len
+        strain_t2 = bond.C[3] / rest_len
         eff_strain = sqrt(strain_n^2 + strain_t1^2 + strain_t2^2)
 
         bond.current_eff_strain = eff_strain

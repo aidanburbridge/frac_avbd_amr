@@ -300,11 +300,8 @@ function initialize!(con::BondConstraint) #TODO do I put in the body list here? 
 
 end
 
-function eval_bond(con::BondConstraint, dt::Float64)
-    # This function purely evaluates C, JA, JB, and K_eff
-    # Does NOT modify any values
+function eval_bond(con::BondConstraint)
 
-    # Read-Only kinematic values
     rA = rotate_vec(con.pA_local, con.bodyA.quat)
     rB = rotate_vec(con.pB_local, con.bodyB.quat)
     pA = con.bodyA.pos + rA
@@ -316,58 +313,15 @@ function eval_bond(con::BondConstraint, dt::Float64)
     t1_curr = rotA * con.t1_local
     t2_curr = rotA * con.t2_local
 
-    # # velocities TODO check if these are okay to use, velocities not updated until end of step
-    # vA = con.bodyA.vel + cross(con.bodyA.ang_vel, rA)
-    # vB = con.bodyB.vel + cross(con.bodyB.ang_vel, rB)
-
-    # vrel = vA - vB
-
-    dirs = @SVector [n_curr, t1_curr, t2_curr]
-
-    # Helper to build 3x6 J for a body
-    function make_J(r_vec, sign)
-        rows = MMatrix{3,6,Float64}(undef)
-        for i in 1:3
-            rows[i, 1:3] = dirs[i] * sign
-            rows[i, 4:6] = cross(r_vec, dirs[i]) * sign
-        end
-        return SMatrix(rows)
-    end
-
-    JA = make_J(rA, 1.0)
-    JB = make_J(rB, -1.0)
-
     # constraint violation
     c1 = dot(n_curr, dp) - con.rest[1]
     c2 = dot(t1_curr, dp) - con.rest[2]
     c3 = dot(t2_curr, dp) - con.rest[3]
 
-    # constraint violation derivative wrt time
-    # c1_dot = dot(n_curr, vrel)
-    # c2_dot = dot(t1_curr, vrel)
-    # c3_dot = dot(t2_curr, vrel)
+    con.C = @SVector [c1, c2, c3]
 
-    C_local = @SVector [c1, c2, c3]
-    # C_dot = @SVector [c1_dot, c2_dot, c3_dot]
+    con.penalty_k = get_effective_stiffness(con)
 
-    # Check for tension or compression, return associated stiffness
-    # if c1 > 0 # Tension
-    #     if con.is_broken
-    #         return C, JA, JB, (@SVector zeros(3))
-    #     else
-    #         k_limit = con.stiffness * (1.0 - con.damage)
-
-    #         return C, JA, JB, k_limit
-    #     end
-    #     #k_eff = con.stiffness * (1.0 - con.damage) # TODO should I just say con.penalty_k??
-    # else
-
-    #     return C, JA, JB, con.stiffness
-    # end
-
-    k_eff = get_effective_stiffness(con, C_local)
-
-    return C_local, JA, JB, k_eff
 end
 
 # Update bond state - only once at the end of step_simulation
@@ -478,25 +432,13 @@ function get_delta_twist(b::Body, from_pos::Vec3, from_quat::Quat)
     return vcat(dx, d_th)
 end
 
-@inline function relaxed_damage_update(D::Float64, D_target::Float64, max_break_steps::Int)
-    # monotonic damage
-    D_target = clamp(D_target, 0.0, 1.0)
+@inline function get_effective_stiffness(bond::BondConstraint)
 
-    if D_target <= D
-        return D
-    end
-
-    steps = max(max_break_steps, 1)
-    delta_D_max = 1.0 / steps
-    return min(1.0, D + min(D_target - D, delta_D_max))
-end
-
-@inline function get_effective_stiffness(bond::BondConstraint, C_local::Vec3)
     bond.is_broken && return @SVector zeros(3)
 
     d_factor = max(0.0, 1.0 - bond.damage)
 
-    k_n = (C_local[1] > 0) ? (bond.stiffness[1] * d_factor) : bond.stiffness[1]
+    k_n = (bond.C[1] > 0) ? (bond.stiffness[1] * d_factor) : bond.stiffness[1]
 
     k_t1 = bond.stiffness[2] * d_factor
     k_t2 = bond.stiffness[3] * d_factor

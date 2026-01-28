@@ -62,7 +62,7 @@ function compute_bond_potential(bonds::Vector{BondConstraint})
         # in_tension = c_n > 0
         # k_mat = in_tension ? (bond.stiffness * (1.0 - bond.damage)) : bond.stiffness
 
-        k_eff = get_effective_stiffness(bond, C_local)
+        k_eff = get_effective_stiffness(bond)
 
         U += 0.5 * (k_eff[1] * C_local[1]^2 + k_eff[2] * C_local[2]^2 + k_eff[3] * C_local[3]^2)
     end
