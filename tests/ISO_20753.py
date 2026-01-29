@@ -12,7 +12,7 @@ from util.simulate import SimulationSetup
 
 STL_PATH = r"C:\Users\aidan\Documents\TUM\Thesis\ISO 20753 Type A1 v1.stl"
 LENGTH = 0.170
-VOXEL_RES = 1000
+VOXEL_RES = 5000
 
 # Shared solver params
 DT_PHYSICS = 1/4000
@@ -31,7 +31,7 @@ TENSILE_STRENGTH = 80e5
 FRACTURE_TOUGHNESS = 5e4
 DENSITY = 1150.0
 PENALTY_GAIN = 1e6
-STEPS = 4000
+STEPS = 3000
 
 ZETA_DAMP = 0.1
 

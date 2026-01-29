@@ -15,7 +15,7 @@ class VTKExporter:
         Args:
             bodies: List of python Body objects (must be synced with current positions)
             stress_tensor: (N, 6) [XX, YY, ZZ, XY, YZ, ZX] from solver
-            bond_data: (M, 6) [IdxA, IdxB, Strain, MaxStrain, Tensile, Compression] from solver
+            bond_data: (M, 4..8) [IdxA, IdxB, Strain, MaxStrain, (Damage | Tensile, Compression[, Damage] | Damage, K_eff[3])] from solver
         """
         
         # --- 1. Export Voxels (Unstructured Grid) ---
@@ -71,6 +71,8 @@ class VTKExporter:
             max_strains = []
             tensile_strains = []
             compressive_strains = []
+            damages = []
+            eff_stiffness = []
             
             # Pre-calculate centers for speed
             centers = np.array([b.position[:3] for b in bodies])
@@ -80,8 +82,22 @@ class VTKExporter:
                 idxA, idxB = int(row[0]), int(row[1])
                 curr = row[2] if len(row) > 2 else 0.0
                 max_s = row[3] if len(row) > 3 else 0.0
-                tensile = row[4] if len(row) > 4 else 0.0
-                compressive = row[5] if len(row) > 5 else 0.0
+                tensile = 0.0
+                compressive = 0.0
+                damage = 0.0
+                k_eff = (0.0, 0.0, 0.0)
+                if len(row) >= 8:
+                    damage = row[4]
+                    k_eff = (row[5], row[6], row[7])
+                elif len(row) >= 7:
+                    tensile = row[4]
+                    compressive = row[5]
+                    damage = row[6]
+                elif len(row) >= 6:
+                    tensile = row[4]
+                    compressive = row[5]
+                elif len(row) >= 5:
+                    damage = row[4]
                 
                 # Safety check
                 if idxA < len(centers) and idxB < len(centers):
@@ -95,6 +111,8 @@ class VTKExporter:
                     max_strains.append(max_s)
                     tensile_strains.append(tensile)
                     compressive_strains.append(compressive)
+                    damages.append(damage)
+                    eff_stiffness.append(k_eff)
             
             if line_pts:
                 # Build a PolyData without the default per-point vertices so cell
@@ -106,6 +124,8 @@ class VTKExporter:
                 poly.cell_data["Max_Strain"] = np.array(max_strains)
                 poly.cell_data["Tensile_Strain"] = np.array(tensile_strains)
                 poly.cell_data["Compression_Strain"] = np.array(compressive_strains)
+                poly.cell_data["Damage"] = np.array(damages)
+                poly.cell_data["Effective_Stiffness"] = np.array(eff_stiffness)
                 
                 filename = self.save_dir / f"bonds_{self.frame_count:04d}.vtp"
                 poly.save(filename)

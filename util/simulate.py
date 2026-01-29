@@ -164,7 +164,6 @@ def convert_results(run_dir: Path):
     # Reuse buffers to reduce allocs
     dt_head = np.dtype('i4,i4,f4') # n_bodies, n_bonds, dt
     dt_body = np.dtype([('p','3f4'),('q','4f4'),('s','3f4'),('id','i4'),('str','6f4')])
-    dt_bond = np.dtype([('a','i4'),('b','i4'),('max','f4'),('cur','f4')])
 
     for f_path in tqdm(files, unit="frame"):
         with open(f_path, "rb") as f:
@@ -179,8 +178,61 @@ def convert_results(run_dir: Path):
             # Read Bonds
             bonds = []
             if n_bnd > 0:
-                raw_bd = np.frombuffer(f.read(n_bnd * 16), dtype=dt_bond)
-                bonds = np.column_stack((raw_bd['a'], raw_bd['b'], raw_bd['cur'], raw_bd['max']))
+                remaining = f_path.stat().st_size - f.tell()
+                if remaining % n_bnd != 0:
+                    raise ValueError(f"Unsupported bond payload in {f_path.name}.")
+                bytes_per_bond = remaining // n_bnd
+                bond_bytes = f.read(n_bnd * bytes_per_bond)
+                if bytes_per_bond == 16:
+                    dt_bond = np.dtype([('a','i4'),('b','i4'),('max','f4'),('cur','f4')])
+                    raw_bd = np.frombuffer(bond_bytes, dtype=dt_bond)
+                    bonds = np.column_stack((raw_bd['a'], raw_bd['b'], raw_bd['cur'], raw_bd['max']))
+                elif bytes_per_bond == 20:
+                    dt_bond = np.dtype([('a','i4'),('b','i4'),('max','f4'),('cur','f4'),('damage','f4')])
+                    raw_bd = np.frombuffer(bond_bytes, dtype=dt_bond)
+                    bonds = np.column_stack((raw_bd['a'], raw_bd['b'], raw_bd['cur'], raw_bd['max'], raw_bd['damage']))
+                elif bytes_per_bond == 24:
+                    dt_bond = np.dtype([
+                        ('idxA', 'i4'),
+                        ('idxB', 'i4'),
+                        ('max_strain', 'f4'),
+                        ('curr_strain', 'f4'),
+                        ('tensile', 'f4'),
+                        ('compression', 'f4'),
+                    ])
+                    raw_bd = np.frombuffer(bond_bytes, dtype=dt_bond)
+                    bonds = np.column_stack((
+                        raw_bd['idxA'],
+                        raw_bd['idxB'],
+                        raw_bd['curr_strain'],
+                        raw_bd['max_strain'],
+                        raw_bd['tensile'],
+                        raw_bd['compression'],
+                    ))
+                elif bytes_per_bond == 32:
+                    dt_bond = np.dtype([
+                        ('idxA', 'i4'),
+                        ('idxB', 'i4'),
+                        ('max_strain', 'f4'),
+                        ('curr_strain', 'f4'),
+                        ('damage', 'f4'),
+                        ('k_n', 'f4'),
+                        ('k_t1', 'f4'),
+                        ('k_t2', 'f4'),
+                    ])
+                    raw_bd = np.frombuffer(bond_bytes, dtype=dt_bond)
+                    bonds = np.column_stack((
+                        raw_bd['idxA'],
+                        raw_bd['idxB'],
+                        raw_bd['curr_strain'],
+                        raw_bd['max_strain'],
+                        raw_bd['damage'],
+                        raw_bd['k_n'],
+                        raw_bd['k_t1'],
+                        raw_bd['k_t2'],
+                    ))
+                else:
+                    raise ValueError(f"Unsupported bond record size {bytes_per_bond} in {f_path.name}.")
 
             exporter.export(bodies, stress, bonds)
 

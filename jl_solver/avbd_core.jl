@@ -322,6 +322,9 @@ function dual_update!(sim::SimulationState, alpha::Float64)
         con.is_broken && continue
 
         eval_bond(con)
+        # if con.damage > 0.1
+        #     print(con.damage)
+        # end
 
         # Check maximum violation of bonds
         max_violation = max(max_violation, maximum(abs.(con.C)))
@@ -339,10 +342,6 @@ function dual_update!(sim::SimulationState, alpha::Float64)
                 d = abs(sigma) - abs(lam_r)
                 con.damage += d
 
-                # con.is_broken = true
-                # con.penalty_k = @SVector zeros(3)
-                # con.lambda = @SVector zeros(3)
-                # break
             end
 
             if lam_r > con.f_min[r] && lam_r < con.f_max[r]
@@ -532,8 +531,6 @@ function damage_bonds!(sim::SimulationState, dt::Float64)
 
             # Calculate energy before updating bond
             E_pre = bond_energy(bond)
-
-            update_bond_state!(bond, dt)
 
             # Calculate energy after update
             E_post = bond_energy(bond)

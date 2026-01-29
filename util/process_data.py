@@ -74,31 +74,85 @@ def process_frame(file_path, exporter):
             ids.append(b['id'])
             stress_tensor[idx] = b['stress']
         # --- BONDS ---
-        # Layout: IdxA(1i), IdxB(1i), MaxStrain(1f), CurrStrain(1f), Tensile(1f), Compression(1f) = 24 bytes
-        bond_bytes = f.read(n_bonds * 24)
-        
-
         bond_export = []
         if n_bonds > 0:
-            dt_bond = np.dtype([
-                ('idxA', 'i4'),
-                ('idxB', 'i4'),
-                ('max_strain', 'f4'),
-                ('curr_strain', 'f4'),
-                ('tensile', 'f4'),
-                ('compression', 'f4'),
-            ])
-            raw_bonds = np.frombuffer(bond_bytes, dtype=dt_bond)
-
-            # Exporter expects: [idxA, idxB, current_strain, max_strain, tensile, compression]
-            bond_export = np.column_stack((
-                raw_bonds['idxA'],
-                raw_bonds['idxB'],
-                raw_bonds['curr_strain'],
-                raw_bonds['max_strain'],
-                raw_bonds['tensile'],
-                raw_bonds['compression'],
-            ))
+            remaining = Path(file_path).stat().st_size - f.tell()
+            if remaining % n_bonds != 0:
+                raise ValueError(f"Unsupported bond payload in {Path(file_path).name}.")
+            bytes_per_bond = remaining // n_bonds
+            bond_bytes = f.read(n_bonds * bytes_per_bond)
+            if bytes_per_bond == 16:
+                dt_bond = np.dtype([
+                    ('idxA', 'i4'),
+                    ('idxB', 'i4'),
+                    ('max_strain', 'f4'),
+                    ('curr_strain', 'f4'),
+                ])
+                raw_bonds = np.frombuffer(bond_bytes, dtype=dt_bond)
+                bond_export = np.column_stack((
+                    raw_bonds['idxA'],
+                    raw_bonds['idxB'],
+                    raw_bonds['curr_strain'],
+                    raw_bonds['max_strain'],
+                ))
+            elif bytes_per_bond == 20:
+                dt_bond = np.dtype([
+                    ('idxA', 'i4'),
+                    ('idxB', 'i4'),
+                    ('max_strain', 'f4'),
+                    ('curr_strain', 'f4'),
+                    ('damage', 'f4'),
+                ])
+                raw_bonds = np.frombuffer(bond_bytes, dtype=dt_bond)
+                bond_export = np.column_stack((
+                    raw_bonds['idxA'],
+                    raw_bonds['idxB'],
+                    raw_bonds['curr_strain'],
+                    raw_bonds['max_strain'],
+                    raw_bonds['damage'],
+                ))
+            elif bytes_per_bond == 24:
+                dt_bond = np.dtype([
+                    ('idxA', 'i4'),
+                    ('idxB', 'i4'),
+                    ('max_strain', 'f4'),
+                    ('curr_strain', 'f4'),
+                    ('tensile', 'f4'),
+                    ('compression', 'f4'),
+                ])
+                raw_bonds = np.frombuffer(bond_bytes, dtype=dt_bond)
+                bond_export = np.column_stack((
+                    raw_bonds['idxA'],
+                    raw_bonds['idxB'],
+                    raw_bonds['curr_strain'],
+                    raw_bonds['max_strain'],
+                    raw_bonds['tensile'],
+                    raw_bonds['compression'],
+                ))
+            elif bytes_per_bond == 32:
+                dt_bond = np.dtype([
+                    ('idxA', 'i4'),
+                    ('idxB', 'i4'),
+                    ('max_strain', 'f4'),
+                    ('curr_strain', 'f4'),
+                    ('damage', 'f4'),
+                    ('k_n', 'f4'),
+                    ('k_t1', 'f4'),
+                    ('k_t2', 'f4'),
+                ])
+                raw_bonds = np.frombuffer(bond_bytes, dtype=dt_bond)
+                bond_export = np.column_stack((
+                    raw_bonds['idxA'],
+                    raw_bonds['idxB'],
+                    raw_bonds['curr_strain'],
+                    raw_bonds['max_strain'],
+                    raw_bonds['damage'],
+                    raw_bonds['k_n'],
+                    raw_bonds['k_t1'],
+                    raw_bonds['k_t2'],
+                ))
+            else:
+                raise ValueError(f"Unsupported bond record size {bytes_per_bond} in {Path(file_path).name}.")
 
         # Export
         exporter.export(bodies, stress_tensor, bond_export)

@@ -110,12 +110,16 @@ function write_frame(sim::AVBDCore.SimulationState, filename::String)
             write(io, Float32(stress_data[i, 6]))
         end
 
-        # Bond data (strain/stress)
+        # Bond data (strain/damage/stiffness)
         for i in 1:n_bonds
             write(io, Int32(bond_data[i, 1]))
             write(io, Int32(bond_data[i, 2]))
             write(io, Float32(bond_data[i, 4]))
             write(io, Float32(bond_data[i, 3]))
+            write(io, Float32(bond_data[i, 5]))
+            write(io, Float32(bond_data[i, 6]))
+            write(io, Float32(bond_data[i, 7]))
+            write(io, Float32(bond_data[i, 8]))
         end
     end
 end
@@ -151,13 +155,9 @@ function get_visualization_data(sim::AVBDCore.SimulationState)
     stress_data = zeros(FLOAT, n_bodies, 6)
 
     active_bonds = [b for b in sim.bond_constraints if !b.is_broken]
-    bond_data = zeros(FLOAT, length(active_bonds), 4)
+    bond_data = zeros(FLOAT, length(sim.bond_constraints), 8)
 
-    for (i, bond) in enumerate(active_bonds)
-        if !bond.rest_initialized
-            AVBDConstraints.initialize!(bond)
-        end
-
+    for bond in active_bonds
         bA = bond.bodyA
         bB = bond.bodyB
 
@@ -191,20 +191,32 @@ function get_visualization_data(sim::AVBDCore.SimulationState)
         volB = bB.size[1] * bB.size[2] * bB.size[3]
         _acc_stress!(stress_data, bB.id + 1, rB, -F_world, volB)
 
+    end
+
+    for (i, bond) in enumerate(sim.bond_constraints)
+        bA = bond.bodyA
+        bB = bond.bodyB
+
         rest_len = max(abs(bond.rest[1]), 1e-12)
         strain_n = bond.C[1] / rest_len
         strain_t1 = bond.C[2] / rest_len
         strain_t2 = bond.C[3] / rest_len
         eff_strain = sqrt(strain_n^2 + strain_t1^2 + strain_t2^2)
 
-        bond.current_eff_strain = eff_strain
-        bond.max_eff_strain = max(bond.max_eff_strain, eff_strain)
+        damage_val = bond.is_broken ? 1.0 : clamp(bond.damage, 0.0, 1.0)
+        k_eff_n = bond.is_broken ? 0.0 : bond.k_eff[1]
+        k_eff_t1 = bond.is_broken ? 0.0 : bond.k_eff[2]
+        k_eff_t2 = bond.is_broken ? 0.0 : bond.k_eff[3]
 
         # Bond metadata
         bond_data[i, 1] = Float64(bA.id)
         bond_data[i, 2] = Float64(bB.id)
         bond_data[i, 3] = eff_strain
         bond_data[i, 4] = bond.max_eff_strain
+        bond_data[i, 5] = damage_val
+        bond_data[i, 6] = k_eff_n
+        bond_data[i, 7] = k_eff_t1
+        bond_data[i, 8] = k_eff_t2
     end
     return stress_data, bond_data
 end
