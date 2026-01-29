@@ -180,9 +180,7 @@ mutable struct BondConstraint
     max_committed_strain::Float64 # CCM calls this lambda, but switched for 'strain' to avoid confusion
 
     # Solver values
-    k_tension::Vec3
-    k_compression::Vec3
-    damp_val::Float64
+    k_eff::Vec3
 
     # Material config/values
     stiffness::Vec3 # base material stiffness (E) will NOT be damaged, use for compression
@@ -236,10 +234,13 @@ mutable struct BondConstraint
         max_break_steps = 10
         viscosity = 0.0
 
-        new(bA, bB, pA, pB, n_loc, t1_loc, t2_loc, zeros_Vec3, zeros_J, zeros_J,
+        new(bA, bB,
+            pA, pB, n_loc, t1_loc, t2_loc,
+            zeros_Vec3, zeros_J, zeros_J,
             lambda, penalty_k, fracture,
-            zeros_Vec3, false, false, false, 0.0, 0.0, 0.0, 0.0, stiff, stiff,
-            damp_val, stiff, kmin, kmax, fmin, fmax, limits,
+            zeros_Vec3, false, false, false, 0.0,
+            0.0, 0.0, 0.0, stiff,
+            stiff, kmin, kmax, fmin, fmax, limits,
             break_counter, max_break_steps, viscosity, zeros_Vec3)
     end
 end
@@ -272,19 +273,9 @@ function initialize!(con::BondConstraint) #TODO do I put in the body list here? 
     if !con.rest_initialized
         con.rest = @SVector [dot(n_curr, dp), dot(t1_curr, dp), dot(t2_curr, dp)]
         con.rest_initialized = true
-        con.k_tension = con.stiffness * (1.0 - con.damage)
-        con.k_compression = con.stiffness
 
         # Previous con
         con.C_prev = @SVector zeros(3)
-    end
-
-    if con.is_broken
-        con.k_tension = @SVector zeros(3)
-        con.k_compression = con.stiffness # Ensure compression is ready
-    else
-        con.k_tension = con.stiffness * (1.0 - con.damage)
-        con.k_compression = con.stiffness
     end
 
     # Build jacobians
@@ -320,7 +311,7 @@ function eval_bond(con::BondConstraint)
 
     con.C = @SVector [c1, c2, c3]
 
-    con.penalty_k = get_effective_stiffness(con)
+    con.k_eff = get_effective_stiffness(con)
 
 end
 
@@ -396,7 +387,6 @@ function update_bond_state!(con::BondConstraint, dt::Float64)
         if con.damage >= (1.0 - 1e-6)
             con.is_broken = true
             con.damage = 1.0
-            con.k_tension = @SVector zeros(3)
         end
 
     end
@@ -437,6 +427,11 @@ end
     bond.is_broken && return @SVector zeros(3)
 
     d_factor = max(0.0, 1.0 - bond.damage)
+
+    if bond.damage >= 0.95
+        bond.is_broken = true
+        return @SVector zeros(3)
+    end
 
     k_n = (bond.C[1] > 0) ? (bond.stiffness[1] * d_factor) : bond.stiffness[1]
 

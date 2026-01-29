@@ -186,17 +186,18 @@ function warm_start!(sim::SimulationState)
 
         initialize!(con)
 
+        # MUST CLAMP TO Material stiffness!!
+
         con.penalty_k = clamp.(con.penalty_k .* sim.gamma, con.k_min, con.k_max)
 
         if !sim.stabilize
             con.lambda = con.lambda .* (sim.alpha * sim.gamma)
         end
 
+        k_eff = get_effective_stiffness(con)
         pk = con.penalty_k
         for r in 1:3
-            if !isinf(con.stiffness[r])
-                pk = setindex(pk, min(pk[r], con.stiffness[r]), r)
-            end
+            pk = setindex(pk, min(pk[r], k_eff[r]), r)
         end
         con.penalty_k = pk
 
@@ -320,7 +321,6 @@ function dual_update!(sim::SimulationState, alpha::Float64)
 
         con.is_broken && continue
 
-
         eval_bond(con)
 
         # Check maximum violation of bonds
@@ -336,10 +336,12 @@ function dual_update!(sim::SimulationState, alpha::Float64)
             lam = setindex(lam, lam_r, r)
 
             if abs(lam_r) >= con.fracture[r]
-                con.is_broken = true
-                con.penalty_k = @SVector zeros(3)
-                con.lambda = @SVector zeros(3)
-                break
+                con.damage += 0.1
+
+                # con.is_broken = true
+                # con.penalty_k = @SVector zeros(3)
+                # con.lambda = @SVector zeros(3)
+                # break
             end
 
             if lam_r > con.f_min[r] && lam_r < con.f_max[r]
