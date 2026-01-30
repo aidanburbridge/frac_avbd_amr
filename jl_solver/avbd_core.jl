@@ -339,9 +339,12 @@ function dual_update!(sim::SimulationState, alpha::Float64)
             lam = setindex(lam, lam_r, r)
 
             if abs(lam_r) >= con.fracture[r]
-                d = abs(sigma) - abs(lam_r)
-                con.damage += d
-
+                # d = abs(sigma) - abs(lam_r)
+                # con.damage += d
+                con.is_broken = true
+                con.penalty_k = @SVector zeros(3)
+                con.lambda = @SVector zeros(3)
+                break
             end
 
             if lam_r > con.f_min[r] && lam_r < con.f_max[r]

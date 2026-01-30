@@ -12,7 +12,7 @@ from util.simulate import SimulationSetup
 
 STL_PATH = r"C:\Users\aidan\Documents\TUM\Thesis\ISO 20753 Type A1 v1.stl"
 LENGTH = 0.170
-VOXEL_RES = 5000
+VOXEL_RES = 1000
 
 # Shared solver params
 DT_PHYSICS = 1/4000
