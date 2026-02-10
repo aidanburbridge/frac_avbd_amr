@@ -86,7 +86,13 @@ def _json_default(obj):
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
-def _save_metadata(run_dir: Path, setup: SimulationSetup, args: argparse.Namespace, total_steps: int):
+def _save_metadata(
+    run_dir: Path,
+    setup: SimulationSetup,
+    args: argparse.Namespace,
+    total_steps: int,
+    solve_time_s: float | None = None,
+):
     voxel_count = len(setup.bodies) if setup.bodies else 0
     bond_count = len(setup.constraints) if setup.constraints else 0
 
@@ -102,6 +108,8 @@ def _save_metadata(run_dir: Path, setup: SimulationSetup, args: argparse.Namespa
         "friction": setup.friction,
         "total_steps": total_steps,
     }
+    if solve_time_s is not None:
+        system_data["solve_time_s"] = solve_time_s
 
     solver_params = dict(setup.python_solver_params or {})
     user_metadata = dict(getattr(setup, "metadata", None) or {})
@@ -255,21 +263,23 @@ def main():
     
     print(f"--- Running {args.test} in {run_dir} ---")
 
-    # 2. Configure headless run and save metadata
+    # 2. Configure headless run
     steps = setup.headless_steps or 1000
     kwargs = setup.headless_kwargs or {}
 
-    _save_metadata(run_dir, setup, args, total_steps=steps)
-
     # 3. Run Simulation
     solver = build_solver(setup, solver_type=args.solver)
-    
+
+    start_time = time.perf_counter()
     run_headless(
         solver, 
         num_steps=steps, 
         export_dir=str(raw_dir), 
         **kwargs
     )
+    solve_time_s = time.perf_counter() - start_time
+
+    _save_metadata(run_dir, setup, args, total_steps=steps, solve_time_s=solve_time_s)
 
     # 4. Export
     convert_results(run_dir)

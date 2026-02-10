@@ -26,11 +26,20 @@ function init_system(
     iters::Int;
     friction::FLOAT=0.5,
     sizes::Union{Matrix{FLOAT},Nothing}=nothing,
-    assembly_ids::Union{Vector{Int},Nothing}=nothing
+    assembly_ids::Union{Vector{Int},Nothing}=nothing,
+    active=nothing, # TODO do I really need to pass these, could initialize active in julia solver based on level
+    level=nothing,
+    parent_list=nothing,
+    children_start=nothing,
+    children_count=nothing,
+    max_ref_level=nothing,
 )
     # Create the SimulationState object
     # This object stays in Julia memory
-    sim = AVBDCore.init_simulation(pos, vel, masses, bond_data, dt, gravity, iters; friction=friction, sizes=sizes, assembly_ids=assembly_ids)
+    sim = AVBDCore.init_simulation(pos, vel, masses, bond_data, dt, gravity, iters;
+        friction=friction, sizes=sizes, assembly_ids=assembly_ids,
+        active=active, level=level, parent_list=parent_list, children_start=children_start, children_count=children_count,
+        max_ref_level=max_ref_level)
     return sim
 end
 
@@ -69,9 +78,14 @@ function write_frame(sim::AVBDCore.SimulationState, filename::String)
 
     open(filename, "w") do io
 
-        # Number of bodies and bonds
-        n_bodies = length(sim.bodies)
+        # Active bodies are sourced from sim.active_body_ids (precomputed in solver)
+        active_body_indices = sim.active_body_ids
+
+        # Visualization data (active-only, indices already remapped)
         stress_data, bond_data = get_visualization_data(sim)
+
+        # Number of bodies and bonds (active only)
+        n_bodies = length(active_body_indices)
         n_bonds = size(bond_data, 1)
 
         write(io, Int32(n_bodies))
@@ -81,7 +95,8 @@ function write_frame(sim::AVBDCore.SimulationState, filename::String)
         write(io, Float32(sim.dt))
 
         # Body positional data + per-body stress (68 bytes per body)
-        for (i, b) in enumerate(sim.bodies)
+        for (local_idx, body_idx) in enumerate(active_body_indices)
+            b = sim.bodies[body_idx]
             # Position
             write(io, Float32(b.pos[1]))
             write(io, Float32(b.pos[2]))
@@ -102,12 +117,12 @@ function write_frame(sim::AVBDCore.SimulationState, filename::String)
             write(io, Int32(b.assembly_id))
 
             # Symmetric stress tensor (xx, yy, zz, xy, yz, zx)
-            write(io, Float32(stress_data[i, 1]))
-            write(io, Float32(stress_data[i, 2]))
-            write(io, Float32(stress_data[i, 3]))
-            write(io, Float32(stress_data[i, 4]))
-            write(io, Float32(stress_data[i, 5]))
-            write(io, Float32(stress_data[i, 6]))
+            write(io, Float32(stress_data[local_idx, 1]))
+            write(io, Float32(stress_data[local_idx, 2]))
+            write(io, Float32(stress_data[local_idx, 3]))
+            write(io, Float32(stress_data[local_idx, 4]))
+            write(io, Float32(stress_data[local_idx, 5]))
+            write(io, Float32(stress_data[local_idx, 6]))
         end
 
         # Bond data (strain/damage/stiffness)
@@ -150,14 +165,43 @@ function write_energy_csv(sim::AVBDCore.SimulationState, filename::String, frame
 end
 
 function get_visualization_data(sim::AVBDCore.SimulationState)
-    n_bodies = length(sim.bodies)
+    # Active bodies are sourced from sim.active_body_ids (precomputed in solver)
+    active_body_indices = sim.active_body_ids
+
+    # Map global body id -> local active index (1-based) for stress and bond remapping
+    id_to_local = fill(0, length(sim.bodies))
+    for (local_idx, body_idx) in enumerate(active_body_indices)
+        body_id = sim.bodies[body_idx].id
+        id_to_local[body_id + 1] = local_idx
+    end
+
     # Need to create stress tensor - symmetric
-    stress_data = zeros(FLOAT, n_bodies, 6)
+    stress_data = zeros(FLOAT, length(active_body_indices), 6)
 
-    active_bonds = [b for b in sim.bond_constraints if !b.is_broken]
-    bond_data = zeros(FLOAT, length(sim.bond_constraints), 8)
+    # Active bonds: unbroken, active, and both endpoints active
+    active_bond_count = 0
+    for bond in sim.bond_constraints
+        bond.is_broken && continue
+        bond.is_active || continue
+        a_idx = bond.bodyA.id + 1
+        b_idx = bond.bodyB.id + 1
+        if sim.active[a_idx] && sim.active[b_idx]
+            active_bond_count += 1
+        end
+    end
 
-    for bond in active_bonds
+    bond_data = zeros(FLOAT, active_bond_count, 8)
+
+    bond_out_idx = 0
+    for bond in sim.bond_constraints
+        bond.is_broken && continue
+        bond.is_active || continue
+        a_idx = bond.bodyA.id + 1
+        b_idx = bond.bodyB.id + 1
+        if !(sim.active[a_idx] && sim.active[b_idx])
+            continue
+        end
+        bond_out_idx += 1
         bA = bond.bodyA
         bB = bond.bodyB
 
@@ -185,15 +229,27 @@ function get_visualization_data(sim::AVBDCore.SimulationState)
         # stress calculation
         rA = pA - bA.pos
         volA = bA.size[1] * bA.size[2] * bA.size[3]
-        _acc_stress!(stress_data, bA.id + 1, rA, F_world, volA)
+        local_a = id_to_local[bA.id + 1]
+        _acc_stress!(stress_data, local_a, rA, F_world, volA)
 
         rB = pB - bB.pos
         volB = bB.size[1] * bB.size[2] * bB.size[3]
-        _acc_stress!(stress_data, bB.id + 1, rB, -F_world, volB)
+        local_b = id_to_local[bB.id + 1]
+        _acc_stress!(stress_data, local_b, rB, -F_world, volB)
 
     end
 
-    for (i, bond) in enumerate(sim.bond_constraints)
+    # Reuse the same active-bond pass to emit metadata
+    bond_out_idx = 0
+    for bond in sim.bond_constraints
+        bond.is_broken && continue
+        bond.is_active || continue
+        a_idx = bond.bodyA.id + 1
+        b_idx = bond.bodyB.id + 1
+        if !(sim.active[a_idx] && sim.active[b_idx])
+            continue
+        end
+        bond_out_idx += 1
         bA = bond.bodyA
         bB = bond.bodyB
 
@@ -209,14 +265,14 @@ function get_visualization_data(sim::AVBDCore.SimulationState)
         k_eff_t2 = bond.is_broken ? 0.0 : bond.k_eff[3]
 
         # Bond metadata
-        bond_data[i, 1] = Float64(bA.id)
-        bond_data[i, 2] = Float64(bB.id)
-        bond_data[i, 3] = eff_strain
-        bond_data[i, 4] = bond.max_eff_strain
-        bond_data[i, 5] = damage_val
-        bond_data[i, 6] = k_eff_n
-        bond_data[i, 7] = k_eff_t1
-        bond_data[i, 8] = k_eff_t2
+        bond_data[bond_out_idx, 1] = Float64(id_to_local[bA.id + 1] - 1)
+        bond_data[bond_out_idx, 2] = Float64(id_to_local[bB.id + 1] - 1)
+        bond_data[bond_out_idx, 3] = eff_strain
+        bond_data[bond_out_idx, 4] = bond.max_eff_strain
+        bond_data[bond_out_idx, 5] = damage_val
+        bond_data[bond_out_idx, 6] = k_eff_n
+        bond_data[bond_out_idx, 7] = k_eff_t1
+        bond_data[bond_out_idx, 8] = k_eff_t2
     end
     return stress_data, bond_data
 end

@@ -8,7 +8,7 @@ include("maths.jl")
 using .Maths: Vec3, Mat3, Quat, quat_to_rotmat
 
 export Body, Contact, AABB, BroadPhaseState
-export update_rotation!, update_inv_inertia_world!, broad_phase!, sat_check, build_manifold!, get_collisions!, get_collisions
+export update_rotation!, update_inv_inertia_world!, broad_phase!, broad_phase_active!, sat_check, build_manifold!, get_collisions!, get_collisions, get_collisions_active
 
 # --- Constants ---
 const TOL_AXIS = 1e-12
@@ -42,6 +42,13 @@ mutable struct Body
     quat_inertia::Quat
     rot_mat::Mat3
 
+    # AMR 
+    is_active::Bool
+    level::Int
+    parent_id::Int
+    child_start::Int
+    child_count::Int
+
     function Body(id, asm_id, static, pos, quat, size, mass; vel=Vec3(0, 0, 0), ang_vel=Vec3(0, 0, 0))
         R = quat_to_rotmat(quat)
         m_val = static ? Inf : mass
@@ -58,9 +65,17 @@ mutable struct Body
 
         inv_world = static ? zero(Mat3) : R * diag3(inv_diag) * transpose(R)
 
+        # AMR DEFAULT values
+        active = true
+        level = 0
+        parent = -1
+        child_start = -1
+        child_count = 0
+
         new(id, asm_id, static, pos, quat, size, vel, ang_vel,
             m_val, inv_m, inertia_diag, inv_diag, inv_world,
-            pos, quat, pos, quat, pos, quat, R)
+            pos, quat, pos, quat, pos, quat, R,
+            active, level, parent, child_start, child_count)
     end
 end
 
@@ -216,6 +231,68 @@ function broad_phase!(state::BroadPhaseState, bodies::Vector{Body})
                 if y_overlap && z_overlap
                     pair_count += 1
                     state.potential_pairs[pair_count] = (idx, other_idx)
+                end
+            end
+            active_count += 1
+            active[active_count] = idx
+        else
+            for j in 1:active_count
+                if active[j] == idx
+                    active[j] = active[active_count]
+                    active_count -= 1
+                    break
+                end
+            end
+        end
+    end
+
+    state.pair_count = pair_count
+    return pair_count
+end
+
+function broad_phase_active!(state::BroadPhaseState, bodies::Vector{Body}, active_ids::Vector{Int})
+    n = length(active_ids)
+    state.pair_count = 0
+    if n < 2
+        return 0
+    end
+
+    ensure_capacity!(state, n)
+
+    aabbs = state.aabbs
+    endpoints = state.endpoints
+
+    @threads for i in 1:n
+        bi = active_ids[i]
+        aabbs[i] = get_aabb(bodies[bi])
+        endpoints[2i-1] = Endpoint(aabbs[i].min[1], true, i)
+        endpoints[2i] = Endpoint(aabbs[i].max[1], false, i)
+    end
+
+    sort!(view(endpoints, 1:2n), by=e -> e.val)
+
+    active = state.active
+    active_count = 0
+    pair_count = 0
+
+    @inbounds for k in 1:(2n)
+        ep = endpoints[k]
+        idx = ep.body_idx
+        if ep.is_min
+            for j in 1:active_count
+                other_idx = active[j]
+                b1 = bodies[active_ids[idx]]
+                b2 = bodies[active_ids[other_idx]]
+                if b1.assembly_id >= 0 && b2.assembly_id >= 0 && b1.assembly_id == b2.assembly_id
+                    continue
+                end
+                aabb1 = aabbs[idx]
+                aabb2 = aabbs[other_idx]
+                y_overlap = (aabb1.min[2] <= aabb2.max[2]) && (aabb2.min[2] <= aabb1.max[2])
+                z_overlap = (aabb1.min[3] <= aabb2.max[3]) && (aabb2.min[3] <= aabb1.max[3])
+                if y_overlap && z_overlap
+                    pair_count += 1
+                    state.potential_pairs[pair_count] = (active_ids[idx], active_ids[other_idx])
                 end
             end
             active_count += 1
@@ -544,11 +621,38 @@ function get_collisions!(state::BroadPhaseState, bodies::Vector{Body}, contacts:
     return count
 end
 
+function get_collisions_active!(state::BroadPhaseState, bodies::Vector{Body}, active_ids::Vector{Int}, contacts::Vector{Contact})
+    pair_count = broad_phase_active!(state, bodies, active_ids)
+    count = 0
+    for i in 1:pair_count
+        idxA, idxB = state.potential_pairs[i]
+        bA = bodies[idxA]
+        bB = bodies[idxB]
+        if bA.is_static && bB.is_static
+            continue
+        end
+
+        axis, overlap = sat_check(bA, bB)
+        if axis !== nothing
+            count = build_manifold!(bA, bB, axis, overlap, contacts, count)
+        end
+    end
+    return count
+end
+
 function get_collisions(bodies::Vector{Body})
     n = length(bodies)
     state = BroadPhaseState(n)
     contacts = Vector{Contact}(undef, max(4 * n, 16))
     count = get_collisions!(state, bodies, contacts)
+    return contacts[1:count]
+end
+
+function get_collisions_active(bodies::Vector{Body}, active_ids::Vector{Int})
+    n = length(active_ids)
+    state = BroadPhaseState(n)
+    contacts = Vector{Contact}(undef, max(4 * n, 16))
+    count = get_collisions_active!(state, bodies, active_ids, contacts)
     return contacts[1:count]
 end
 

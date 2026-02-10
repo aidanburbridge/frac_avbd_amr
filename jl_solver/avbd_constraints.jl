@@ -198,6 +198,10 @@ mutable struct BondConstraint
     viscosity::Float64
     C_prev::Vec3
 
+    # AMR 
+    is_active::Bool
+
+
     function BondConstraint(bA::Body, bB::Body, pA::Vec3, pB::Vec3, n_world::Vec3, kn::Float64, kt::Float64, area::Float64, tensile::Float64, Gc::Float64, damp_val::Float64=0.0)
 
         d_n0 = (tensile * area) / kn
@@ -234,6 +238,9 @@ mutable struct BondConstraint
         max_break_steps = 10
         viscosity = 0.0
 
+        # AMR
+        active = true
+
         new(bA, bB,
             pA, pB, n_loc, t1_loc, t2_loc,
             zeros_Vec3, zeros_J, zeros_J,
@@ -241,7 +248,7 @@ mutable struct BondConstraint
             zeros_Vec3, false, false, false, 0.0,
             0.0, 0.0, 0.0, stiff,
             stiff, kmin, kmax, fmin, fmax, limits,
-            break_counter, max_break_steps, viscosity, zeros_Vec3)
+            break_counter, max_break_steps, viscosity, zeros_Vec3, active)
     end
 end
 

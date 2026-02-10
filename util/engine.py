@@ -26,6 +26,10 @@ class SimulationSetup:
     friction: float = 0.3
     sync_bodies: bool = False  # Default to False for speed in headless mode
     python_solver_params: Dict[str, Any] = field(default_factory=dict)
+
+    # AMR
+    amr_params: Dict[str, Any] = field(default_factory=dict)
+
     metadata: Dict[str, Any] = field(default_factory=dict)
     
     # Headless run config
@@ -57,6 +61,7 @@ def build_solver(setup: SimulationSetup, solver_type: str = "hybrid"):
             gravity=setup.gravity,
             friction=setup.friction,
             sync_bodies=setup.sync_bodies,
+            amr = setup.amr_params,
         )
         return solver
 

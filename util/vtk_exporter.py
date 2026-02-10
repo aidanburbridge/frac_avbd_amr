@@ -8,7 +8,7 @@ class VTKExporter:
         self.save_dir.mkdir(parents=True, exist_ok=True)
         self.frame_count = 0
 
-    def export(self, bodies: list, stress_tensor: np.ndarray, bond_data: np.ndarray):
+    def export(self, bodies: list, stress_tensor: np.ndarray, bond_data: np.ndarray, active_mask=None):
         """
         Export the current state to VTK files for ParaView.
         
@@ -16,8 +16,36 @@ class VTKExporter:
             bodies: List of python Body objects (must be synced with current positions)
             stress_tensor: (N, 6) [XX, YY, ZZ, XY, YZ, ZX] from solver
             bond_data: (M, 4..8) [IdxA, IdxB, Strain, MaxStrain, (Damage | Tensile, Compression[, Damage] | Damage, K_eff[3])] from solver
+            active_mask: Optional boolean mask (len == bodies) to filter to active bodies and
+                remap bond indices to the filtered list.
         """
-        
+
+        if active_mask is not None:
+            mask = np.asarray(active_mask, dtype=bool)
+            if mask.shape[0] != len(bodies):
+                raise ValueError("active_mask must match the length of bodies.")
+
+            if not np.all(mask):
+                active_idx = np.flatnonzero(mask)
+                bodies = [bodies[i] for i in active_idx]
+
+                stress_tensor = np.asarray(stress_tensor)
+                if stress_tensor.ndim == 2 and stress_tensor.shape[0] == mask.shape[0]:
+                    stress_tensor = stress_tensor[active_idx]
+
+                bond_arr = np.asarray(bond_data)
+                if bond_arr.ndim == 2 and bond_arr.shape[0] > 0:
+                    index_map = {old: new for new, old in enumerate(active_idx)}
+                    remapped = []
+                    for row in bond_arr:
+                        idxA, idxB = int(row[0]), int(row[1])
+                        if idxA in index_map and idxB in index_map:
+                            new_row = row.copy()
+                            new_row[0] = index_map[idxA]
+                            new_row[1] = index_map[idxB]
+                            remapped.append(new_row)
+                    bond_data = np.array(remapped, dtype=bond_arr.dtype) if remapped else np.zeros((0, bond_arr.shape[1]), dtype=bond_arr.dtype)
+
         # --- 1. Export Voxels (Unstructured Grid) ---
         points = []
         cells = []

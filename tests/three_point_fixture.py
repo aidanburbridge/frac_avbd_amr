@@ -1,8 +1,3 @@
-"""
-ISO 20753 tensile test with dog bone STL.
-
-"""
-
 import geometry.voxelizer as vox
 import geometry.octree as oct
 import numpy as np
@@ -10,7 +5,7 @@ import numpy as np
 from util.voxel_assembly import VoxelAssembly
 from util.simulate import SimulationSetup
 
-STL_PATH = r"C:\Users\aidan\Documents\TUM\Thesis\ISO 20753 Type A1 v1.stl"
+STL_PATH = r"C:\Users\aidan\Documents\TUM\Thesis\three_point_fixture.stl"
 LENGTH = 0.170
 VOXEL_RES = 100
 
@@ -68,8 +63,7 @@ def build_setup()-> SimulationSetup:
     cfl = calc_cfl(DENSITY, E_MODULUS, NU, phys_h) #2.9330379512351167e-06
 
     # Build full hierarchy potential and lists for refinement
-    max_ref_level = 3
-    all_nodes, key_to_id, parent_list, child_start, child_count = oct.build_full_hierarchy(coarse_occ=occ, max_level=max_ref_level)
+    all_nodes, key_to_id, parent_list, child_start, child_count = oct.build_full_hierarchy(coarse_occ=occ, max_level=3)
 
     print(f"DEBUG: Octree generated {len(all_nodes)} leaves")
 
@@ -124,8 +118,7 @@ def build_setup()-> SimulationSetup:
         "child_start": np.asarray(child_start, dtype=np.int32),
         "child_count": np.asarray(child_count, np.int32),
         "level": np.asarray([lf.level for lf in all_nodes], dtype=np.int8),
-        "active": np.asarray(active_list, dtype=np.int32),
-        "max_ref_level": max_ref_level,
+        "active": np.asarray(active_list, dtype=np.int32)
     }
 
     return SimulationSetup(

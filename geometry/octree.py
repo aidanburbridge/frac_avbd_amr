@@ -25,7 +25,7 @@ class Leaf:
         h = h_base / sub_division
         return origin + np.array([(self.i + 0.5) * h, (self.j + 0.5) * h, (self.k + 0.5) * h], dtype=float)
 
-    def key(self) -> tuple[int, int, int]:
+    def key(self) -> tuple[int, int, int, int]:
         return (self.level, self.i, self.j, self.k)
     
 ### --------------------  Constants -------------------- ###
@@ -246,12 +246,20 @@ def instantiate_boxes_from_tree(
     zero_vel = (0.0, 0.0, 0.0)            # zero linear & angular velocity
     quat_id = (1.0, 0.0, 0.0, 0.0)        # identity quaternion
 
+    active_mask: list[bool] = []
+
     iterator = trange(len(leaves), desc="Building box_3D primitives") if show_progress else range(len(leaves))
     for leaf_id in iterator:
         lf = leaves[leaf_id]
 
         h = lf.size(h_base)                       # cube edge length
         pos = tuple(lf.center(origin, h_base))    # cube center
+
+        # If highest level parent, set active in mask list, else don't
+        if lf.level == 0:
+            active_mask.append(True)
+        else:
+            active_mask.append(False)
 
         b = box_3D(
             trans_pos=pos,
@@ -267,7 +275,7 @@ def instantiate_boxes_from_tree(
         bodies.append(b)
         leaf_key_to_body_index[lf.key()] = len(bodies) - 1
 
-    return bodies, leaf_key_to_body_index
+    return bodies, leaf_key_to_body_index, active_mask
 
 ### -------------------- Constraint building functions -------------------- ###
 
@@ -280,7 +288,8 @@ def build_constraints_from_tree(
         tensile_strength: float,
         fracture_toughness: float,
         damping_val: float = 0.0,
-        damping: float | None = None) -> list[BondData]:
+        damping: float | None = None,
+        same_level_only: bool = True) -> list[BondData]:
     """
     Creates a list of bonds between adjacent octree voxels using D3Q26 connectivity.
     Axial neighbors get 4 Gauss-point bonds; edge/corner neighbors get single
@@ -341,8 +350,13 @@ def build_constraints_from_tree(
                     if dist_sq_int not in (1, 2, 3):
                         continue
 
-                    # Check neighbor existence (robust across levels)
-                    nb_leaf = _find_leaf_neighbor(level_maps, L, i+ni, j+nj, k+nk)
+                    # TODO, make logic for bonds between intermediary levels, skip for now...
+                    if same_level_only:
+                        nb_leaf = level_maps.get(L, {}).get((i+ni, j+nj, k+nk))
+                    else:
+                        # Check neighbor existence (robust across levels)
+                        nb_leaf = _find_leaf_neighbor(level_maps, L, i+ni, j+nj, k+nk)
+
                     if nb_leaf is None:
                         continue
 
@@ -354,6 +368,7 @@ def build_constraints_from_tree(
                     pair_id = (a_idx, b_idx) if a_idx < b_idx else (b_idx, a_idx)
                     if pair_id in seen_pairs:
                         continue
+
                     seen_pairs.add(pair_id)
 
                     body_B = bodies[b_idx]
@@ -447,3 +462,63 @@ def build_constraints_from_tree(
         b.assembly_id = int(dsu.find_root(idx))
 
     return bonds
+
+# TODO make it so octree refinement to NOT include children who's centers are outside STL mesh
+# Make dumb version first then add this check later.
+
+def build_full_hierarchy(coarse_occ: np.ndarray, max_level: int):
+
+    # Instantiate empty return
+    nodes: list[Leaf] = []      # list of leaves
+    key_to_id: dict[tuple[int, int, int, int], int] = {} # (level, i, j, k) -> node_id
+    parent: list[int] = []      # node id to parent id; -1 if coarsest level (root)
+    child_count: list[int]= []  # node id to number of children, 0 or 8
+    child_start: list[int] = [] # node id to child start in node list, -1 if none
+
+    nx, ny, nz = coarse_occ.shape
+
+    def _key(L: int, i: int, j: int, k: int) -> tuple[int, int, int, int]:
+        return (L, i, j, k)
+    
+    def add_node(leaf: Leaf, parent_id: int) -> int:
+        node_id = len(nodes)
+        nodes.append(leaf)
+        key_to_id[_key(leaf.level, leaf.i, leaf.j, leaf.k)] = node_id
+        parent.append(parent_id)
+        child_start.append(-1) # default -1, aka no children
+        child_count.append(0) # default 0 children
+        return node_id
+    
+    def add_children(parent_id: int):
+        """Recursive function to add children"""
+        p = nodes[parent_id]
+        if p.level >= max_level:
+            # Jump out @ max level, no more refinement
+            return
+        
+        Lc = p.level +1
+        i0, j0, k0 = 2*p.i, 2*p.j, 2*p.k
+
+        start = len(nodes) # store contiguosly - parent, children, grandchildren etc.
+        for di in (0,1):
+            for dj in (0,1):
+                for dk in (0,1):
+                    c_leaf = Leaf(level=Lc, i=i0+di, j=j0+dj, k=k0+dk)
+                    add_node(c_leaf, parent_id)
+        
+        child_start[parent_id] = start
+        child_count[parent_id] = 8 # This will be changed when the STL inside or not check is done 
+
+        for cid in range(start, start + 8):
+            add_children(cid)
+
+    for i in range(nx):
+        for j in range(ny):
+            for k in range(nz):
+                if bool(coarse_occ[i,j,k]):
+                    root = Leaf(level=0,i=i,j=j,k=k)
+                    root_id = add_node(root, parent_id=-1)
+                    add_children(root_id)
+
+    return nodes, key_to_id, parent, child_start, child_count
+

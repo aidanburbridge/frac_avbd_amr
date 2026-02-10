@@ -68,6 +68,7 @@ class HybridSolver:
         bonds: Optional[np.ndarray] = None,
         sizes: Optional[np.ndarray] = None,
         assembly_ids: Optional[np.ndarray] = None,
+        amr: Optional[dict] = None,
     ):
         """
         Create or reset the Julia SimulationState in-place.
@@ -94,6 +95,21 @@ class HybridSolver:
             kwargs["sizes"] = np.ascontiguousarray(sizes, dtype=np.float64)
         if assembly_ids is not None:
             kwargs["assembly_ids"] = np.ascontiguousarray(assembly_ids, dtype=np.int64)
+
+        if amr:
+            kwargs["parent_list"] = np.ascontiguousarray(amr["parent_list"], dtype=np.int32)
+            if "children_start" in amr:
+                kwargs["children_start"] = np.ascontiguousarray(amr["children_start"], dtype=np.int32)
+            else:
+                kwargs["children_start"] = np.ascontiguousarray(amr["child_start"], dtype=np.int32)
+            if "children_count" in amr:
+                kwargs["children_count"] = np.ascontiguousarray(amr["children_count"], dtype=np.int32)
+            else:
+                kwargs["children_count"] = np.ascontiguousarray(amr["child_count"], dtype=np.int32)
+            kwargs["level"] = np.ascontiguousarray(amr["level"], dtype=np.int32)
+            kwargs["active"] = np.ascontiguousarray(amr["active"], dtype=np.bool_)
+            if "max_ref_level" in amr:
+                kwargs["max_ref_level"] = int(amr["max_ref_level"])
 
         # Ensure Julia sees plain Array{T} rather than PyArray wrappers (juliacall requires this).
         def _to_julia_array(x):
@@ -237,6 +253,7 @@ class HybridWorld:
         friction: float = 0.5,
         project: Optional[str] = None,
         sync_bodies: bool = True,
+        amr = None,
     ) -> None:
         self.dt = float(dt)
         self.iterations = int(iterations)
@@ -246,15 +263,17 @@ class HybridWorld:
         self.constraints = list(constraints)
         self.contact_constraints = []  # placeholder for visualizer API
         self._sync_bodies = bool(sync_bodies)
+        self._amr = amr or {}
 
         self._solver = HybridSolver(self.dt, self.iterations, self.gravity, friction=self.friction, project=project)
 
         pos, vel, masses, sizes, assembly_ids, idx_map = _body_arrays(self.bodies)
         bonds = _bond_rows(self.constraints, idx_map)
-        self._solver.initialize(pos, vel, masses, bonds=bonds, sizes=sizes, assembly_ids=assembly_ids)
+        self._solver.initialize(pos, vel, masses, bonds=bonds, sizes=sizes, assembly_ids=assembly_ids, amr=self._amr)
 
         if self._sync_bodies:
             self._update_bodies(self._solver.get_state())
+
 
     def _update_bodies(self, pose_arr: np.ndarray) -> None:
         for i, pose in enumerate(pose_arr):
