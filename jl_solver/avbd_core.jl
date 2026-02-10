@@ -35,8 +35,9 @@ mutable struct SimulationState
     bond_constraints::Vector{BondConstraint}
     contact_constraints::Vector{ContactConstraint}
 
-    bond_incidence::Vector{Vector{Int}} # contain id not constraint itself
+    bond_incidence::Vector{Vector{Int}} # active bond ids per body
     contact_incidence::Vector{Vector{Int}}
+    bond_incidence_all::Vector{Vector{Int}} # all bond ids per body (static)
 
     energy_log::EnergyLog
 
@@ -57,7 +58,9 @@ mutable struct SimulationState
 
     # AMR
     active_body_ids::Vector{Int}
-    active_bond_ids::Vector{Int} # Optional 
+    active_bond_ids::Vector{Int} # active bonds (rebuilt from active bodies)
+    bond_mark::Vector{Int} # epoch marks for active bond rebuild
+    bond_mark_epoch::Int
 
     # Hierarchy lists
     # TODO there must be a way to make this somehow more compact - do I really need all of these lists?
@@ -79,6 +82,7 @@ mutable struct SimulationState
         # Initialize constraint maps
         bond_map = Vector{Vector{Int}}()
         contact_map = Vector{Vector{Int}}()
+        bond_map_all = Vector{Vector{Int}}()
 
         manifolds = Dict{Tuple{Int,Int},Manifold}()
 
@@ -88,6 +92,8 @@ mutable struct SimulationState
         active = falses(length(bodies)) # default all inactive OR set later
         active_body_ids = Int[]
         active_bond_ids = Int[]
+        bond_mark = Int[]
+        bond_mark_epoch = 0
         level = fill(0, length(bodies))
         parent_list = Int[]
         children_start = Int[]
@@ -96,9 +102,9 @@ mutable struct SimulationState
         # TODO must pass max_level in here
         max_level = 1 # default 1 for now but should come from octree
 
-        new(bodies, manifolds, bond_cons, contact_cons, bond_map, contact_map, e_log,
+        new(bodies, manifolds, bond_cons, contact_cons, bond_map, contact_map, bond_map_all, e_log,
             dt, grav, mu, iters, Float64(b), Float64(g), Float64(al), stabil,
-            active_body_ids, active_bond_ids,
+            active_body_ids, active_bond_ids, bond_mark, bond_mark_epoch,
             active, level, parent_list, children_start, children_count,
             max_level)
 
@@ -216,25 +222,40 @@ function warm_start!(sim::SimulationState)
         empty!(sim.contact_incidence[i])
     end
 
-    # Loop bonds first
+    # Loop bonds first (active bodies only)
     empty!(sim.active_bond_ids)
-    for con_id in eachindex(sim.bond_constraints)
-        con = sim.bond_constraints[con_id]
 
-        # Skip broken bonds
-        con.is_broken && continue
+    if length(sim.bond_mark) != length(sim.bond_constraints)
+        sim.bond_mark = zeros(Int, length(sim.bond_constraints))
+        sim.bond_mark_epoch = 0
+    end
 
-        if !con.is_active
-            continue
-        end
+    sim.bond_mark_epoch += 1
+    if sim.bond_mark_epoch == typemax(Int)
+        fill!(sim.bond_mark, 0)
+        sim.bond_mark_epoch = 1
+    end
 
-        a_idx = con.bodyA.id + 1
-        b_idx = con.bodyB.id + 1
-        if !sim.active[a_idx] || !sim.active[b_idx]
-            continue
-        end
+    for b_idx in sim.active_body_ids
+        for con_id in sim.bond_incidence_all[b_idx]
+            if sim.bond_mark[con_id] == sim.bond_mark_epoch
+                continue
+            end
+            sim.bond_mark[con_id] = sim.bond_mark_epoch
 
-        initialize!(con)
+            con = sim.bond_constraints[con_id]
+
+            # Skip broken/inactive bonds
+            con.is_broken && continue
+            con.is_active || continue
+
+            a_idx = con.bodyA.id + 1
+            b_idx = con.bodyB.id + 1
+            if !sim.active[a_idx] || !sim.active[b_idx]
+                continue
+            end
+
+            initialize!(con)
 
         # MUST CLAMP TO Material stiffness!!
 
@@ -251,10 +272,11 @@ function warm_start!(sim::SimulationState)
         end
         con.penalty_k = pk
 
-        # Build incidence_map (endpoints already verified active)
-        push!(sim.bond_incidence[a_idx], con_id)
-        push!(sim.bond_incidence[b_idx], con_id)
-        push!(sim.active_bond_ids, con_id)
+            # Build incidence_map (endpoints already verified active)
+            push!(sim.bond_incidence[a_idx], con_id)
+            push!(sim.bond_incidence[b_idx], con_id)
+            push!(sim.active_bond_ids, con_id)
+        end
     end
 
     # Loop contacts
@@ -628,6 +650,24 @@ function init_simulation(
         end
     end
 
+    # Build static bond incidence (all bonds per body) and mark buffer
+    resize!(sim.bond_incidence_all, n_bodies)
+    for i in 1:n_bodies
+        if !isassigned(sim.bond_incidence_all, i)
+            sim.bond_incidence_all[i] = Int[]
+        else
+            empty!(sim.bond_incidence_all[i])
+        end
+    end
+    for (con_id, con) in enumerate(sim.bond_constraints)
+        a_idx = con.bodyA.id + 1
+        b_idx = con.bodyB.id + 1
+        push!(sim.bond_incidence_all[a_idx], con_id)
+        push!(sim.bond_incidence_all[b_idx], con_id)
+    end
+    sim.bond_mark = zeros(Int, length(sim.bond_constraints))
+    sim.bond_mark_epoch = 0
+
     return sim
 end
 
@@ -760,7 +800,8 @@ function step_simulation!(sim::SimulationState)
         alpha_log = alpha_stabil
     end
 
-    log_step!(sim.energy_log, sim.bodies, sim.bond_constraints, sim.contact_constraints, alpha_log)
+    log_step!(sim.energy_log, sim.bodies, sim.bond_constraints, sim.contact_constraints, alpha_log,
+        sim.active_body_ids, sim.active_bond_ids)
 
 end
 

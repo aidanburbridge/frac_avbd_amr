@@ -148,7 +148,8 @@ function write_energy_csv(sim::AVBDCore.SimulationState, filename::String, frame
                 AVBDConstraints.initialize!(bond)
             end
         end
-        AVBDCore.log_step!(log, sim.bodies, sim.bond_constraints, sim.contact_constraints, sim.alpha)
+        AVBDCore.log_step!(log, sim.bodies, sim.bond_constraints, sim.contact_constraints, sim.alpha,
+            sim.active_body_ids, sim.active_bond_ids)
     end
 
     if isempty(log.kinetic)

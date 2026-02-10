@@ -41,6 +41,25 @@ function compute_kinetic(bodies::Vector{Body})
     return T
 end
 
+function compute_kinetic(bodies::Vector{Body}, active_ids::Vector{Int})
+    T = 0.0
+    for idx in active_ids
+        b = bodies[idx]
+        # Skip static bodies
+        if b.is_static || b.inv_mass == 0.0
+            continue
+        end
+
+        # Translational
+        v_sq = dot(b.vel, b.vel)
+        T += 0.5 * b.mass * v_sq
+
+        # Rotational
+        T += 0.5 * dot(b.ang_vel, b.inertia_diag .* b.ang_vel)
+    end
+    return T
+end
+
 function compute_bond_potential(bonds::Vector{BondConstraint})
     U = 0.0
     for bond in bonds
@@ -61,6 +80,32 @@ function compute_bond_potential(bonds::Vector{BondConstraint})
 
         # in_tension = c_n > 0
         # k_mat = in_tension ? (bond.stiffness * (1.0 - bond.damage)) : bond.stiffness
+
+        k_eff = get_effective_stiffness(bond)
+
+        U += 0.5 * (k_eff[1] * C_local[1]^2 + k_eff[2] * C_local[2]^2 + k_eff[3] * C_local[3]^2)
+    end
+    return U
+end
+
+function compute_bond_potential(bonds::Vector{BondConstraint}, active_bond_ids::Vector{Int})
+    U = 0.0
+    for con_id in active_bond_ids
+        bond = bonds[con_id]
+        if bond.is_broken
+            continue
+        end
+
+        rA = rotate_vec(bond.pA_local, bond.bodyA.quat)
+        rB = rotate_vec(bond.pB_local, bond.bodyB.quat)
+        dp = (bond.bodyA.pos + rA) - (bond.bodyB.pos + rB)
+
+        rotA = quat_to_rotmat(bond.bodyA.quat)
+        c_n = dot(rotA * bond.n_local, dp) - bond.rest[1]
+        c_t1 = dot(rotA * bond.t1_local, dp) - bond.rest[2]
+        c_t2 = dot(rotA * bond.t2_local, dp) - bond.rest[3]
+
+        C_local = @SVector [c_n, c_t1, c_t2]
 
         k_eff = get_effective_stiffness(bond)
 
@@ -102,6 +147,25 @@ function log_step!(energy_log::EnergyLog, bodies::Vector{Body}, bonds::Vector{Bo
     push!(energy_log.mech_energy, E_mech)
     push!(energy_log.accounted_energy, E_accounted)
 
+end
+
+function log_step!(energy_log::EnergyLog, bodies::Vector{Body}, bonds::Vector{BondConstraint}, contacts::Vector{ContactConstraint},
+    alpha::Float64, active_body_ids::Vector{Int}, active_bond_ids::Vector{Int})
+
+    T = compute_kinetic(bodies, active_body_ids)
+    U_bond = compute_bond_potential(bonds, active_bond_ids)
+    U_contact = compute_contact_potential(contacts, alpha)
+    W_frac = energy_log.accumulated_fracture_work
+
+    E_mech = T + U_bond + U_contact
+    E_accounted = E_mech + W_frac
+
+    push!(energy_log.kinetic, T)
+    push!(energy_log.bond_potential, U_bond)
+    push!(energy_log.contact_potential, U_contact)
+    push!(energy_log.fracture_work, W_frac)
+    push!(energy_log.mech_energy, E_mech)
+    push!(energy_log.accounted_energy, E_accounted)
 end
 
 end # module
