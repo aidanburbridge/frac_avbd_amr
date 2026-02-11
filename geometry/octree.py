@@ -222,7 +222,8 @@ def instantiate_boxes_from_tree(
         density: float = 1.0,
         penalty_gain: float = 1e5,
         static: bool = False,
-        show_progress: bool = True):
+        show_progress: bool = True,
+        valid_mask: Optional[list[bool]] = None):
     """
     Instantiate a box_3D primitive for each octree leaf.
     
@@ -256,7 +257,8 @@ def instantiate_boxes_from_tree(
         pos = tuple(lf.center(origin, h_base))    # cube center
 
         # If highest level parent, set active in mask list, else don't
-        if lf.level == 0:
+        is_valid = True if valid_mask is None else bool(valid_mask[leaf_id])
+        if lf.level == 0 and is_valid:
             active_mask.append(True)
         else:
             active_mask.append(False)
@@ -289,7 +291,8 @@ def build_constraints_from_tree(
         fracture_toughness: float,
         damping_val: float = 0.0,
         damping: float | None = None,
-        same_level_only: bool = True) -> list[BondData]:
+        same_level_only: bool = True,
+        valid_mask: Optional[list[bool]] = None) -> list[BondData]:
     """
     Creates a list of bonds between adjacent octree voxels using D3Q26 connectivity.
     Axial neighbors get 4 Gauss-point bonds; edge/corner neighbors get single
@@ -306,7 +309,11 @@ def build_constraints_from_tree(
     bonds: list[BondData] = []
     seen_pairs = set()  # track (min_id, max_id) to prevent duplicates
     
-    occ = set(lf.key() for lf in leaves)
+    if valid_mask is None:
+        valid_keys = set(lf.key() for lf in leaves)
+    else:
+        valid_keys = set(lf.key() for lf, ok in zip(leaves, valid_mask) if ok)
+    occ = valid_keys
     dsu = DSU(len(bodies))
     level_maps = _index_by_level(leaves)
 
@@ -321,7 +328,9 @@ def build_constraints_from_tree(
     # Convert fracture toughness (K_Ic) to fracture energy Gc
     fracture_energy = (fracture_toughness ** 2 * (1.0 - nu ** 2)) / E
 
-    for lf in leaves:
+    for lf_idx, lf in enumerate(leaves):
+        if valid_mask is not None and not valid_mask[lf_idx]:
+            continue
         a_idx = leaf_key_to_body_index.get(lf.key())
         if a_idx is None: 
             continue
@@ -358,6 +367,8 @@ def build_constraints_from_tree(
                         nb_leaf = _find_leaf_neighbor(level_maps, L, i+ni, j+nj, k+nk)
 
                     if nb_leaf is None:
+                        continue
+                    if nb_leaf.key() not in valid_keys:
                         continue
 
                     b_idx = leaf_key_to_body_index.get(nb_leaf.key())
@@ -466,7 +477,12 @@ def build_constraints_from_tree(
 # TODO make it so octree refinement to NOT include children who's centers are outside STL mesh
 # Make dumb version first then add this check later.
 
-def build_full_hierarchy(coarse_occ: np.ndarray, max_level: int):
+def build_full_hierarchy(
+        coarse_occ: np.ndarray,
+        max_level: int,
+        origin: Optional[np.ndarray] = None,
+        h_base: Optional[float] = None,
+        contains_fn=None):
 
     # Instantiate empty return
     nodes: list[Leaf] = []      # list of leaves
@@ -474,19 +490,21 @@ def build_full_hierarchy(coarse_occ: np.ndarray, max_level: int):
     parent: list[int] = []      # node id to parent id; -1 if coarsest level (root)
     child_count: list[int]= []  # node id to number of children, 0 or 8
     child_start: list[int] = [] # node id to child start in node list, -1 if none
+    valid_mask: list[bool] = [] # True if cell center is inside STL (or no contains_fn provided)
 
     nx, ny, nz = coarse_occ.shape
 
     def _key(L: int, i: int, j: int, k: int) -> tuple[int, int, int, int]:
         return (L, i, j, k)
     
-    def add_node(leaf: Leaf, parent_id: int) -> int:
+    def add_node(leaf: Leaf, parent_id: int, is_valid: bool = True) -> int:
         node_id = len(nodes)
         nodes.append(leaf)
         key_to_id[_key(leaf.level, leaf.i, leaf.j, leaf.k)] = node_id
         parent.append(parent_id)
         child_start.append(-1) # default -1, aka no children
         child_count.append(0) # default 0 children
+        valid_mask.append(bool(is_valid))
         return node_id
     
     def add_children(parent_id: int):
@@ -500,25 +518,37 @@ def build_full_hierarchy(coarse_occ: np.ndarray, max_level: int):
         i0, j0, k0 = 2*p.i, 2*p.j, 2*p.k
 
         start = len(nodes) # store contiguosly - parent, children, grandchildren etc.
+        child_leaves: list[Leaf] = []
         for di in (0,1):
             for dj in (0,1):
                 for dk in (0,1):
-                    c_leaf = Leaf(level=Lc, i=i0+di, j=j0+dj, k=k0+dk)
-                    add_node(c_leaf, parent_id)
-        
-        child_start[parent_id] = start
-        child_count[parent_id] = 8 # This will be changed when the STL inside or not check is done 
+                    child_leaves.append(Leaf(level=Lc, i=i0+di, j=j0+dj, k=k0+dk))
 
-        for cid in range(start, start + 8):
-            add_children(cid)
+        if contains_fn is not None:
+            if origin is None or h_base is None:
+                raise ValueError("origin and h_base must be provided when contains_fn is used.")
+            centers = np.array([lf.center(origin, h_base) for lf in child_leaves], dtype=float)
+            inside = np.asarray(contains_fn(centers), dtype=bool).reshape(-1)
+        else:
+            inside = np.ones((len(child_leaves),), dtype=bool)
+
+        for lf, ok in zip(child_leaves, inside):
+            add_node(lf, parent_id, is_valid=bool(ok))
+
+        child_start[parent_id] = start
+        child_count[parent_id] = 8 # keep ordering/size consistent even if some are invalid
+
+        for offset, ok in enumerate(inside):
+            if ok:
+                add_children(start + offset)
 
     for i in range(nx):
         for j in range(ny):
             for k in range(nz):
                 if bool(coarse_occ[i,j,k]):
                     root = Leaf(level=0,i=i,j=j,k=k)
-                    root_id = add_node(root, parent_id=-1)
+                    root_id = add_node(root, parent_id=-1, is_valid=True)
                     add_children(root_id)
 
-    return nodes, key_to_id, parent, child_start, child_count
+    return nodes, key_to_id, parent, child_start, child_count, valid_mask
 

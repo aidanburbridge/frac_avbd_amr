@@ -63,7 +63,17 @@ def build_setup()-> SimulationSetup:
     cfl = calc_cfl(DENSITY, E_MODULUS, NU, phys_h) #2.9330379512351167e-06
 
     # Build full hierarchy potential and lists for refinement
-    all_nodes, key_to_id, parent_list, child_start, child_count = oct.build_full_hierarchy(coarse_occ=occ, max_level=3)
+    max_ref_level = 3
+    def _contains_fn(pts: np.ndarray) -> np.ndarray:
+        return vox._contains_points_chunked(stlvox.mesh, np.asarray(pts, dtype=float), chunk=200_000, show_progress=False)
+
+    all_nodes, key_to_id, parent_list, child_start, child_count, valid_mask = oct.build_full_hierarchy(
+        coarse_occ=occ,
+        max_level=max_ref_level,
+        origin=raw_origin,
+        h_base=raw_h,
+        contains_fn=_contains_fn,
+    )
 
     print(f"DEBUG: Octree generated {len(all_nodes)} leaves")
 
@@ -74,7 +84,8 @@ def build_setup()-> SimulationSetup:
         phys_h,
         density=DENSITY,
         penalty_gain=PENALTY_GAIN,
-        static=False
+        static=False,
+        valid_mask=valid_mask,
     )
 
     print(f"DEBUG: Instantiated {len(boxes)} bodies")
@@ -89,6 +100,7 @@ def build_setup()-> SimulationSetup:
         tensile_strength=TENSILE_STRENGTH,
         fracture_toughness=FRACTURE_TOUGHNESS,
         damping_val=visco_val,
+        valid_mask=valid_mask,
     )
 
     print(f"Number of beam bonds: {len(beam_bonds)}")
@@ -118,7 +130,9 @@ def build_setup()-> SimulationSetup:
         "child_start": np.asarray(child_start, dtype=np.int32),
         "child_count": np.asarray(child_count, np.int32),
         "level": np.asarray([lf.level for lf in all_nodes], dtype=np.int8),
-        "active": np.asarray(active_list, dtype=np.int32)
+        "active": np.asarray(active_list, dtype=np.int32),
+        "valid_mask": np.asarray(valid_mask, dtype=np.bool_),
+        "max_ref_level": max_ref_level,
     }
 
     return SimulationSetup(

@@ -23,7 +23,7 @@ GRAV = 0.0
 FRICTION = 0.0
 PULL_RATE = 0.002
 #PULL_RATE = 10
-GRIP_DISTANCE = 0.02
+GRIP_DISTANCE = 0.01
 #GRIP_DISTANCE = 20
 E_MODULUS = 2e9
 NU = 0.3
@@ -31,7 +31,7 @@ TENSILE_STRENGTH = 80e5
 FRACTURE_TOUGHNESS = 5e4
 DENSITY = 1150.0
 PENALTY_GAIN = 1e6
-STEPS = 2000
+STEPS = 30
 ZETA_DAMP = 0.1
 
 PYTHON_SOLVER_PARAMS = {
@@ -68,8 +68,18 @@ def build_setup()-> SimulationSetup:
     cfl = calc_cfl(DENSITY, E_MODULUS, NU, phys_h) #2.9330379512351167e-06
 
     # Build full hierarchy potential and lists for refinement
-    max_ref_level = 3
-    all_nodes, key_to_id, parent_list, child_start, child_count = oct.build_full_hierarchy(coarse_occ=occ, max_level=max_ref_level)
+    max_ref_level = 2
+    # TODO is this the cleanest way to do STL geometry check - what is the 200_000 referring to?
+    def _contains_fn(pts: np.ndarray) -> np.ndarray:
+        return vox._contains_points_chunked(stlvox.mesh, np.asarray(pts, dtype=float), chunk=200_000, show_progress=False)
+
+    all_nodes, key_to_id, parent_list, child_start, child_count, valid_mask = oct.build_full_hierarchy(
+        coarse_occ=occ,
+        max_level=max_ref_level,
+        origin=raw_origin,
+        h_base=raw_h,
+        contains_fn=_contains_fn,
+    )
 
     print(f"DEBUG: Octree generated {len(all_nodes)} leaves")
 
@@ -80,7 +90,8 @@ def build_setup()-> SimulationSetup:
         phys_h,
         density=DENSITY,
         penalty_gain=PENALTY_GAIN,
-        static=False
+        static=False,
+        valid_mask=valid_mask,
     )
 
     print(f"DEBUG: Instantiated {len(boxes)} bodies")
@@ -95,6 +106,7 @@ def build_setup()-> SimulationSetup:
         tensile_strength=TENSILE_STRENGTH,
         fracture_toughness=FRACTURE_TOUGHNESS,
         damping_val=visco_val,
+        valid_mask=valid_mask,
     )
 
     print(f"Number of beam bonds: {len(beam_bonds)}")
@@ -125,6 +137,7 @@ def build_setup()-> SimulationSetup:
         "child_count": np.asarray(child_count, np.int32),
         "level": np.asarray([lf.level for lf in all_nodes], dtype=np.int8),
         "active": np.asarray(active_list, dtype=np.int32),
+        "valid_mask": np.asarray(valid_mask, dtype=np.bool_),
         "max_ref_level": max_ref_level,
     }
 

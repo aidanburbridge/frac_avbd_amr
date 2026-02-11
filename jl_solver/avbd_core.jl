@@ -20,6 +20,9 @@ export SimulationState, init_simulation, step_simulation!
 # - early out for fast convergences
 
 const EARLY_OUT_TOL = 1e-5 # TODO have this as a parameter as a fraction of h (voxel size) ~0.1% 
+
+# Debug: force refinement of all active bodies (set false to disable)
+const DEBUG_REFINE_ALL = false
 # Change iters to these values - lock them in as same 
 # const INNER_ITERS = 5
 # const MAX_DAMAGE_PASSES = 5
@@ -65,6 +68,7 @@ mutable struct SimulationState
     # Hierarchy lists
     # TODO there must be a way to make this somehow more compact - do I really need all of these lists?
     active::BitVector # TODO make this the single source of truth
+    valid_mask::BitVector
     level::Vector{Int} # TODO - why not make level the single source of truth and use -1 if not active?
     parent_list::Vector{Int}
     children_start::Vector{Int}
@@ -90,6 +94,7 @@ mutable struct SimulationState
 
         # AMR
         active = falses(length(bodies)) # default all inactive OR set later
+        valid_mask = trues(length(bodies))
         active_body_ids = Int[]
         active_bond_ids = Int[]
         bond_mark = Int[]
@@ -105,7 +110,7 @@ mutable struct SimulationState
         new(bodies, manifolds, bond_cons, contact_cons, bond_map, contact_map, bond_map_all, e_log,
             dt, grav, mu, iters, Float64(b), Float64(g), Float64(al), stabil,
             active_body_ids, active_bond_ids, bond_mark, bond_mark_epoch,
-            active, level, parent_list, children_start, children_count,
+            active, valid_mask, level, parent_list, children_start, children_count,
             max_level)
 
     end
@@ -257,20 +262,20 @@ function warm_start!(sim::SimulationState)
 
             initialize!(con)
 
-        # MUST CLAMP TO Material stiffness!!
+            # MUST CLAMP TO Material stiffness!!
 
-        con.penalty_k = clamp.(con.penalty_k .* sim.gamma, con.k_min, con.k_max)
+            con.penalty_k = clamp.(con.penalty_k .* sim.gamma, con.k_min, con.k_max)
 
-        if !sim.stabilize
-            con.lambda = con.lambda .* (sim.alpha * sim.gamma)
-        end
+            if !sim.stabilize
+                con.lambda = con.lambda .* (sim.alpha * sim.gamma)
+            end
 
-        k_eff = get_effective_stiffness(con)
-        pk = con.penalty_k
-        for r in 1:3
-            pk = setindex(pk, min(pk[r], k_eff[r]), r)
-        end
-        con.penalty_k = pk
+            k_eff = get_effective_stiffness(con)
+            pk = con.penalty_k
+            for r in 1:3
+                pk = setindex(pk, min(pk[r], k_eff[r]), r)
+            end
+            con.penalty_k = pk
 
             # Build incidence_map (endpoints already verified active)
             push!(sim.bond_incidence[a_idx], con_id)
@@ -547,6 +552,7 @@ function init_simulation(
     sizes::Union{AbstractMatrix,Nothing}=nothing,
     assembly_ids::Union{Vector{Int},Nothing}=nothing,
     active::Union{AbstractVector{Bool},Nothing}=nothing,
+    valid_mask::Union{AbstractVector{Bool},Nothing}=nothing,
     level::Union{AbstractVector{<:Integer},Nothing}=nothing,
     parent_list::Union{AbstractVector{<:Integer},Nothing}=nothing,
     children_start::Union{AbstractVector{<:Integer},Nothing}=nothing,
@@ -582,6 +588,11 @@ function init_simulation(
         sim.active = BitVector(active)
     else
         sim.active = falses(n_bodies)
+    end
+    if valid_mask !== nothing
+        sim.valid_mask = BitVector(valid_mask)
+    else
+        sim.valid_mask = trues(n_bodies)
     end
     rebuild_active_body_ids!(sim)
 
@@ -774,7 +785,11 @@ function step_simulation!(sim::SimulationState)
 
     end
 
-    # TODO do refinement step here
+    if DEBUG_REFINE_ALL
+        refine_list = copy(sim.active_body_ids)
+    end
+
+    # # TODO do refinement step here
     if !isempty(refine_list)
         refine_list = unique(refine_list)
         for v in refine_list
@@ -817,8 +832,6 @@ function refine_voxel!(sim::SimulationState, parent_idx::Int, params=nothing)
 
     # TODO here active_body_ids is changed -> nowhere else 
     parent = sim.bodies[parent_idx]
-    # Deactivate parent
-    set_active!(sim, parent_idx, false)
 
     node_id = parent.id # 0-based id to index AMR lists
     start0 = sim.children_start[node_id+1]
@@ -828,10 +841,30 @@ function refine_voxel!(sim::SimulationState, parent_idx::Int, params=nothing)
         return
     end
 
+    has_valid_child = false
+    for child_slot in 1:count
+        child_node = start0 + (child_slot - 1)
+        child_idx = child_node + 1
+        if sim.valid_mask[child_idx]
+            has_valid_child = true
+            break
+        end
+    end
+    if !has_valid_child
+        return
+    end
+
+    # Deactivate parent
+    set_active!(sim, parent_idx, false)
+
     for child_slot in 1:count
         child_node = start0 + (child_slot - 1)  # child node id (0-based)
         child_idx = child_node + 1              # body index (1-based)
         child = sim.bodies[child_idx]
+
+        if !sim.valid_mask[child_idx]
+            continue
+        end
 
         set_active!(sim, child_idx, true)
 

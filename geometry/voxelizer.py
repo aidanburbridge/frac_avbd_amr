@@ -273,14 +273,20 @@ class STLVoxelizer:
 
 
 ### -------------------- Extra Helpers -------------------- ###
-def _contains_points_chunked(mesh, pts: np.ndarray, chunk: int = 200_000) -> np.ndarray:
+def _contains_points_chunked(mesh, pts: np.ndarray, chunk: int = 200_000, show_progress: bool = True) -> np.ndarray:
     """
-    Fast + memory-safe mesh.contains with a progress bar.
+    Fast + memory-safe mesh.contains with optional progress.
     pts: (N,3) float array
     """
     N = len(pts)
     out = np.empty(N, dtype=bool)
-    for s in trange(0, N, chunk, desc="Ray tests (mesh.contains)"):
+
+    if show_progress:
+        iterator = trange(0, N, chunk, desc="Ray tests (mesh.contains)")
+    else:
+        iterator = range(0, N, chunk)
+
+    for s in iterator:
         e = min(s + chunk, N)
         out[s:e] = mesh.contains(pts[s:e])
     return out

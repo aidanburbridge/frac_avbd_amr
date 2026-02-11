@@ -28,6 +28,7 @@ function init_system(
     sizes::Union{Matrix{FLOAT},Nothing}=nothing,
     assembly_ids::Union{Vector{Int},Nothing}=nothing,
     active=nothing, # TODO do I really need to pass these, could initialize active in julia solver based on level
+    valid_mask=nothing,
     level=nothing,
     parent_list=nothing,
     children_start=nothing,
@@ -38,7 +39,7 @@ function init_system(
     # This object stays in Julia memory
     sim = AVBDCore.init_simulation(pos, vel, masses, bond_data, dt, gravity, iters;
         friction=friction, sizes=sizes, assembly_ids=assembly_ids,
-        active=active, level=level, parent_list=parent_list, children_start=children_start, children_count=children_count,
+        active=active, valid_mask=valid_mask, level=level, parent_list=parent_list, children_start=children_start, children_count=children_count,
         max_ref_level=max_ref_level)
     return sim
 end

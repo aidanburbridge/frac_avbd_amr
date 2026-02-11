@@ -108,6 +108,8 @@ class HybridSolver:
                 kwargs["children_count"] = np.ascontiguousarray(amr["child_count"], dtype=np.int32)
             kwargs["level"] = np.ascontiguousarray(amr["level"], dtype=np.int32)
             kwargs["active"] = np.ascontiguousarray(amr["active"], dtype=np.bool_)
+            if "valid_mask" in amr:
+                kwargs["valid_mask"] = np.ascontiguousarray(amr["valid_mask"], dtype=np.bool_)
             if "max_ref_level" in amr:
                 kwargs["max_ref_level"] = int(amr["max_ref_level"])
 
