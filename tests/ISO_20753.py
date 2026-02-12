@@ -21,7 +21,7 @@ STEPS_PER = int(DT_RENDER / DT_PHYSICS)
 ITER = 50
 GRAV = 0.0
 FRICTION = 0.0
-PULL_RATE = 0.002
+PULL_RATE = 0.005
 #PULL_RATE = 10
 GRIP_DISTANCE = 0.01
 #GRIP_DISTANCE = 20
@@ -31,7 +31,7 @@ TENSILE_STRENGTH = 80e5
 FRACTURE_TOUGHNESS = 5e4
 DENSITY = 1150.0
 PENALTY_GAIN = 1e6
-STEPS = 30
+STEPS = 1000
 ZETA_DAMP = 0.1
 
 PYTHON_SOLVER_PARAMS = {
@@ -68,7 +68,7 @@ def build_setup()-> SimulationSetup:
     cfl = calc_cfl(DENSITY, E_MODULUS, NU, phys_h) #2.9330379512351167e-06
 
     # Build full hierarchy potential and lists for refinement
-    max_ref_level = 2
+    max_ref_level = 1
     # TODO is this the cleanest way to do STL geometry check - what is the 200_000 referring to?
     def _contains_fn(pts: np.ndarray) -> np.ndarray:
         return vox._contains_points_chunked(stlvox.mesh, np.asarray(pts, dtype=float), chunk=200_000, show_progress=False)
@@ -97,7 +97,7 @@ def build_setup()-> SimulationSetup:
     print(f"DEBUG: Instantiated {len(boxes)} bodies")
 
     # Build bond constraints between voxels
-    beam_bonds = oct.build_constraints_from_tree(
+    beam_bonds = oct.build_contsraints_from_hierarchy(
         all_nodes,
         boxes,
         mapping,
@@ -107,7 +107,20 @@ def build_setup()-> SimulationSetup:
         fracture_toughness=FRACTURE_TOUGHNESS,
         damping_val=visco_val,
         valid_mask=valid_mask,
+        max_level=max_ref_level,
     )
+
+    # beam_bonds = oct.build_constraints_from_tree(
+    #     all_nodes,
+    #     boxes,
+    #     mapping,
+    #     E=E_MODULUS,
+    #     nu=NU,
+    #     tensile_strength=TENSILE_STRENGTH,
+    #     fracture_toughness=FRACTURE_TOUGHNESS,
+    #     damping_val=visco_val,
+    #     valid_mask=valid_mask,
+    # )
 
     print(f"Number of beam bonds: {len(beam_bonds)}")
     print(f"The damping value used for this sim: {visco_val}")
@@ -126,6 +139,7 @@ def build_setup()-> SimulationSetup:
     dog_bone.set_boundary_velocity(
         faces = ["top"],
         velocity = [0.0, 0.0, PULL_RATE],
+        #velocity = [0.0, PULL_RATE, 0.0],
         distance = GRIP_DISTANCE,
         debug=True
     )

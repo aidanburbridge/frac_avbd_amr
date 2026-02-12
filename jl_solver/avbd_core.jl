@@ -439,7 +439,7 @@ function dual_update!(sim::SimulationState, alpha::Float64)
             lam = setindex(lam, lam_r, r)
 
             # TODO change the reference critical value later to something with more grounding
-            ref_crit = con.fracture[r] * 0.8 #TODO replace with refine ratio!
+            ref_crit = con.fracture[r] * 0.5 #TODO replace with refine ratio!
 
             # TODO REFINEMENT CRITERIA
             if abs(lam_r) >= ref_crit
@@ -454,7 +454,7 @@ function dual_update!(sim::SimulationState, alpha::Float64)
 
             # TODO add refinement check before fracturing! -> do NOT allow fracture unless @ finest level
             # FRACTURE CRITERIA
-            if abs(lam_r) >= con.fracture[r]
+            if abs(lam_r) >= (con.fracture[r] * 10)
                 if (levelA >= sim.max_ref_level) && (levelB >= sim.max_ref_level)
                     # d = abs(sigma) - abs(lam_r)
                     # con.damage += d
@@ -917,15 +917,16 @@ end
 
 @inline function transfer_kinematics!(parent::Body, child::Body, dt::Float64; slot::Union{Int,Nothing}=nothing)
     # Compute child local offset in parent's rest frame (robust to missing children).
-    r_local = _local_offset(parent, child)
-    if r_local === nothing
-        if slot === nothing
-            r_local = Vec3(0.0, 0.0, 0.0)
-        else
-            r_local = _octant_local_offset(parent, slot)
-        end
+    # r_local = _local_offset(parent, child)
+    # if r_local === nothing
+    if slot === nothing
+        r_local = Vec3(0.0, 0.0, 0.0)
+    else
+        r_local = _octant_local_offset(parent, slot)
     end
+    # end
 
+    # r_world = rotate_vec(r_local, quat_inv(parent.quat))
     r_world = rotate_vec(r_local, parent.quat)
 
     # Rigid transfer

@@ -48,6 +48,15 @@ _DEF_NORMALS = np.array([
     [ 0, 0,-1],
     ], dtype=float)
 
+_FACE_DIRS = [
+    (1, 0, 0),   # +X
+    (-1, 0, 0),  # -X
+    (0, 1, 0),   # +Y
+    (0, -1, 0),  # -Y
+    (0, 0, 1),   # +Z
+    (0, 0, -1),  # -Z
+]
+
 ### -------------------- Octree Functions -------------------- ###
 
 def octree_from_occ(occ: np.ndarray, h_base: float = 1.0) -> tuple[list[Leaf], float]:
@@ -279,6 +288,86 @@ def instantiate_boxes_from_tree(
 
     return bodies, leaf_key_to_body_index, active_mask
 
+### ---------------------- Full Octree w/ Refinement ---------------------- ###
+
+def build_full_hierarchy(
+        coarse_occ: np.ndarray,
+        max_level: int,
+        origin: Optional[np.ndarray] = None,
+        h_base: Optional[float] = None,
+        contains_fn=None):
+
+    # Instantiate empty return
+    nodes: list[Leaf] = []      # list of leaves
+    key_to_id: dict[tuple[int, int, int, int], int] = {} # (level, i, j, k) -> node_id
+    parent: list[int] = []      # node id to parent id; -1 if coarsest level (root)
+    child_count: list[int]= []  # node id to number of children, 0 or 8
+    child_start: list[int] = [] # node id to child start in node list, -1 if none
+    valid_mask: list[bool] = [] # True if cell center is inside STL (or no contains_fn provided)
+
+    nx, ny, nz = coarse_occ.shape
+
+    def _key(L: int, i: int, j: int, k: int) -> tuple[int, int, int, int]:
+        return (L, i, j, k)
+    
+    def add_node(leaf: Leaf, parent_id: int, is_valid: bool = True) -> int:
+        node_id = len(nodes)
+        nodes.append(leaf)
+        key_to_id[_key(leaf.level, leaf.i, leaf.j, leaf.k)] = node_id
+        parent.append(parent_id)
+        child_start.append(-1) # default -1, aka no children
+        child_count.append(0) # default 0 children
+        valid_mask.append(bool(is_valid))
+        return node_id
+    
+    def add_children(parent_id: int):
+        """Recursive function to add children"""
+        p = nodes[parent_id]
+        if p.level >= max_level:
+            # Jump out @ max level, no more refinement
+            return
+        
+        Lc = p.level +1
+        i0, j0, k0 = 2*p.i, 2*p.j, 2*p.k
+
+        start = len(nodes) # store contiguosly - parent, children, grandchildren etc.
+        child_leaves: list[Leaf] = []
+        for di in (0,1):
+            for dj in (0,1):
+                for dk in (0,1):
+                    child_leaves.append(Leaf(level=Lc, i=i0+di, j=j0+dj, k=k0+dk))
+
+        if contains_fn is not None:
+            if origin is None or h_base is None:
+                raise ValueError("origin and h_base must be provided when contains_fn is used.")
+            centers = np.array([lf.center(origin, h_base) for lf in child_leaves], dtype=float)
+            inside = np.asarray(contains_fn(centers), dtype=bool).reshape(-1)
+        else:
+            inside = np.ones((len(child_leaves),), dtype=bool)
+
+        for lf, ok in zip(child_leaves, inside):
+            add_node(lf, parent_id, is_valid=bool(ok))
+
+        child_start[parent_id] = start
+        child_count[parent_id] = 8 # keep ordering/size consistent even if some are invalid
+
+        for offset, ok in enumerate(inside):
+            if ok:
+                add_children(start + offset)
+
+    for i in range(nx):
+        for j in range(ny):
+            for k in range(nz):
+                if bool(coarse_occ[i,j,k]):
+                    root = Leaf(level=0,i=i,j=j,k=k)
+                    root_id = add_node(root, parent_id=-1, is_valid=True)
+                    add_children(root_id)
+
+    return nodes, key_to_id, parent, child_start, child_count, valid_mask
+
+
+
+
 ### -------------------- Constraint building functions -------------------- ###
 
 def build_constraints_from_tree(
@@ -291,7 +380,6 @@ def build_constraints_from_tree(
         fracture_toughness: float,
         damping_val: float = 0.0,
         damping: float | None = None,
-        same_level_only: bool = True,
         valid_mask: Optional[list[bool]] = None) -> list[BondData]:
     """
     Creates a list of bonds between adjacent octree voxels using D3Q26 connectivity.
@@ -329,6 +417,8 @@ def build_constraints_from_tree(
     fracture_energy = (fracture_toughness ** 2 * (1.0 - nu ** 2)) / E
 
     for lf_idx, lf in enumerate(leaves):
+
+        # Check first if valid leaf
         if valid_mask is not None and not valid_mask[lf_idx]:
             continue
         a_idx = leaf_key_to_body_index.get(lf.key())
@@ -359,12 +449,8 @@ def build_constraints_from_tree(
                     if dist_sq_int not in (1, 2, 3):
                         continue
 
-                    # TODO, make logic for bonds between intermediary levels, skip for now...
-                    if same_level_only:
-                        nb_leaf = level_maps.get(L, {}).get((i+ni, j+nj, k+nk))
-                    else:
-                        # Check neighbor existence (robust across levels)
-                        nb_leaf = _find_leaf_neighbor(level_maps, L, i+ni, j+nj, k+nk)
+                    nb_leaf = level_maps.get(L, {}).get((i+ni, j+nj, k+nk))
+
 
                     if nb_leaf is None:
                         continue
@@ -474,81 +560,252 @@ def build_constraints_from_tree(
 
     return bonds
 
-# TODO make it so octree refinement to NOT include children who's centers are outside STL mesh
-# Make dumb version first then add this check later.
 
-def build_full_hierarchy(
-        coarse_occ: np.ndarray,
-        max_level: int,
-        origin: Optional[np.ndarray] = None,
-        h_base: Optional[float] = None,
-        contains_fn=None):
-
-    # Instantiate empty return
-    nodes: list[Leaf] = []      # list of leaves
-    key_to_id: dict[tuple[int, int, int, int], int] = {} # (level, i, j, k) -> node_id
-    parent: list[int] = []      # node id to parent id; -1 if coarsest level (root)
-    child_count: list[int]= []  # node id to number of children, 0 or 8
-    child_start: list[int] = [] # node id to child start in node list, -1 if none
-    valid_mask: list[bool] = [] # True if cell center is inside STL (or no contains_fn provided)
-
-    nx, ny, nz = coarse_occ.shape
-
-    def _key(L: int, i: int, j: int, k: int) -> tuple[int, int, int, int]:
-        return (L, i, j, k)
+def build_contsraints_from_hierarchy(
+        leaves: list[Leaf],
+        bodies: list[box_3D],
+        leaf_key_to_body_index: dict[tuple[int,int,int,int], int],
+        E: float,
+        nu: float,
+        tensile_strength: float,
+        fracture_toughness: float,
+        damping_val: float = 0.0,
+        valid_mask: Optional[list[bool]] = None,
+        max_level: Optional[int] = None) -> list[BondData]:
     
-    def add_node(leaf: Leaf, parent_id: int, is_valid: bool = True) -> int:
-        node_id = len(nodes)
-        nodes.append(leaf)
-        key_to_id[_key(leaf.level, leaf.i, leaf.j, leaf.k)] = node_id
-        parent.append(parent_id)
-        child_start.append(-1) # default -1, aka no children
-        child_count.append(0) # default 0 children
-        valid_mask.append(bool(is_valid))
-        return node_id
-    
-    def add_children(parent_id: int):
-        """Recursive function to add children"""
-        p = nodes[parent_id]
-        if p.level >= max_level:
-            # Jump out @ max level, no more refinement
-            return
+    """
+    for each leaf:
+        if invalid leaf:
+            continue
         
-        Lc = p.level +1
-        i0, j0, k0 = 2*p.i, 2*p.j, 2*p.k
+        # same level bonds
+        for neighbor:
+            build same level bond
 
-        start = len(nodes) # store contiguosly - parent, children, grandchildren etc.
-        child_leaves: list[Leaf] = []
-        for di in (0,1):
-            for dj in (0,1):
-                for dk in (0,1):
-                    child_leaves.append(Leaf(level=Lc, i=i0+di, j=j0+dj, k=k0+dk))
+        # intermediary bonds
+        if level.level < max_level # this leaf should have intermediary bonds to finer neighbors
+            get_fine_neighbors
+            for f_lf in finer_neighbors 
+                build bond (or build_intermediary bond)
 
-        if contains_fn is not None:
-            if origin is None or h_base is None:
-                raise ValueError("origin and h_base must be provided when contains_fn is used.")
-            centers = np.array([lf.center(origin, h_base) for lf in child_leaves], dtype=float)
-            inside = np.asarray(contains_fn(centers), dtype=bool).reshape(-1)
-        else:
-            inside = np.ones((len(child_leaves),), dtype=bool)
+        return bond_list
+    """
+    # Solve for material params TODO should I do this in like a solver setup script?
+    fracture_energy = (fracture_toughness ** 2 * (1.0 - nu ** 2)) / E
+    G = E / (2.0 * (1.0 + nu))
 
-        for lf, ok in zip(child_leaves, inside):
-            add_node(lf, parent_id, is_valid=bool(ok))
+    # TODO what if max_level doesn't agree with actual max - I suppose need single source of truth passed
+    if max_level is None:
+        max_level = max(lf.level for lf in leaves) if leaves else 0
 
-        child_start[parent_id] = start
-        child_count[parent_id] = 8 # keep ordering/size consistent even if some are invalid
+    level_maps = _index_by_level(leaves)
+    if valid_mask is None:
+        valid_mask = [True] * len(leaves)
 
-        for offset, ok in enumerate(inside):
-            if ok:
-                add_children(start + offset)
+    valid_keys = set(lf.key() for lf, ok in zip(leaves, valid_mask) if ok)
 
-    for i in range(nx):
-        for j in range(ny):
-            for k in range(nz):
-                if bool(coarse_occ[i,j,k]):
-                    root = Leaf(level=0,i=i,j=j,k=k)
-                    root_id = add_node(root, parent_id=-1, is_valid=True)
-                    add_children(root_id)
+    bonds: list[BondData] = []
+    seen_pairs = set()
+    dsu = DSU(len(bodies))
 
-    return nodes, key_to_id, parent, child_start, child_count, valid_mask
+    
+    ## ---------- Helpers in Contraint Building Function ---------- ##
+
+    # basic bond building function (used for same level & intermediary level bonds)
+    def _build_bond(idxA, idxB, pA, pB, normal, area, len):
+        """Build a single bond (1 axial/normal & 2 shear/tangent components)."""
+        k_n = E * area / max(len, 1e-12)
+        k_t = G * area / max(len, 1e-12)
+        return BondData(
+            idxA=idxA,
+            idxB=idxB,
+            pA_local=pA,
+            pB_local=pB,
+            normal=normal,
+            k_n=k_n,
+            k_t=k_t,
+            area=area,
+            tensile_strength=tensile_strength,
+            fracture_energy=fracture_energy,
+            damp_val=damping_val)
+    
+    def _build_intermediary_bonds(parent_leaf, parent_idx):
+        """Build the L to L+1 bonds between this leaf and neighboring finer cells."""
+
+        if parent_leaf.level >= max_level:
+            # Can't have bonds with smaller voxels -- it's already at the finest level 
+            return []
+        
+        body_A = bodies[parent_idx]
+        hA = 0.5 * np.asarray(body_A.size, dtype=float)
+        parent_center = body_A.get_center()
+
+        new_bonds = []
+
+        L, i, j, k = parent_leaf.level, parent_leaf.i, parent_leaf.j, parent_leaf.k
+
+        for face_dir in _FACE_DIRS:
+            # Neighbor leaf at same level
+            nb_leaf = level_maps.get(L, {}).get((i + face_dir[0], j + face_dir[1], k + face_dir[2]))
+            if nb_leaf is None:
+                continue
+
+            opp_face = (-face_dir[0], -face_dir[1], -face_dir[2])
+
+            # Loop over the 4 children on neighbor's face touching this parent
+            for di in (0,1):
+                for dj in (0,1):
+                    for dk in (0,1):
+
+                        # Child on neighbor face (L+1)
+                        fine_key = _child_at_face(nb_leaf, opp_face, di, dj, dk)
+                        if fine_key is None:
+                            continue
+                        fine_leaf = level_maps.get(L + 1, {}).get((fine_key[1], fine_key[2], fine_key[3]))
+                        if fine_leaf is None:
+                            continue
+                        if fine_leaf.key() not in valid_keys:
+                            continue
+
+                        child_idx = leaf_key_to_body_index.get(fine_leaf.key())
+                        if child_idx is None:
+                            continue
+
+                        # Avoid duplicates 
+                        pair_id = (parent_idx, child_idx) if parent_idx < child_idx else (child_idx, parent_idx)
+                        if pair_id in seen_pairs:
+                            continue
+                        seen_pairs.add(pair_id)
+
+                        body_B = bodies[child_idx]
+                        dsu.union(parent_idx, child_idx) # TODO why add this to the DSU? I thought DSU was just for grouping voxels belonging to the same assembly? would this not already happen in the same-level boinding?
+
+                        vec_sep = body_B.get_center() - parent_center
+                        axis_idx = int(np.argmax(np.abs(vec_sep))) # longest axis
+                        sgn = 1.0 if vec_sep[axis_idx] >= 0.0 else -1.0
+
+                        # Face area
+                        hB = 0.5 * np.asarray(body_B.size, dtype=float)
+                        # Get tangent axes
+                        t1i, t2i = [d for d in range(3) if d != axis_idx]
+                        area = (2.0 * hB[t1i]) * (2.0 * hB[t2i])
+                        length = hA[axis_idx] + hB[axis_idx]
+
+                        # Bond anchors
+                        pA_local = np.zeros(3)
+                        pB_local = np.zeros(3)
+                        pA_local[axis_idx] = sgn * hA[axis_idx]
+                        pB_local[axis_idx] = -sgn * hB[axis_idx]
+
+                        # Tangent offsets (apply to both sides)
+                        offset = body_B.get_center() - parent_center
+                        pA_local[t1i] = offset[t1i]
+                        pA_local[t2i] = offset[t2i]
+                        pB_local[t1i] = offset[t1i]
+                        pB_local[t2i] = offset[t2i]
+
+                        # Normals
+                        n_world = np.zeros(3)
+                        n_world[axis_idx] = sgn
+
+                        new_bonds.append(
+                            _build_bond(parent_idx, child_idx, pA_local, pB_local, n_world, area, length)
+                        )
+        return new_bonds
+
+
+    # TODO make this less UGLY if possible - gotta be a cleaner way to write this
+    def _child_at_face(parent_leaf, face_dir, di, dj, dk):
+        """Return the child adjacent to a given parent face & quadrant."""
+        L, i, j, k = parent_leaf.level, parent_leaf.i, parent_leaf.j, parent_leaf.k
+        Lf = L + 1
+
+        if face_dir == (1, 0, 0):     # +X
+            return (Lf, 2*i + 1, 2*j + dj, 2*k + dk)
+        if face_dir == (-1, 0, 0):    # -X
+            return (Lf, 2*i + 0, 2*j + dj, 2*k + dk)
+        if face_dir == (0, 1, 0):     # +Y
+            return (Lf, 2*i + di, 2*j + 1, 2*k + dk)
+        if face_dir == (0, -1, 0):    # -Y
+            return (Lf, 2*i + di, 2*j + 0, 2*k + dk)
+        if face_dir == (0, 0, 1):     # +Z
+            return (Lf, 2*i + di, 2*j + dj, 2*k + 1)
+        if face_dir == (0, 0, -1):    # -Z
+            return (Lf, 2*i + di, 2*j + dj, 2*k + 0)
+        return None
+
+    # ---------- MAIN LOOP ---------- #
+
+    for lf_idx, lf in enumerate(leaves):
+        if not valid_mask[lf_idx]:
+            continue
+
+        a_idx = leaf_key_to_body_index.get(lf.key())
+        if a_idx is None:
+            continue
+            
+        body_A = bodies[a_idx]
+
+        # Make same level bonds
+        L, i, j, k = lf.level, lf.i, lf.j, lf.k
+        for (di, dj, dk) in _FACE_DIRS:
+            nb_leaf = level_maps.get(L, {}).get((i + di, j + dj, k + dk))
+
+            # Check if neighbor leaf exists
+            if nb_leaf is None:
+                continue
+            if nb_leaf.key() not in valid_keys:
+                continue
+
+            b_idx = leaf_key_to_body_index.get(nb_leaf.key())
+            if b_idx is None:
+                continue
+
+            pair_id = (a_idx, b_idx) if a_idx < b_idx else (b_idx, a_idx)
+            if pair_id in seen_pairs:
+                continue
+            seen_pairs.add(pair_id)
+
+            body_B = bodies[b_idx]
+            dsu.union(a_idx, b_idx)
+
+            vec_sep = body_B.get_center() - body_A.get_center()
+            axis_idx = int(np.argmax(np.abs(vec_sep)))
+            sgn = 1.0 if vec_sep[axis_idx] >= 0.0 else -1.0
+
+            hA = 0.5 * np.asarray(body_A.size, dtype=float)
+            hB = 0.5 * np.asarray(body_B.size, dtype=float)
+            t1i, t2i = [d for d in range(3) if d != axis_idx]
+            hx = min(hA[t1i], hB[t1i])
+            hy = min(hA[t2i], hB[t2i])
+            patch_area = (2.0 * hx) * (2.0 * hy) / 4.0
+            length = hA[axis_idx] + hB[axis_idx]
+
+            n_world = np.zeros(3)
+            n_world[axis_idx] = sgn
+
+            g = 1.0 / np.sqrt(3.0)
+            for s1 in (-g, g):
+                for s2 in (-g, g):
+                    pA_local = np.zeros(3)
+                    pB_local = np.zeros(3)
+                    pA_local[axis_idx] = sgn * hA[axis_idx]
+                    pB_local[axis_idx] = -sgn * hB[axis_idx]
+                    pA_local[t1i] = s1 * hx
+                    pA_local[t2i] = s2 * hy
+                    pB_local[t1i] = s1 * hx
+                    pB_local[t2i] = s2 * hy
+
+                    bonds.append(_build_bond(a_idx, b_idx, pA_local, pB_local, n_world, patch_area, length))
+
+        # intermediary bonds
+        if lf.level < max_level:
+            bonds.extend(_build_intermediary_bonds(lf, a_idx))
+
+    # assign assembly ids
+    for idx, b in enumerate(bodies):
+        b.assembly_id = int(dsu.find_root(idx))
+
+    return bonds
+
 
