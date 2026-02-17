@@ -69,6 +69,7 @@ mutable struct SimulationState
     # TODO there must be a way to make this somehow more compact - do I really need all of these lists?
     active::BitVector # TODO make this the single source of truth
     valid_mask::BitVector
+    can_refine::BitVector
     level::Vector{Int} # TODO - why not make level the single source of truth and use -1 if not active?
     parent_list::Vector{Int}
     children_start::Vector{Int}
@@ -95,6 +96,7 @@ mutable struct SimulationState
         # AMR
         active = falses(length(bodies)) # default all inactive OR set later
         valid_mask = trues(length(bodies))
+        can_refine = BitVector()
         active_body_ids = Int[]
         active_bond_ids = Int[]
         bond_mark = Int[]
@@ -113,7 +115,7 @@ mutable struct SimulationState
         new(bodies, manifolds, bond_cons, contact_cons, bond_map, contact_map, bond_map_all, e_log,
             dt, grav, mu, iters, Float64(b), Float64(g), Float64(al), stabil,
             active_body_ids, active_bond_ids, bond_mark, bond_mark_epoch,
-            active, valid_mask, level, parent_list, children_start, children_count,
+            active, valid_mask, can_refine, level, parent_list, children_start, children_count,
             neighbor_map, max_level)
 
     end
@@ -556,6 +558,7 @@ function init_simulation(
     assembly_ids::Union{Vector{Int},Nothing}=nothing,
     active::Union{AbstractVector{Bool},Nothing}=nothing,
     valid_mask::Union{AbstractVector{Bool},Nothing}=nothing,
+    can_refine::Union{AbstractVector{Bool},Nothing}=nothing,
     level::Union{AbstractVector{<:Integer},Nothing}=nothing,
     parent_list::Union{AbstractVector{<:Integer},Nothing}=nothing,
     children_start::Union{AbstractVector{<:Integer},Nothing}=nothing,
@@ -602,6 +605,11 @@ function init_simulation(
         sim.valid_mask = BitVector(valid_mask)
     else
         sim.valid_mask = trues(n_bodies)
+    end
+    if can_refine !== nothing
+        sim.can_refine = BitVector(can_refine)
+    else
+        sim.can_refine = BitVector()
     end
     rebuild_active_body_ids!(sim)
 
@@ -855,22 +863,13 @@ end
         p_node = sim.parent_list[p_idx]
     end
 
-    # Walk down to active child (finer)
-    start = sim.children_start[nb_idx]
-    count = sim.children_count[nb_idx]
-    if start >= 0 && count > 0
-        for child_node in start:(start+count-1)
-            child_idx = child_node + 1
-            if sim.active[child_idx]
-                return child_idx
-            end
-        end
-    end
-
     return 0
 end
 
 @inline function has_valid_child(sim::SimulationState, body_idx::Int)
+    if length(sim.can_refine) == length(sim.bodies)
+        return sim.can_refine[body_idx]
+    end
     node_id = sim.bodies[body_idx].id
     start0 = sim.children_start[node_id+1]
     count = sim.children_count[node_id+1]
@@ -887,11 +886,16 @@ end
 end
 
 function enforce_2to1!(sim::SimulationState, refine_list::Vector{Int})
-    q = copy(refine_list)
     marked = falses(length(sim.bodies))
     blocked = falses(length(sim.bodies))
+    q = Int[]
+    out = Int[]
     for id in refine_list
-        marked[id] = true
+        if !marked[id]
+            marked[id] = true
+            push!(q, id)
+            push!(out, id)
+        end
     end
 
     while !isempty(q)
@@ -916,6 +920,7 @@ function enforce_2to1!(sim::SimulationState, refine_list::Vector{Int})
                     if !marked[nb_idx]
                         push!(q, nb_idx)
                         marked[nb_idx] = true
+                        push!(out, nb_idx)
                     end
                 else
                     # Neighbor cannot refine (no valid children) -> block this refine.
@@ -926,7 +931,7 @@ function enforce_2to1!(sim::SimulationState, refine_list::Vector{Int})
         end
     end
 
-    return findall(marked .& .!blocked)
+    return [id for id in out if !blocked[id]]
 end
 
 function refine_voxel!(sim::SimulationState, parent_idx::Int, params=nothing)

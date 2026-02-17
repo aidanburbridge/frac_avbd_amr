@@ -375,7 +375,19 @@ def build_full_hierarchy(
             nb_id = key_to_id.get(nb_leaf.key(), -1)
             neighbor_map[node_id, dir_idx] = nb_id
 
-    return nodes, key_to_id, parent, child_start, child_count, valid_mask, neighbor_map
+    # Precompute can_refine: True if node has at least one valid child
+    can_refine = [False] * len(nodes)
+    for node_id in range(len(nodes)):
+        start = child_start[node_id]
+        count = child_count[node_id]
+        if start < 0 or count <= 0:
+            continue
+        for child_id in range(start, start + count):
+            if valid_mask[child_id]:
+                can_refine[node_id] = True
+                break
+
+    return nodes, key_to_id, parent, child_start, child_count, valid_mask, neighbor_map, can_refine
 
 
 
