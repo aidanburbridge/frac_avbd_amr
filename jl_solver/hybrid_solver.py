@@ -110,6 +110,8 @@ class HybridSolver:
             kwargs["active"] = np.ascontiguousarray(amr["active"], dtype=np.bool_)
             if "valid_mask" in amr:
                 kwargs["valid_mask"] = np.ascontiguousarray(amr["valid_mask"], dtype=np.bool_)
+            if "neighbor_map" in amr:
+                kwargs["neighbor_map"] = np.ascontiguousarray(amr["neighbor_map"], dtype=np.int32)
             if "max_ref_level" in amr:
                 kwargs["max_ref_level"] = int(amr["max_ref_level"])
 

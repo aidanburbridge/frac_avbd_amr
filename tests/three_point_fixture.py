@@ -67,7 +67,7 @@ def build_setup()-> SimulationSetup:
     def _contains_fn(pts: np.ndarray) -> np.ndarray:
         return vox._contains_points_chunked(stlvox.mesh, np.asarray(pts, dtype=float), chunk=200_000, show_progress=False)
 
-    all_nodes, key_to_id, parent_list, child_start, child_count, valid_mask = oct.build_full_hierarchy(
+    all_nodes, key_to_id, parent_list, child_start, child_count, valid_mask, neighbor_map = oct.build_full_hierarchy(
         coarse_occ=occ,
         max_level=max_ref_level,
         origin=raw_origin,
@@ -132,6 +132,7 @@ def build_setup()-> SimulationSetup:
         "level": np.asarray([lf.level for lf in all_nodes], dtype=np.int8),
         "active": np.asarray(active_list, dtype=np.int32),
         "valid_mask": np.asarray(valid_mask, dtype=np.bool_),
+        "neighbor_map": np.asarray(neighbor_map, dtype=np.int32),
         "max_ref_level": max_ref_level,
     }
 

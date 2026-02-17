@@ -363,7 +363,19 @@ def build_full_hierarchy(
                     root_id = add_node(root, parent_id=-1, is_valid=True)
                     add_children(root_id)
 
-    return nodes, key_to_id, parent, child_start, child_count, valid_mask
+    # Build neighbor map (same-level, 6-face adjacency)
+    level_maps = _index_by_level(nodes)
+    neighbor_map = np.full((len(nodes), 6), -1, dtype=int)
+    for node_id, lf in enumerate(nodes):
+        L, i, j, k = lf.level, lf.i, lf.j, lf.k
+        for dir_idx, (di, dj, dk) in enumerate(_FACE_DIRS):
+            nb_leaf = level_maps.get(L, {}).get((i + di, j + dj, k + dk))
+            if nb_leaf is None:
+                continue
+            nb_id = key_to_id.get(nb_leaf.key(), -1)
+            neighbor_map[node_id, dir_idx] = nb_id
+
+    return nodes, key_to_id, parent, child_start, child_count, valid_mask, neighbor_map
 
 
 
@@ -809,3 +821,25 @@ def build_contsraints_from_hierarchy(
     return bonds
 
 
+# Neighbor lookup for 2:1 refinement assurance
+def build_neighbor_map(nodes: list[Leaf], key_to_id: dict[tuple[int, int, int, int], int]) -> np.ndarray:
+    """
+    Create a (N, 6) array where each row contains the node IDs for all 6 face-face neighbors of node i.
+    For nodes of the SAME level.
+    """
+    # Initialize full neighbor lookup array.
+    n_nodes = len(nodes)
+    neighbors = np.full((n_nodes, 6), -1, dtype=np.int32)
+
+    dirs = _FACE_DIRS
+
+    for node_idx, leaf in enumerate(nodes):
+        L, i, j, k = leaf.level, leaf.i, leaf.j, leaf.k
+
+        for d_idx, (di, dj, dk) in enumerate(dirs):
+            nk = (L, i + di, j + dj, k + dk)
+
+            if nk in key_to_id:
+                neighbors[node_idx, d_idx] = key_to_id[nk]
+    
+    return neighbors

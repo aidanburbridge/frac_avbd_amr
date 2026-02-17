@@ -74,10 +74,10 @@ mutable struct SimulationState
     children_start::Vector{Int}
     children_count::Vector{Int}
 
-    # TODO need a max refinement level passed in here so the sim knows when to stop refining bodies
+    neighbor_map::Matrix{Int}
+
     max_ref_level::Int
 
-    #TODO where do these values get set? In HybridSolver? I am setting them as default values 
     function SimulationState(bodies, dt; grav=-9.81, iters=10, mu=0.6, b=10.0, g=0.99, al=0.95, stabil=true)
         # Initialize constraint vectors
         bond_cons = Vector{BondConstraint}()
@@ -104,6 +104,9 @@ mutable struct SimulationState
         children_start = Int[]
         children_count = Int[]
 
+        # Neighbor map for 2:1 refinement check
+        neighbor_map = Matrix{Int}(undef, 0, 0)
+
         # TODO must pass max_level in here
         max_level = 1 # default 1 for now but should come from octree
 
@@ -111,7 +114,7 @@ mutable struct SimulationState
             dt, grav, mu, iters, Float64(b), Float64(g), Float64(al), stabil,
             active_body_ids, active_bond_ids, bond_mark, bond_mark_epoch,
             active, valid_mask, level, parent_list, children_start, children_count,
-            max_level)
+            neighbor_map, max_level)
 
     end
 end
@@ -439,7 +442,7 @@ function dual_update!(sim::SimulationState, alpha::Float64)
             lam = setindex(lam, lam_r, r)
 
             # TODO change the reference critical value later to something with more grounding
-            ref_crit = con.fracture[r] * 0.5 #TODO replace with refine ratio!
+            ref_crit = con.fracture[r] * 0.8 #TODO replace with refine ratio!
 
             # TODO REFINEMENT CRITERIA
             if abs(lam_r) >= ref_crit
@@ -557,8 +560,8 @@ function init_simulation(
     parent_list::Union{AbstractVector{<:Integer},Nothing}=nothing,
     children_start::Union{AbstractVector{<:Integer},Nothing}=nothing,
     children_count::Union{AbstractVector{<:Integer},Nothing}=nothing,
-    max_ref_level::Union{Int,Nothing}=nothing
-)
+    neighbor_map::Union{AbstractMatrix{<:Integer},Nothing}=nothing,
+    max_ref_level::Union{Int,Nothing}=nothing,)
 
     n_bodies = length(masses)
     bodies = Vector{Body}(undef, n_bodies)
@@ -580,6 +583,12 @@ function init_simulation(
     end
 
     sim = SimulationState(bodies, dt; grav=gravity, iters=iterations, mu=friction)
+
+    if neighbor_map !== nothing
+        sim.neighbor_map = Int.(neighbor_map)
+        # DEBUG
+        @show size(sim.neighbor_map)
+    end
 
 
     # TODO cleaner way to do this?
@@ -607,6 +616,9 @@ function init_simulation(
     end
     if children_count !== nothing
         sim.children_count = Int.(children_count)
+    end
+    if neighbor_map !== nothing
+        sim.neighbor_map = Int.(neighbor_map)
     end
     if max_ref_level !== nothing
         sim.max_ref_level = max_ref_level
@@ -792,6 +804,9 @@ function step_simulation!(sim::SimulationState)
     # # TODO do refinement step here
     if !isempty(refine_list)
         refine_list = unique(refine_list)
+        if size(sim.neighbor_map, 2) == 6
+            refine_list = enforce_2to1!(sim, refine_list)
+        end
         for v in refine_list
             refine_voxel!(sim, v)
         end
@@ -821,6 +836,98 @@ function step_simulation!(sim::SimulationState)
 end
 
 # ---------- AMR HELPER FUNCITONS ---------- #
+
+@inline function resolve_active_neighbor(sim::SimulationState, nb_node::Int)
+    nb_node < 0 && return 0
+    nb_idx = nb_node + 1
+
+    if sim.active[nb_idx]
+        return nb_idx
+    end
+
+    # Walk up to active parent (coarser)
+    p_node = sim.parent_list[nb_idx]
+    while p_node >= 0
+        p_idx = p_node + 1
+        if sim.active[p_idx]
+            return p_idx
+        end
+        p_node = sim.parent_list[p_idx]
+    end
+
+    # Walk down to active child (finer)
+    start = sim.children_start[nb_idx]
+    count = sim.children_count[nb_idx]
+    if start >= 0 && count > 0
+        for child_node in start:(start+count-1)
+            child_idx = child_node + 1
+            if sim.active[child_idx]
+                return child_idx
+            end
+        end
+    end
+
+    return 0
+end
+
+@inline function has_valid_child(sim::SimulationState, body_idx::Int)
+    node_id = sim.bodies[body_idx].id
+    start0 = sim.children_start[node_id+1]
+    count = sim.children_count[node_id+1]
+    if start0 < 0 || count <= 0
+        return false
+    end
+    for child_node in start0:(start0+count-1)
+        child_idx = child_node + 1
+        if sim.valid_mask[child_idx]
+            return true
+        end
+    end
+    return false
+end
+
+function enforce_2to1!(sim::SimulationState, refine_list::Vector{Int})
+    q = copy(refine_list)
+    marked = falses(length(sim.bodies))
+    blocked = falses(length(sim.bodies))
+    for id in refine_list
+        marked[id] = true
+    end
+
+    while !isempty(q)
+        v = pop!(q)
+        sim.active[v] || continue
+        blocked[v] && continue
+
+        L = sim.level[v]
+        target_level = L + 1
+        if target_level > sim.max_ref_level
+            blocked[v] = true
+            continue
+        end
+        node_id = sim.bodies[v].id
+        for dir in 1:6
+            nb_node = sim.neighbor_map[node_id+1, dir]
+            nb_idx = resolve_active_neighbor(sim, nb_node)
+            nb_idx > 0 || continue
+
+            if sim.level[nb_idx] < target_level - 1
+                if has_valid_child(sim, nb_idx)
+                    if !marked[nb_idx]
+                        push!(q, nb_idx)
+                        marked[nb_idx] = true
+                    end
+                else
+                    # Neighbor cannot refine (no valid children) -> block this refine.
+                    blocked[v] = true
+                    break
+                end
+            end
+        end
+    end
+
+    return findall(marked .& .!blocked)
+end
 
 function refine_voxel!(sim::SimulationState, parent_idx::Int, params=nothing)
     # Refines given voxel to children voxels and transfers kinematics.
@@ -857,6 +964,7 @@ function refine_voxel!(sim::SimulationState, parent_idx::Int, params=nothing)
     # Deactivate parent
     set_active!(sim, parent_idx, false)
 
+    activated_children = Int[]
     for child_slot in 1:count
         child_node = start0 + (child_slot - 1)  # child node id (0-based)
         child_idx = child_node + 1              # body index (1-based)
@@ -867,9 +975,66 @@ function refine_voxel!(sim::SimulationState, parent_idx::Int, params=nothing)
         end
 
         set_active!(sim, child_idx, true)
+        push!(activated_children, child_idx)
 
         # Transfer kinematics (fallback uses octree fill order)
         transfer_kinematics!(parent, child, sim.dt; slot=child_slot)
+    end
+
+    if !isempty(activated_children)
+        seed_child_lambdas!(sim, parent_idx, activated_children)
+    end
+end
+
+function seed_child_lambdas!(sim::SimulationState, parent_idx::Int, child_indices::Vector{Int})
+    # Distribute parent's bond lambda to new child bonds (per active neighbor).
+    lambda_sum = Dict{Int,Vec3}()
+    for con_id in sim.bond_incidence_all[parent_idx]
+        con = sim.bond_constraints[con_id]
+        con.is_broken && continue
+
+        a_idx = con.bodyA.id + 1
+        b_idx = con.bodyB.id + 1
+        other_idx = (a_idx == parent_idx) ? b_idx : (b_idx == parent_idx ? a_idx : 0)
+        other_idx == 0 && continue
+        sim.active[other_idx] || continue
+
+        if haskey(lambda_sum, other_idx)
+            lambda_sum[other_idx] = lambda_sum[other_idx] + con.lambda
+        else
+            lambda_sum[other_idx] = con.lambda
+        end
+    end
+
+    isempty(lambda_sum) && return
+
+    child_bonds = Dict{Int,Vector{Int}}()
+    for child_idx in child_indices
+        for con_id in sim.bond_incidence_all[child_idx]
+            con = sim.bond_constraints[con_id]
+            con.is_broken && continue
+
+            a_idx = con.bodyA.id + 1
+            b_idx = con.bodyB.id + 1
+            other_idx = (a_idx == child_idx) ? b_idx : (b_idx == child_idx ? a_idx : 0)
+            other_idx == 0 && continue
+            sim.active[other_idx] || continue
+            haskey(lambda_sum, other_idx) || continue
+
+            ids = get!(child_bonds, other_idx, Int[])
+            push!(ids, con_id)
+        end
+    end
+
+    for (other_idx, lam) in lambda_sum
+        ids = get(child_bonds, other_idx, nothing)
+        ids === nothing && continue
+        n = length(ids)
+        n == 0 && continue
+        lam_share = lam / n
+        for con_id in ids
+            sim.bond_constraints[con_id].lambda = lam_share
+        end
     end
 end
 

@@ -33,13 +33,14 @@ function init_system(
     parent_list=nothing,
     children_start=nothing,
     children_count=nothing,
+    neighbor_map=nothing,
     max_ref_level=nothing,
 )
     # Create the SimulationState object
     # This object stays in Julia memory
     sim = AVBDCore.init_simulation(pos, vel, masses, bond_data, dt, gravity, iters;
         friction=friction, sizes=sizes, assembly_ids=assembly_ids,
-        active=active, valid_mask=valid_mask, level=level, parent_list=parent_list, children_start=children_start, children_count=children_count,
+        active=active, valid_mask=valid_mask, level=level, parent_list=parent_list, children_start=children_start, children_count=children_count, neighbor_map=neighbor_map,
         max_ref_level=max_ref_level)
     return sim
 end
