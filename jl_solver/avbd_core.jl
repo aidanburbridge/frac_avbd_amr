@@ -64,6 +64,9 @@ mutable struct SimulationState
     active_bond_ids::Vector{Int} # active bonds (rebuilt from active bodies)
     bond_mark::Vector{Int} # epoch marks for active bond rebuild
     bond_mark_epoch::Int
+    seed_neighbor_ids::Vector{Int}
+    seed_lambda_sums::Vector{Vec3}
+    seed_counts::Vector{Int}
 
     # Hierarchy lists
     # TODO there must be a way to make this somehow more compact - do I really need all of these lists?
@@ -101,6 +104,9 @@ mutable struct SimulationState
         active_bond_ids = Int[]
         bond_mark = Int[]
         bond_mark_epoch = 0
+        seed_neighbor_ids = Int[]
+        seed_lambda_sums = Vec3[]
+        seed_counts = Int[]
         level = fill(0, length(bodies))
         parent_list = Int[]
         children_start = Int[]
@@ -115,6 +121,7 @@ mutable struct SimulationState
         new(bodies, manifolds, bond_cons, contact_cons, bond_map, contact_map, bond_map_all, e_log,
             dt, grav, mu, iters, Float64(b), Float64(g), Float64(al), stabil,
             active_body_ids, active_bond_ids, bond_mark, bond_mark_epoch,
+            seed_neighbor_ids, seed_lambda_sums, seed_counts,
             active, valid_mask, can_refine, level, parent_list, children_start, children_count,
             neighbor_map, max_level)
 
@@ -993,7 +1000,13 @@ end
 
 function seed_child_lambdas!(sim::SimulationState, parent_idx::Int, child_indices::Vector{Int})
     # Distribute parent's bond lambda to new child bonds (per active neighbor).
-    lambda_sum = Dict{Int,Vec3}()
+    neighbor_ids = sim.seed_neighbor_ids
+    lambda_sums = sim.seed_lambda_sums
+    counts = sim.seed_counts
+    empty!(neighbor_ids)
+    empty!(lambda_sums)
+    empty!(counts)
+
     for con_id in sim.bond_incidence_all[parent_idx]
         con = sim.bond_constraints[con_id]
         con.is_broken && continue
@@ -1004,16 +1017,18 @@ function seed_child_lambdas!(sim::SimulationState, parent_idx::Int, child_indice
         other_idx == 0 && continue
         sim.active[other_idx] || continue
 
-        if haskey(lambda_sum, other_idx)
-            lambda_sum[other_idx] = lambda_sum[other_idx] + con.lambda
+        idx = findfirst(==(other_idx), neighbor_ids)
+        if idx === nothing
+            push!(neighbor_ids, other_idx)
+            push!(lambda_sums, con.lambda)
+            push!(counts, 0)
         else
-            lambda_sum[other_idx] = con.lambda
+            lambda_sums[idx] = lambda_sums[idx] + con.lambda
         end
     end
 
-    isempty(lambda_sum) && return
+    isempty(neighbor_ids) && return
 
-    child_bonds = Dict{Int,Vector{Int}}()
     for child_idx in child_indices
         for con_id in sim.bond_incidence_all[child_idx]
             con = sim.bond_constraints[con_id]
@@ -1024,21 +1039,29 @@ function seed_child_lambdas!(sim::SimulationState, parent_idx::Int, child_indice
             other_idx = (a_idx == child_idx) ? b_idx : (b_idx == child_idx ? a_idx : 0)
             other_idx == 0 && continue
             sim.active[other_idx] || continue
-            haskey(lambda_sum, other_idx) || continue
 
-            ids = get!(child_bonds, other_idx, Int[])
-            push!(ids, con_id)
+            idx = findfirst(==(other_idx), neighbor_ids)
+            idx === nothing && continue
+            counts[idx] += 1
         end
     end
 
-    for (other_idx, lam) in lambda_sum
-        ids = get(child_bonds, other_idx, nothing)
-        ids === nothing && continue
-        n = length(ids)
-        n == 0 && continue
-        lam_share = lam / n
-        for con_id in ids
-            sim.bond_constraints[con_id].lambda = lam_share
+    for child_idx in child_indices
+        for con_id in sim.bond_incidence_all[child_idx]
+            con = sim.bond_constraints[con_id]
+            con.is_broken && continue
+
+            a_idx = con.bodyA.id + 1
+            b_idx = con.bodyB.id + 1
+            other_idx = (a_idx == child_idx) ? b_idx : (b_idx == child_idx ? a_idx : 0)
+            other_idx == 0 && continue
+            sim.active[other_idx] || continue
+
+            idx = findfirst(==(other_idx), neighbor_ids)
+            idx === nothing && continue
+            n = counts[idx]
+            n == 0 && continue
+            con.lambda = lambda_sums[idx] / n
         end
     end
 end
