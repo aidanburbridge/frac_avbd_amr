@@ -67,6 +67,12 @@ mutable struct SimulationState
     seed_neighbor_ids::Vector{Int}
     seed_lambda_sums::Vector{Vec3}
     seed_counts::Vector{Int}
+    active_pos::Vector{Int}
+    refine_mark::Vector{Int}
+    refine_mark_epoch::Int
+    refine_blocked::BitVector
+    refine_queue::Vector{Int}
+    refine_out::Vector{Int}
 
     # Hierarchy lists
     # TODO there must be a way to make this somehow more compact - do I really need all of these lists?
@@ -107,6 +113,17 @@ mutable struct SimulationState
         seed_neighbor_ids = Int[]
         seed_lambda_sums = Vec3[]
         seed_counts = Int[]
+        sizehint!(seed_neighbor_ids, 16) # 16 chosen arbitrarily higher than 6 face adjacents
+        sizehint!(seed_lambda_sums, 16)
+        sizehint!(seed_counts, 16)
+        active_pos = zeros(Int, length(bodies))
+        refine_mark = zeros(Int, length(bodies))
+        refine_mark_epoch = 0
+        refine_blocked = falses(length(bodies))
+        refine_queue = Int[]
+        refine_out = Int[]
+        sizehint!(refine_queue, 64)
+        sizehint!(refine_out, 64)
         level = fill(0, length(bodies))
         parent_list = Int[]
         children_start = Int[]
@@ -122,6 +139,7 @@ mutable struct SimulationState
             dt, grav, mu, iters, Float64(b), Float64(g), Float64(al), stabil,
             active_body_ids, active_bond_ids, bond_mark, bond_mark_epoch,
             seed_neighbor_ids, seed_lambda_sums, seed_counts,
+            active_pos, refine_mark, refine_mark_epoch, refine_blocked, refine_queue, refine_out,
             active, valid_mask, can_refine, level, parent_list, children_start, children_count,
             neighbor_map, max_level)
 
@@ -441,6 +459,8 @@ function dual_update!(sim::SimulationState, alpha::Float64)
 
         levelA = sim.level[a_idx]
         levelB = sim.level[b_idx]
+        capA = (levelA >= sim.max_ref_level) || !has_valid_child(sim, a_idx)
+        capB = (levelB >= sim.max_ref_level) || !has_valid_child(sim, b_idx)
 
         # TODO essentially need to check if over threshold -> refine, UNLESS already @ max_ref_level, then break/fracture
 
@@ -456,10 +476,10 @@ function dual_update!(sim::SimulationState, alpha::Float64)
             # TODO REFINEMENT CRITERIA
             if abs(lam_r) >= ref_crit
                 # TODO mark or trigger refinement process
-                if levelA < sim.max_ref_level
+                if !capA
                     push!(refinement_list, a_idx)
                 end
-                if levelB < sim.max_ref_level
+                if !capB
                     push!(refinement_list, b_idx)
                 end
             end
@@ -467,7 +487,7 @@ function dual_update!(sim::SimulationState, alpha::Float64)
             # TODO add refinement check before fracturing! -> do NOT allow fracture unless @ finest level
             # FRACTURE CRITERIA
             if abs(lam_r) >= (con.fracture[r] * 10)
-                if (levelA >= sim.max_ref_level) && (levelB >= sim.max_ref_level)
+                if capA && capB
                     # d = abs(sigma) - abs(lam_r)
                     # con.damage += d
                     con.is_broken = true
@@ -476,10 +496,10 @@ function dual_update!(sim::SimulationState, alpha::Float64)
                     break
                 else
                     # NOT @ finest level -> push to refine
-                    if levelA < sim.max_ref_level
+                    if !capA
                         push!(refinement_list, a_idx)
                     end
-                    if levelB < sim.max_ref_level
+                    if !capB
                         push!(refinement_list, b_idx)
                     end
                 end
@@ -593,13 +613,6 @@ function init_simulation(
     end
 
     sim = SimulationState(bodies, dt; grav=gravity, iters=iterations, mu=friction)
-
-    if neighbor_map !== nothing
-        sim.neighbor_map = Int.(neighbor_map)
-        # DEBUG
-        @show size(sim.neighbor_map)
-    end
-
 
     # TODO cleaner way to do this?
     # Apply AMR arrays if provided
@@ -818,14 +831,12 @@ function step_simulation!(sim::SimulationState)
 
     # # TODO do refinement step here
     if !isempty(refine_list)
-        refine_list = unique(refine_list)
         if size(sim.neighbor_map, 2) == 6
             refine_list = enforce_2to1!(sim, refine_list)
         end
         for v in refine_list
             refine_voxel!(sim, v)
         end
-        rebuild_active_body_ids!(sim)
     end
 
     # Velocity derivation from new positions
@@ -834,7 +845,7 @@ function step_simulation!(sim::SimulationState)
     alpha_log = sim.alpha
 
     # Stabilization pass
-    if sim.stabilize
+    if sim.stabilize && isempty(refine_list) #HACK - just skip stabilization when refinement occurs
         alpha_stabil = 0.05
         for b_id in sim.active_body_ids
             body = sim.bodies[b_id]
@@ -893,27 +904,35 @@ end
 end
 
 function enforce_2to1!(sim::SimulationState, refine_list::Vector{Int})
-    marked = falses(length(sim.bodies))
-    blocked = falses(length(sim.bodies))
-    q = Int[]
-    out = Int[]
+    sim.refine_mark_epoch += 1
+    epoch = sim.refine_mark_epoch
+    if epoch == typemax(Int)
+        fill!(sim.refine_mark, 0)
+        sim.refine_mark_epoch = 1
+        epoch = 1
+    end
+
+    fill!(sim.refine_blocked, false)
+    empty!(sim.refine_queue)
+    empty!(sim.refine_out)
+
     for id in refine_list
-        if !marked[id]
-            marked[id] = true
-            push!(q, id)
-            push!(out, id)
+        if sim.refine_mark[id] != epoch
+            sim.refine_mark[id] = epoch
+            push!(sim.refine_queue, id)
+            push!(sim.refine_out, id)
         end
     end
 
-    while !isempty(q)
-        v = pop!(q)
+    while !isempty(sim.refine_queue)
+        v = pop!(sim.refine_queue)
         sim.active[v] || continue
-        blocked[v] && continue
+        sim.refine_blocked[v] && continue
 
         L = sim.level[v]
         target_level = L + 1
         if target_level > sim.max_ref_level
-            blocked[v] = true
+            sim.refine_blocked[v] = true
             continue
         end
         node_id = sim.bodies[v].id
@@ -924,24 +943,24 @@ function enforce_2to1!(sim::SimulationState, refine_list::Vector{Int})
 
             if sim.level[nb_idx] < target_level - 1
                 if has_valid_child(sim, nb_idx)
-                    if !marked[nb_idx]
-                        push!(q, nb_idx)
-                        marked[nb_idx] = true
-                        push!(out, nb_idx)
+                    if sim.refine_mark[nb_idx] != epoch
+                        sim.refine_mark[nb_idx] = epoch
+                        push!(sim.refine_queue, nb_idx)
+                        push!(sim.refine_out, nb_idx)
                     end
                 else
                     # Neighbor cannot refine (no valid children) -> block this refine.
-                    blocked[v] = true
+                    sim.refine_blocked[v] = true
                     break
                 end
             end
         end
     end
 
-    return [id for id in out if !blocked[id]]
+    return [id for id in sim.refine_out if !sim.refine_blocked[id]]
 end
 
-function refine_voxel!(sim::SimulationState, parent_idx::Int, params=nothing)
+function refine_voxel!(sim::SimulationState, parent_idx::Int)
     # Refines given voxel to children voxels and transfers kinematics.
     # parent_idx is a 1-based index into sim.bodies (Body.id == parent_idx - 1).
 
@@ -1066,18 +1085,51 @@ function seed_child_lambdas!(sim::SimulationState, parent_idx::Int, child_indice
     end
 end
 
+@inline function activate!(sim::SimulationState, body_idx::Int)
+    if sim.active_pos[body_idx] == 0
+        push!(sim.active_body_ids, body_idx)
+        sim.active_pos[body_idx] = length(sim.active_body_ids)
+    end
+    sim.active[body_idx] = true
+    sim.bodies[body_idx].is_active = true # for collisions
+    return true
+end
+
+@inline function deactivate!(sim::SimulationState, body_idx::Int)
+    pos = sim.active_pos[body_idx]
+    if pos != 0
+        last_id = sim.active_body_ids[end]
+        sim.active_body_ids[pos] = last_id
+        sim.active_pos[last_id] = pos
+        pop!(sim.active_body_ids)
+        sim.active_pos[body_idx] = 0
+    end
+    sim.active[body_idx] = false
+    sim.bodies[body_idx].is_active = false # for collisions
+    return true
+end
+
 @inline function set_active!(sim::SimulationState, body_idx::Int, on::Bool)
-    # Pass true or false to on to set on or off
-    sim.active[body_idx] = on
-    sim.bodies[body_idx].is_active = on # for collisions
+    # NOTE: All activation/deactivation should go through this function
+    # to keep active_body_ids/active_pos consistent.
+    if on && !sim.valid_mask[body_idx]
+        return false
+    end
+    return on ? activate!(sim, body_idx) : deactivate!(sim, body_idx)
 end
 
 function rebuild_active_body_ids!(sim::SimulationState)
     # TODO should probably build this list ONCE and then empty and fill -- aka no resizing
     empty!(sim.active_body_ids)
+    if length(sim.active_pos) != length(sim.active)
+        sim.active_pos = zeros(Int, length(sim.active))
+    else
+        fill!(sim.active_pos, 0)
+    end
     for i in eachindex(sim.active)
         if sim.active[i]
             push!(sim.active_body_ids, i)
+            sim.active_pos[i] = length(sim.active_body_ids)
         end
     end
 end

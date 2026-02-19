@@ -184,10 +184,10 @@ def octree_refine(
                     nb = _find_leaf_neighbor(leaf_maps, nL, ni, nj, nk)
                     if nb is None:
                         continue
-                if nb.level + 1 < L:                            # If neighbor is more than 1 level lower, split it
-                    if _split_leaf(new_leaf_set, nb, max_level):
-                        changed = True
-    
+                    if nb.level + 1 < L:                            # If neighbor is more than 1 level lower, split it
+                        if _split_leaf(new_leaf_set, nb, max_level):
+                            changed = True
+        
     return list(new_leaf_set.values())
 
 

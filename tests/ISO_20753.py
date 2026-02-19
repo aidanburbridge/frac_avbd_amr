@@ -68,7 +68,7 @@ def build_setup()-> SimulationSetup:
     cfl = calc_cfl(DENSITY, E_MODULUS, NU, phys_h) #2.9330379512351167e-06
 
     # Build full hierarchy potential and lists for refinement
-    max_ref_level = 1
+    max_ref_level = 2
     # TODO is this the cleanest way to do STL geometry check - what is the 200_000 referring to?
     def _contains_fn(pts: np.ndarray) -> np.ndarray:
         return vox._contains_points_chunked(stlvox.mesh, np.asarray(pts, dtype=float), chunk=200_000, show_progress=False)
