@@ -1,7 +1,8 @@
 module AVBDCore
 
 # TODO CHECK avbd_core.jl, avbd_constraints.jl, manifold.jl and physics_bridge.jl - one of these screws with the voxel size??? Still error voxelizing to resolution!!!
-
+include("criteria.jl")
+using .Criteria
 using LinearAlgebra
 using StaticArrays
 using Base.Threads
@@ -17,18 +18,23 @@ export SimulationState, init_simulation, step_simulation!
 # - have damage only apply to tension -> leave the stiffness of compresison untouched
 # - ensure both compressive and tensile strain and stress are exported to the visualizer
 # - need to somehow stabilize the fracture through 
-# - early out for fast convergences
 
-const EARLY_OUT_TOL = 1e-5 # TODO have this as a parameter as a fraction of h (voxel size) ~0.1% 
-
-# Debug: force refinement of all active bodies (set false to disable)
-const DEBUG_REFINE_ALL = false
-# Change iters to these values - lock them in as same 
-# const INNER_ITERS = 5
-# const MAX_DAMAGE_PASSES = 5
 
 # TODO add damping value calculation - or have NN do this??
 # damp_val = 2 * [0.05 - 0.3] * sqrt(k*mass)
+
+# ---------- CONSTANTS ---------- #
+const EARLY_OUT_TOL = 1e-5 # TODO have this as a parameter as a fraction of h (voxel size) ~0.1% 
+const DEBUG_REFINE_ALL = false # Debug: force refinement of all active bodies (set false to disable)
+
+ref_specs = [
+    RefineSpec(REFINE_LAMBDA, SVector(0.8, 0.0)),   # threshold = 0.8
+]
+frac_specs = [
+    FractureSpec(FRAC_LAMBDA, SVector(1.0, 0.0)),   # threshold = 1.0
+]
+
+cfg = CriteriaConfig(ref_specs, ANY, frac_specs, ANY)
 
 
 mutable struct SimulationState
@@ -88,6 +94,8 @@ mutable struct SimulationState
 
     max_ref_level::Int
 
+    criteria::Criteria.CriteriaConfig
+
     function SimulationState(bodies, dt; grav=-9.81, iters=10, mu=0.6, b=10.0, g=0.99, al=0.95, stabil=true)
         # Initialize constraint vectors
         bond_cons = Vector{BondConstraint}()
@@ -135,13 +143,21 @@ mutable struct SimulationState
         # TODO must pass max_level in here
         max_level = 1 # default 1 for now but should come from octree
 
+        # Refine and fracture criteria
+        default_cfg = CriteriaConfig(
+            [RefineSpec(REFINE_LAMBDA, SVector(0.8, 0.0))],
+            ANY,
+            [FractureSpec(FRAC_LAMBDA, SVector(1.0, 0.0))],
+            ANY,
+        )
+
         new(bodies, manifolds, bond_cons, contact_cons, bond_map, contact_map, bond_map_all, e_log,
             dt, grav, mu, iters, Float64(b), Float64(g), Float64(al), stabil,
             active_body_ids, active_bond_ids, bond_mark, bond_mark_epoch,
             seed_neighbor_ids, seed_lambda_sums, seed_counts,
             active_pos, refine_mark, refine_mark_epoch, refine_blocked, refine_queue, refine_out,
             active, valid_mask, can_refine, level, parent_list, children_start, children_count,
-            neighbor_map, max_level)
+            neighbor_map, max_level, default_cfg)
 
     end
 end
@@ -470,12 +486,9 @@ function dual_update!(sim::SimulationState, alpha::Float64)
             lam_r = clamp(sigma, con.f_min[r], con.f_max[r])
             lam = setindex(lam, lam_r, r)
 
-            # TODO change the reference critical value later to something with more grounding
-            ref_crit = con.fracture[r] * 0.8 #TODO replace with refine ratio!
-
             # TODO REFINEMENT CRITERIA
-            if abs(lam_r) >= ref_crit
-                # TODO mark or trigger refinement process
+            # if abs(lam_r) >= ref_crit
+            if Criteria.should_refine(sim.criteria, sim, con, lam_r, r)
                 if !capA
                     push!(refinement_list, a_idx)
                 end
@@ -486,7 +499,8 @@ function dual_update!(sim::SimulationState, alpha::Float64)
 
             # TODO add refinement check before fracturing! -> do NOT allow fracture unless @ finest level
             # FRACTURE CRITERIA
-            if abs(lam_r) >= (con.fracture[r] * 10)
+            #if abs(lam_r) >= (con.fracture[r] * 10)
+            if Criteria.should_fracture(sim.criteria, sim, con, lam_r, r)
                 if capA && capB
                     # d = abs(sigma) - abs(lam_r)
                     # con.damage += d
