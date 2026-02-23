@@ -14,6 +14,9 @@ STL_PATH = r"C:\Users\aidan\Documents\TUM\Thesis\ISO 20753 Type A1 v1.stl"
 LENGTH = 0.170
 VOXEL_RES = 100
 
+# Build full hierarchy potential and lists for refinement
+MAX_REF_LEVEL = 2
+
 # Shared solver params
 DT_PHYSICS = 1/4000
 DT_RENDER = 1/60
@@ -67,15 +70,13 @@ def build_setup()-> SimulationSetup:
     visco_val = calc_damping(DENSITY, phys_h, E_MODULUS, ZETA_DAMP)
     cfl = calc_cfl(DENSITY, E_MODULUS, NU, phys_h) #2.9330379512351167e-06
 
-    # Build full hierarchy potential and lists for refinement
-    max_ref_level = 2
     # TODO is this the cleanest way to do STL geometry check - what is the 200_000 referring to?
     def _contains_fn(pts: np.ndarray) -> np.ndarray:
         return vox._contains_points_chunked(stlvox.mesh, np.asarray(pts, dtype=float), chunk=200_000, show_progress=False)
 
     all_nodes, key_to_id, parent_list, child_start, child_count, valid_mask, neighbor_map, can_refine = oct.build_full_hierarchy(
         coarse_occ=occ,
-        max_level=max_ref_level,
+        max_level=MAX_REF_LEVEL,
         origin=raw_origin,
         h_base=raw_h,
         contains_fn=_contains_fn,
@@ -107,7 +108,7 @@ def build_setup()-> SimulationSetup:
         fracture_toughness=FRACTURE_TOUGHNESS,
         damping_val=visco_val,
         valid_mask=valid_mask,
-        max_level=max_ref_level,
+        max_level=MAX_REF_LEVEL,
     )
 
     # beam_bonds = oct.build_constraints_from_tree(
@@ -154,7 +155,7 @@ def build_setup()-> SimulationSetup:
         "valid_mask": np.asarray(valid_mask, dtype=np.bool_),
         "neighbor_map": np.asarray(neighbor_map, dtype=np.int32),
         "can_refine": np.asarray(can_refine, dtype=np.bool_),
-        "max_ref_level": max_ref_level,
+        "max_ref_level": MAX_REF_LEVEL,
     }
 
     return SimulationSetup(

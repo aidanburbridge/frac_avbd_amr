@@ -41,8 +41,13 @@ end
 @inline function _check_refinement_criteria(spec::RefineSpec, con, lam_r, r)::Bool
     # Simple lambda refinement check
     if spec.kind == REFINE_LAMBDA
-        thresh = spec.params[1]
-        return abs(lam_r) >= thresh
+        # Allow any mode (normal/shear), but only while bond is in opening tension.
+        sigma_n = con.penalty_k[1] * con.C[1]
+        lam_n = clamp(sigma_n, con.f_min[1], con.f_max[1])
+        lam_n < 0.0 || return false
+        thresh_mul = spec.params[1]
+        cap = max(con.fracture[r], eps(Float64))
+        return abs(lam_r) >= thresh_mul * cap
     end
     return false
 end
@@ -70,8 +75,13 @@ end
 @inline function _check_fracture_criteria(spec::FractureSpec, con, lam_r, r)::Bool
     # Simple lambda fracture check
     if spec.kind == FRAC_LAMBDA
-        thresh = spec.params[1]
-        return abs(lam_r) >= thresh
+        # Allow any mode (normal/shear), but only while bond is in opening tension.
+        sigma_n = con.penalty_k[1] * con.C[1]
+        lam_n = clamp(sigma_n, con.f_min[1], con.f_max[1])
+        lam_n < 0.0 || return false
+        thresh_mul = spec.params[1]
+        cap = max(con.fracture[r], eps(Float64))
+        return abs(lam_r) >= thresh_mul * cap
     end
     return false
 end
