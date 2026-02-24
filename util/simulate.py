@@ -6,6 +6,7 @@ Usage: python -m util.simulate [test_name]
 import argparse
 import importlib
 import inspect
+import os
 import sys
 import json
 import struct
@@ -18,6 +19,8 @@ from tqdm import tqdm
 # Imports
 from util.vtk_exporter import VTKExporter
 from util.engine import SimulationSetup, build_solver, run_headless
+
+DEFAULT_RNG_SEED = 12345
 
 # Path helper
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -85,6 +88,13 @@ def _json_default(obj):
         return obj.tolist()
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
+def _get_rng_seed() -> int:
+    seed_raw = os.environ.get("AVBD_RNG_SEED", str(DEFAULT_RNG_SEED))
+    try:
+        return int(seed_raw)
+    except (TypeError, ValueError):
+        return DEFAULT_RNG_SEED
+
 
 def _save_metadata(
     run_dir: Path,
@@ -118,6 +128,7 @@ def _save_metadata(
     full_data.update(system_data)
     full_data.update(solver_params)
     full_data.update(user_metadata)
+    full_data["rng_seed"] = _get_rng_seed()
 
     with open(run_dir / "meta_data.json", "w") as f:
         json.dump(full_data, f, indent=4, default=_json_default)

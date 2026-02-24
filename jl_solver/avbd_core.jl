@@ -4,6 +4,7 @@ module AVBDCore
 include("criteria.jl")
 using .Criteria
 using LinearAlgebra
+using Random
 using StaticArrays
 using Base.Threads
 using ..Maths: Vec3, Quat, integrate_quat, quat_to_rotvec, quat_mul, quat_inv, rotvec_to_quat, delta_twist_from, rotate_vec
@@ -26,6 +27,13 @@ export SimulationState, init_simulation, step_simulation!
 # ---------- CONSTANTS ---------- #
 const EARLY_OUT_TOL = 1e-5 # TODO have this as a parameter as a fraction of h (voxel size) ~0.1% 
 const DEBUG_REFINE_ALL = false # Debug: force refinement of all active bodies (set false to disable)
+const DEFAULT_RNG_SEED = 12345
+
+@inline function configured_rng_seed()::Int
+    seed_str = get(ENV, "AVBD_RNG_SEED", string(DEFAULT_RNG_SEED))
+    seed = tryparse(Int, seed_str)
+    return seed === nothing ? DEFAULT_RNG_SEED : seed
+end
 
 ref_specs = [
     RefineSpec(REFINE_LAMBDA, SVector(0.8, 0.0)),   # threshold = 0.8
@@ -665,6 +673,9 @@ function init_simulation(
     if max_ref_level !== nothing
         sim.max_ref_level = max_ref_level
     end
+
+    # Deterministic bond randomization unless overridden via AVBD_RNG_SEED.
+    Random.seed!(configured_rng_seed())
 
     #HACK adding weibull randomization to the material properties
     weibull_shape = 5.0
