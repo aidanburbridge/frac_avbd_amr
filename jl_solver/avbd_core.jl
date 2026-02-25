@@ -35,15 +35,23 @@ const DEFAULT_RNG_SEED = 12345
     return seed === nothing ? DEFAULT_RNG_SEED : seed
 end
 
+# # Dumb criterion
+# ref_specs = [
+#     RefineSpec(REFINE_LAMBDA, SVector(0.8, 0.0)),   # threshold = 0.8
+# ]
+# frac_specs = [
+#     FractureSpec(FRAC_LAMBDA, SVector(1.0, 0.0)),   # threshold = 1.0
+# ]
+# # End dumb criterion
+
+# Energy based criterion
 ref_specs = [
-    RefineSpec(REFINE_LAMBDA, SVector(0.8, 0.0)),   # threshold = 0.8
+    RefineSpec(REFINE_ENERGY, SVector(0.8, 0.0)),
 ]
 frac_specs = [
-    FractureSpec(FRAC_LAMBDA, SVector(1.0, 0.0)),   # threshold = 1.0
+    FractureSpec(FRAC_STRETCH, SVector(1.0, 0.0)),  # critical stretch at cap
 ]
-
 cfg = CriteriaConfig(ref_specs, ANY, frac_specs, ANY)
-
 
 mutable struct SimulationState
     bodies::Vector{Body}
@@ -152,12 +160,7 @@ mutable struct SimulationState
         max_level = 1 # default 1 for now but should come from octree
 
         # Refine and fracture criteria
-        default_cfg = CriteriaConfig(
-            [RefineSpec(REFINE_LAMBDA, SVector(0.8, 0.0))],
-            ANY,
-            [FractureSpec(FRAC_LAMBDA, SVector(1.0, 0.0))],
-            ANY,
-        )
+        default_cfg = cfg
 
         new(bodies, manifolds, bond_cons, contact_cons, bond_map, contact_map, bond_map_all, e_log,
             dt, grav, mu, iters, Float64(b), Float64(g), Float64(al), stabil,
