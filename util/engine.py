@@ -62,6 +62,7 @@ def build_solver(setup: SimulationSetup, solver_type: str = "hybrid"):
             friction=setup.friction,
             sync_bodies=setup.sync_bodies,
             amr = setup.amr_params,
+            solver_params=setup.python_solver_params,
         )
         return solver
 

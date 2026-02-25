@@ -109,6 +109,7 @@ mutable struct SimulationState
     neighbor_map::Matrix{Int}
 
     max_ref_level::Int
+    max_ref_level_per_body::Vector{Int}
 
     criteria::Criteria.CriteriaConfig
 
@@ -158,6 +159,7 @@ mutable struct SimulationState
 
         # TODO must pass max_level in here
         max_level = 1 # default 1 for now but should come from octree
+        max_level_per_body = fill(max_level, length(bodies))
 
         # Refine and fracture criteria
         default_cfg = cfg
@@ -168,7 +170,7 @@ mutable struct SimulationState
             seed_neighbor_ids, seed_lambda_sums, seed_counts,
             active_pos, refine_mark, refine_mark_epoch, refine_blocked, refine_queue, refine_out,
             active, valid_mask, can_refine, level, parent_list, children_start, children_count,
-            neighbor_map, max_level, default_cfg)
+            neighbor_map, max_level, max_level_per_body, default_cfg)
 
     end
 end
@@ -486,8 +488,8 @@ function dual_update!(sim::SimulationState, alpha::Float64)
 
         levelA = sim.level[a_idx]
         levelB = sim.level[b_idx]
-        capA = (levelA >= sim.max_ref_level) || !has_valid_child(sim, a_idx)
-        capB = (levelB >= sim.max_ref_level) || !has_valid_child(sim, b_idx)
+        capA = (levelA >= local_max_ref_level(sim, a_idx)) || !has_valid_child(sim, a_idx)
+        capB = (levelB >= local_max_ref_level(sim, b_idx)) || !has_valid_child(sim, b_idx)
 
         # TODO essentially need to check if over threshold -> refine, UNLESS already @ max_ref_level, then break/fracture
 
@@ -606,6 +608,10 @@ function init_simulation(
     bond_data::Matrix{Float64},
     dt::Float64, gravity::Float64, iterations::Int;
     friction::Float64=0.5,
+    beta::Float64=10.0,
+    gamma::Float64=0.99,
+    alpha::Float64=0.95,
+    stabilize::Bool=true,
     sizes::Union{AbstractMatrix,Nothing}=nothing,
     assembly_ids::Union{Vector{Int},Nothing}=nothing,
     active::Union{AbstractVector{Bool},Nothing}=nothing,
@@ -616,7 +622,8 @@ function init_simulation(
     children_start::Union{AbstractVector{<:Integer},Nothing}=nothing,
     children_count::Union{AbstractVector{<:Integer},Nothing}=nothing,
     neighbor_map::Union{AbstractMatrix{<:Integer},Nothing}=nothing,
-    max_ref_level::Union{Int,Nothing}=nothing,)
+    max_ref_level::Union{Int,Nothing}=nothing,
+    max_ref_level_per_body::Union{AbstractVector{<:Integer},Nothing}=nothing,)
 
     n_bodies = length(masses)
     bodies = Vector{Body}(undef, n_bodies)
@@ -637,7 +644,11 @@ function init_simulation(
         bodies[i] = Body(i - 1, asm_id, is_static, p, q, size_v, mass; vel=v_lin, ang_vel=v_ang)
     end
 
-    sim = SimulationState(bodies, dt; grav=gravity, iters=iterations, mu=friction)
+    sim = SimulationState(
+        bodies, dt;
+        grav=gravity, iters=iterations, mu=friction,
+        b=beta, g=gamma, al=alpha, stabil=stabilize
+    )
 
     # TODO cleaner way to do this?
     # Apply AMR arrays if provided
@@ -675,6 +686,12 @@ function init_simulation(
     end
     if max_ref_level !== nothing
         sim.max_ref_level = max_ref_level
+        if length(sim.max_ref_level_per_body) == n_bodies
+            fill!(sim.max_ref_level_per_body, sim.max_ref_level)
+        end
+    end
+    if max_ref_level_per_body !== nothing
+        sim.max_ref_level_per_body = Int.(max_ref_level_per_body)
     end
 
     # Deterministic bond randomization unless overridden via AVBD_RNG_SEED.
@@ -931,6 +948,13 @@ end
     return false
 end
 
+@inline function local_max_ref_level(sim::SimulationState, body_idx::Int)
+    if length(sim.max_ref_level_per_body) == length(sim.bodies)
+        return sim.max_ref_level_per_body[body_idx]
+    end
+    return sim.max_ref_level
+end
+
 function enforce_2to1!(sim::SimulationState, refine_list::Vector{Int})
     sim.refine_mark_epoch += 1
     epoch = sim.refine_mark_epoch
@@ -959,7 +983,7 @@ function enforce_2to1!(sim::SimulationState, refine_list::Vector{Int})
 
         L = sim.level[v]
         target_level = L + 1
-        if target_level > sim.max_ref_level
+        if target_level > local_max_ref_level(sim, v)
             sim.refine_blocked[v] = true
             continue
         end

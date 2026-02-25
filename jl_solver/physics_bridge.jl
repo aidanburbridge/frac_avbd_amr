@@ -25,6 +25,10 @@ function init_system(
     gravity::FLOAT,
     iters::Int;
     friction::FLOAT=0.5,
+    beta::FLOAT=10.0,
+    gamma::FLOAT=0.99,
+    alpha::FLOAT=0.95,
+    stabilize::Bool=true,
     sizes::Union{Matrix{FLOAT},Nothing}=nothing,
     assembly_ids::Union{Vector{Int},Nothing}=nothing,
     active=nothing, # TODO do I really need to pass these, could initialize active in julia solver based on level
@@ -36,13 +40,15 @@ function init_system(
     children_count=nothing,
     neighbor_map=nothing,
     max_ref_level=nothing,
+    max_ref_level_per_body=nothing,
 )
     # Create the SimulationState object
     # This object stays in Julia memory
     sim = AVBDCore.init_simulation(pos, vel, masses, bond_data, dt, gravity, iters;
-        friction=friction, sizes=sizes, assembly_ids=assembly_ids,
+        friction=friction, beta=beta, gamma=gamma, alpha=alpha, stabilize=stabilize,
+        sizes=sizes, assembly_ids=assembly_ids,
         active=active, valid_mask=valid_mask, can_refine=can_refine, level=level, parent_list=parent_list, children_start=children_start, children_count=children_count, neighbor_map=neighbor_map,
-        max_ref_level=max_ref_level)
+        max_ref_level=max_ref_level, max_ref_level_per_body=max_ref_level_per_body)
     return sim
 end
 

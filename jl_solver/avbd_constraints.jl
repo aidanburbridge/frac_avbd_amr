@@ -7,6 +7,10 @@ import ..Collisions: Body
 
 export ContactConstraint, BondConstraint, initialize!, compute_constraint!, update_bounds!, eval_bond, update_bond_state!, bond_k_eff, get_effective_stiffness #AbstractConstraint, 
 
+const CONTACT_MARGIN = 1e-6
+const CONTACT_K_MIN = 1e6
+const CONTACT_K_MAX = 1e14
+
 ##### ---------- Contact Constraint ---------- #####
 
 mutable struct ContactConstraint
@@ -44,8 +48,8 @@ mutable struct ContactConstraint
         zeros_J = @SMatrix zeros(3, 6)
 
         stiff = @SVector fill(Inf, 3)
-        kmin = @SVector fill(1.0, 3)
-        kmax = @SVector fill(1e12, 3) # TODO Maybe we make this Inf -> could make Inf 
+        kmin = @SVector fill(CONTACT_K_MIN, 3)
+        kmax = @SVector fill(CONTACT_K_MAX, 3) # TODO Maybe we make this Inf -> could make Inf 
 
         fmin = @SVector [0.0, -Inf, -Inf]
         fmax = @SVector [Inf, Inf, Inf]
@@ -86,7 +90,7 @@ function initialize!(con::ContactConstraint)
     con.JA = vcat(JA_row1, JA_row2, JA_row3)
     con.JB = vcat(JB_row1, JB_row2, JB_row3)
 
-    margin = 5e-4
+    margin = CONTACT_MARGIN
     pA0 = con.bodyA.pos + rA0
     pB0 = con.bodyB.pos + rB0
     sep = pA0 - pB0

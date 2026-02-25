@@ -69,6 +69,7 @@ class HybridSolver:
         sizes: Optional[np.ndarray] = None,
         assembly_ids: Optional[np.ndarray] = None,
         amr: Optional[dict] = None,
+        solver_params: Optional[dict] = None,
     ):
         """
         Create or reset the Julia SimulationState in-place.
@@ -96,6 +97,18 @@ class HybridSolver:
         if assembly_ids is not None:
             kwargs["assembly_ids"] = np.ascontiguousarray(assembly_ids, dtype=np.int64)
 
+        params = dict(solver_params or {})
+        if "beta" in params:
+            kwargs["beta"] = float(params["beta"])
+        if "gamma" in params:
+            kwargs["gamma"] = float(params["gamma"])
+        if "alpha" in params:
+            kwargs["alpha"] = float(params["alpha"])
+        if "stabilize" in params:
+            kwargs["stabilize"] = bool(params["stabilize"])
+        elif "post_stabilize" in params:
+            kwargs["stabilize"] = bool(params["post_stabilize"])
+
         if amr:
             kwargs["parent_list"] = np.ascontiguousarray(amr["parent_list"], dtype=np.int32)
             if "children_start" in amr:
@@ -116,6 +129,8 @@ class HybridSolver:
                 kwargs["neighbor_map"] = np.ascontiguousarray(amr["neighbor_map"], dtype=np.int32)
             if "max_ref_level" in amr:
                 kwargs["max_ref_level"] = int(amr["max_ref_level"])
+            if "max_ref_level_per_body" in amr:
+                kwargs["max_ref_level_per_body"] = np.ascontiguousarray(amr["max_ref_level_per_body"], dtype=np.int32)
 
         # Ensure Julia sees plain Array{T} rather than PyArray wrappers (juliacall requires this).
         def _to_julia_array(x):
@@ -260,6 +275,7 @@ class HybridWorld:
         project: Optional[str] = None,
         sync_bodies: bool = True,
         amr = None,
+        solver_params: Optional[dict] = None,
     ) -> None:
         self.dt = float(dt)
         self.iterations = int(iterations)
@@ -270,12 +286,20 @@ class HybridWorld:
         self.contact_constraints = []  # placeholder for visualizer API
         self._sync_bodies = bool(sync_bodies)
         self._amr = amr or {}
+        self._solver_params = dict(solver_params or {})
 
         self._solver = HybridSolver(self.dt, self.iterations, self.gravity, friction=self.friction, project=project)
 
         pos, vel, masses, sizes, assembly_ids, idx_map = _body_arrays(self.bodies)
         bonds = _bond_rows(self.constraints, idx_map)
-        self._solver.initialize(pos, vel, masses, bonds=bonds, sizes=sizes, assembly_ids=assembly_ids, amr=self._amr)
+        self._solver.initialize(
+            pos, vel, masses,
+            bonds=bonds,
+            sizes=sizes,
+            assembly_ids=assembly_ids,
+            amr=self._amr,
+            solver_params=self._solver_params,
+        )
 
         if self._sync_bodies:
             self._update_bodies(self._solver.get_state())

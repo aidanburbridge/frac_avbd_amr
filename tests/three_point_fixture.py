@@ -21,8 +21,8 @@ ROLLER_DIAMETER = 5.0 * MM
 SUPPORT_SPAN = 30.0 * MM
 
 # Initial clearances
-SUPPORT_GAP = 0.20 * MM
-TOP_GAP = 0.20 * MM
+SUPPORT_GAP = 0.2 * MM
+TOP_GAP = 0.2 * MM
 
 # Voxelization settings (separate per part)
 BEAM_VOXEL_RES = 140
@@ -32,7 +32,7 @@ ROLLER_VOXEL_RES = 90
 DT_PHYSICS = 1 / 4000
 DT_RENDER = 1 / 60
 STEPS_PER = max(1, int(DT_RENDER / DT_PHYSICS))
-ITER = 50
+ITER = 180
 GRAV = 0.0
 FRICTION = 0.2
 PULL_RATE = 0.002
@@ -42,15 +42,15 @@ TENSILE_STRENGTH = 80e5
 FRACTURE_TOUGHNESS = 5e4
 DENSITY = 1150.0
 PENALTY_GAIN = 1e6
-STEPS = 2500
+STEPS = 2000
 ZETA_DAMP = 0.1
 
 PYTHON_SOLVER_PARAMS = {
     "mu": 0.3,
-    "post_stabilize": False,
-    "beta": 10,
+    "post_stabilize": True,
+    "beta": 5.0e4,
     "alpha": 0.95,
-    "gamma": 0.99,
+    "gamma": 1.0,
     "debug_contacts": False,
 }
 
@@ -211,6 +211,7 @@ def build_setup() -> SimulationSetup:
         "neighbor_map": np.full((n_bodies, 6), -1, dtype=np.int32),
         "can_refine": np.zeros(n_bodies, dtype=np.bool_),
         "max_ref_level": 0,
+        "max_ref_level_per_body": np.zeros(n_bodies, dtype=np.int32),
     }
 
     cfl = min(calc_cfl(DENSITY, E_MODULUS, NU, beam_h), calc_cfl(DENSITY, E_MODULUS, NU, roller_h))
