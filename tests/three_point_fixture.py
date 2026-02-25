@@ -42,7 +42,7 @@ TENSILE_STRENGTH = 80e5
 FRACTURE_TOUGHNESS = 5e4
 DENSITY = 1150.0
 PENALTY_GAIN = 1e6
-STEPS = 2000
+STEPS = 1000
 ZETA_DAMP = 0.1
 
 # Per-body AMR caps
@@ -116,82 +116,6 @@ def _build_voxel_assembly(
     return assembly, phys_h
 
 
-def _build_voxel_assembly_with_hierarchy(
-    stl_path: str,
-    target_length: float,
-    voxel_res: int,
-    align_axis: str,
-    max_ref_level: int,
-) -> tuple[VoxelAssembly, float, dict]:
-    stlvox = vox.STLVoxelizer(stl_path, flood_fill=False)
-    occ, raw_origin, raw_h = stlvox.voxelize_to_resolution(voxel_res)
-
-    raw_len = float(np.max(stlvox.mesh.extents))
-    if raw_len <= 0.0:
-        raise ValueError(f"Invalid STL extents for '{stl_path}'")
-
-    scale = target_length / raw_len
-    phys_h = raw_h * scale
-    phys_origin = raw_origin * scale
-
-    def _contains_fn(pts: np.ndarray) -> np.ndarray:
-        return vox._contains_points_chunked(
-            stlvox.mesh,
-            np.asarray(pts, dtype=float),
-            chunk=200_000,
-            show_progress=False,
-        )
-
-    all_nodes, _, parent_list, child_start, child_count, valid_mask, neighbor_map, can_refine = oct.build_full_hierarchy(
-        coarse_occ=occ,
-        max_level=max_ref_level,
-        origin=raw_origin,
-        h_base=raw_h,
-        contains_fn=_contains_fn,
-    )
-
-    boxes, mapping, active_list = oct.instantiate_boxes_from_tree(
-        all_nodes,
-        origin=phys_origin,
-        h_base=phys_h,
-        density=DENSITY,
-        penalty_gain=PENALTY_GAIN,
-        static=False,
-        show_progress=False,
-        valid_mask=valid_mask,
-    )
-
-    visco_val = calc_damping(DENSITY, phys_h, E_MODULUS, ZETA_DAMP)
-    bonds = oct.build_contsraints_from_hierarchy(
-        all_nodes,
-        boxes,
-        mapping,
-        E=E_MODULUS,
-        nu=NU,
-        tensile_strength=TENSILE_STRENGTH,
-        fracture_toughness=FRACTURE_TOUGHNESS,
-        damping_val=visco_val,
-        valid_mask=valid_mask,
-        max_level=max_ref_level,
-    )
-
-    assembly = VoxelAssembly(boxes, bonds)
-    assembly.align_longest_axis(align_axis)
-
-    amr = {
-        "parent_list": np.asarray(parent_list, dtype=np.int32),
-        "child_start": np.asarray(child_start, dtype=np.int32),
-        "child_count": np.asarray(child_count, dtype=np.int32),
-        "level": np.asarray([lf.level for lf in all_nodes], dtype=np.int8),
-        "active": np.asarray(active_list, dtype=np.bool_),
-        "valid_mask": np.asarray(valid_mask, dtype=np.bool_),
-        "neighbor_map": np.asarray(neighbor_map, dtype=np.int32),
-        "can_refine": np.asarray(can_refine, dtype=np.bool_),
-    }
-
-    return assembly, phys_h, amr
-
-
 def _move_center_to(assembly: VoxelAssembly, target_center) -> None:
     delta = np.asarray(target_center, dtype=float) - assembly.bounds().center
     assembly.translate(delta)
@@ -237,13 +161,43 @@ def _flatten_with_global_bond_indices(assemblies: list[VoxelAssembly]):
 
 
 def build_setup() -> SimulationSetup:
-    beam, beam_h, beam_amr = _build_voxel_assembly_with_hierarchy(
-        BEAM_STL,
-        target_length=BEAM_LENGTH,
-        voxel_res=BEAM_VOXEL_RES,
-        align_axis="x",
-        max_ref_level=BEAM_MAX_REF_LEVEL,
+    beam_vox = vox.STLVoxelizer(BEAM_STL, flood_fill=False)
+    beam_occ, beam_raw_origin, beam_raw_h = beam_vox.voxelize_to_resolution(BEAM_VOXEL_RES)
+    beam_raw_len = float(np.max(beam_vox.mesh.extents))
+    if beam_raw_len <= 0.0:
+        raise ValueError(f"Invalid STL extents for '{BEAM_STL}'")
+    beam_scale = BEAM_LENGTH / beam_raw_len
+    beam_h = beam_raw_h * beam_scale
+    beam_origin = beam_raw_origin * beam_scale
+
+    def _beam_contains_fn(pts: np.ndarray) -> np.ndarray:
+        return vox._contains_points_chunked(
+            beam_vox.mesh,
+            np.asarray(pts, dtype=float),
+            chunk=200_000,
+            show_progress=False,
+        )
+
+    beam_boxes, beam_bonds, beam_amr = oct.build_hierarchical_bodies_bonds_amr(
+        coarse_occ=beam_occ,
+        hierarchy_origin=beam_raw_origin,
+        hierarchy_h_base=beam_raw_h,
+        max_level=BEAM_MAX_REF_LEVEL,
+        contains_fn=_beam_contains_fn,
+        body_origin=beam_origin,
+        body_h_base=beam_h,
+        density=DENSITY,
+        penalty_gain=PENALTY_GAIN,
+        E=E_MODULUS,
+        nu=NU,
+        tensile_strength=TENSILE_STRENGTH,
+        fracture_toughness=FRACTURE_TOUGHNESS,
+        damping_val=calc_damping(DENSITY, beam_h, E_MODULUS, ZETA_DAMP),
+        show_progress=False,
     )
+    beam = VoxelAssembly(beam_boxes, beam_bonds)
+    beam.align_longest_axis("x")
+
     roller_base, roller_h = _build_voxel_assembly(
         ROLLER_STL,
         target_length=ROLLER_LENGTH,
@@ -280,60 +234,25 @@ def build_setup() -> SimulationSetup:
     assemblies = [beam, left_support, right_support, top_indenter]
     all_bodies, all_bonds = _flatten_with_global_bond_indices(assemblies)
     n_bodies = len(all_bodies)
-    n_beam = len(beam.bodies)
-
-    if n_beam != len(beam_amr["level"]):
-        raise ValueError("Beam AMR hierarchy/body count mismatch")
 
     assembly_ids = np.array([int(getattr(b, "assembly_id", -1)) for b in all_bodies], dtype=np.int32)
     beam_tag = int(beam.assembly_tag)
     beam_mask = assembly_ids == beam_tag
     max_ref_level_per_body = np.where(beam_mask, BEAM_MAX_REF_LEVEL, ROLLER_MAX_REF_LEVEL).astype(np.int32)
 
-    parent_list = np.full(n_bodies, -1, dtype=np.int32)
-    child_start = np.full(n_bodies, -1, dtype=np.int32)
-    child_count = np.zeros(n_bodies, dtype=np.int32)
-    level = np.zeros(n_bodies, dtype=np.int8)
-    active = np.ones(n_bodies, dtype=np.bool_)
-    valid_mask = np.ones(n_bodies, dtype=np.bool_)
-    neighbor_map = np.full((n_bodies, 6), -1, dtype=np.int32)
-    can_refine = np.zeros(n_bodies, dtype=np.bool_)
+    amr_blocks = [
+        beam_amr,
+        oct.make_flat_amr_block(len(left_support.bodies)),
+        oct.make_flat_amr_block(len(right_support.bodies)),
+        oct.make_flat_amr_block(len(top_indenter.bodies)),
+    ]
+    amr_dict = oct.merge_amr_blocks(amr_blocks)
+    amr_dict["can_refine"] = np.logical_and(amr_dict["can_refine"], beam_mask)
+    amr_dict["max_ref_level"] = int(max_ref_level_per_body.max())
+    amr_dict["max_ref_level_per_body"] = max_ref_level_per_body
 
-    beam_offset = 0
-    beam_slice = slice(beam_offset, beam_offset + n_beam)
-
-    beam_parent = beam_amr["parent_list"].copy()
-    beam_parent[beam_parent >= 0] += beam_offset
-    parent_list[beam_slice] = beam_parent
-
-    beam_child_start = beam_amr["child_start"].copy()
-    beam_child_start[beam_child_start >= 0] += beam_offset
-    child_start[beam_slice] = beam_child_start
-
-    child_count[beam_slice] = beam_amr["child_count"]
-    level[beam_slice] = beam_amr["level"]
-    active[beam_slice] = beam_amr["active"]
-    valid_mask[beam_slice] = beam_amr["valid_mask"]
-
-    beam_neighbor = beam_amr["neighbor_map"].copy()
-    beam_neighbor[beam_neighbor >= 0] += beam_offset
-    neighbor_map[beam_slice, :] = beam_neighbor
-
-    can_refine[beam_slice] = beam_amr["can_refine"]
-    can_refine = np.logical_and(can_refine, beam_mask)
-
-    amr_dict = {
-        "parent_list": parent_list,
-        "child_start": child_start,
-        "child_count": child_count,
-        "level": level,
-        "active": active,
-        "valid_mask": valid_mask,
-        "neighbor_map": neighbor_map,
-        "can_refine": can_refine.astype(np.bool_),
-        "max_ref_level": int(max_ref_level_per_body.max()),
-        "max_ref_level_per_body": max_ref_level_per_body,
-    }
+    if n_bodies != len(amr_dict["level"]):
+        raise ValueError("AMR/body count mismatch after block merge")
 
     cfl = min(calc_cfl(DENSITY, E_MODULUS, NU, beam_h), calc_cfl(DENSITY, E_MODULUS, NU, roller_h))
     print(f"Fixture bodies: beam={len(beam.bodies)} left={len(left_support.bodies)} right={len(right_support.bodies)} top={len(top_indenter.bodies)}")

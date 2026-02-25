@@ -18,16 +18,16 @@ VOXEL_RES = 100
 MAX_REF_LEVEL = 2
 
 # Shared solver params
-DT_PHYSICS = 1/4000
-DT_RENDER = 1/60
+DT_PHYSICS = 1 / 4000
+DT_RENDER = 1 / 60
 STEPS_PER = int(DT_RENDER / DT_PHYSICS)
 ITER = 50
 GRAV = 0.0
 FRICTION = 0.0
 PULL_RATE = 0.005
-#PULL_RATE = 10
+# PULL_RATE = 10
 GRIP_DISTANCE = 0.01
-#GRIP_DISTANCE = 20
+# GRIP_DISTANCE = 20
 E_MODULUS = 2e9
 NU = 0.3
 TENSILE_STRENGTH = 80e5
@@ -47,16 +47,18 @@ PYTHON_SOLVER_PARAMS = {
 }
 
 def calc_cfl(density, young_mod, poisson, vox_size):
-    shear_mod = young_mod / (2* ( 1+poisson))
-    wave_speed = np.sqrt(shear_mod/density)
+    shear_mod = young_mod / (2 * (1 + poisson))
+    wave_speed = np.sqrt(shear_mod / density)
     dt_cfl = vox_size / wave_speed
     return dt_cfl
 
-def calc_damping(density, h, stiffness, zeta):
-    mass = h*h*density
-    return 2 * zeta * np.sqrt(mass*stiffness)
 
-def build_setup()-> SimulationSetup:
+def calc_damping(density, h, stiffness, zeta):
+    mass = h * h * density
+    return 2 * zeta * np.sqrt(mass * stiffness)
+
+
+def build_setup() -> SimulationSetup:
 
     stlvox = vox.STLVoxelizer(STL_PATH, flood_fill=False)
 
@@ -68,60 +70,36 @@ def build_setup()-> SimulationSetup:
     phys_origin = raw_origin * scale_factor
 
     visco_val = calc_damping(DENSITY, phys_h, E_MODULUS, ZETA_DAMP)
-    cfl = calc_cfl(DENSITY, E_MODULUS, NU, phys_h) #2.9330379512351167e-06
+    cfl = calc_cfl(DENSITY, E_MODULUS, NU, phys_h)  # 2.9330379512351167e-06
 
-    # TODO is this the cleanest way to do STL geometry check - what is the 200_000 referring to?
     def _contains_fn(pts: np.ndarray) -> np.ndarray:
-        return vox._contains_points_chunked(stlvox.mesh, np.asarray(pts, dtype=float), chunk=200_000, show_progress=False)
+        return vox._contains_points_chunked(
+            stlvox.mesh,
+            np.asarray(pts, dtype=float),
+            chunk=200_000,
+            show_progress=False,
+        )
 
-    all_nodes, key_to_id, parent_list, child_start, child_count, valid_mask, neighbor_map, can_refine = oct.build_full_hierarchy(
+    boxes, beam_bonds, amr_dict = oct.build_hierarchical_bodies_bonds_amr(
         coarse_occ=occ,
+        hierarchy_origin=raw_origin,
+        hierarchy_h_base=raw_h,
         max_level=MAX_REF_LEVEL,
-        origin=raw_origin,
-        h_base=raw_h,
         contains_fn=_contains_fn,
-    )
-
-    print(f"DEBUG: Octree generated {len(all_nodes)} leaves")
-
-    # Build voxels @ ALL levels, even those that are not active
-    boxes, mapping, active_list = oct.instantiate_boxes_from_tree(
-        all_nodes,
-        phys_origin,
-        phys_h,
+        body_origin=phys_origin,
+        body_h_base=phys_h,
         density=DENSITY,
         penalty_gain=PENALTY_GAIN,
         static=False,
-        valid_mask=valid_mask,
-    )
-
-    print(f"DEBUG: Instantiated {len(boxes)} bodies")
-
-    # Build bond constraints between voxels
-    beam_bonds = oct.build_contsraints_from_hierarchy(
-        all_nodes,
-        boxes,
-        mapping,
+        show_progress=False,
         E=E_MODULUS,
         nu=NU,
         tensile_strength=TENSILE_STRENGTH,
         fracture_toughness=FRACTURE_TOUGHNESS,
         damping_val=visco_val,
-        valid_mask=valid_mask,
-        max_level=MAX_REF_LEVEL,
     )
 
-    # beam_bonds = oct.build_constraints_from_tree(
-    #     all_nodes,
-    #     boxes,
-    #     mapping,
-    #     E=E_MODULUS,
-    #     nu=NU,
-    #     tensile_strength=TENSILE_STRENGTH,
-    #     fracture_toughness=FRACTURE_TOUGHNESS,
-    #     damping_val=visco_val,
-    #     valid_mask=valid_mask,
-    # )
+    print(f"DEBUG: Instantiated {len(boxes)} bodies")
 
     print(f"Number of beam bonds: {len(beam_bonds)}")
     print(f"The damping value used for this sim: {visco_val}")
@@ -129,34 +107,21 @@ def build_setup()-> SimulationSetup:
 
     dog_bone = VoxelAssembly(boxes, beam_bonds)
 
-    dog_bone.align_longest_axis('z')
+    dog_bone.align_longest_axis("z")
 
     dog_bone.set_boundary_fixed(
-        faces = ["bottom"],
-        distance = GRIP_DISTANCE,
-        debug=True
-        )
-    
-    dog_bone.set_boundary_velocity(
-        faces = ["top"],
-        velocity = [0.0, 0.0, PULL_RATE],
-        #velocity = [0.0, PULL_RATE, 0.0],
-        distance = GRIP_DISTANCE,
-        debug=True
+        faces=["bottom"],
+        distance=GRIP_DISTANCE,
+        debug=True,
     )
 
-    # Build AMR dict
-    amr_dict = {
-        "parent_list": np.asarray(parent_list, dtype=np.int32),
-        "child_start": np.asarray(child_start, dtype=np.int32),
-        "child_count": np.asarray(child_count, np.int32),
-        "level": np.asarray([lf.level for lf in all_nodes], dtype=np.int8),
-        "active": np.asarray(active_list, dtype=np.int32),
-        "valid_mask": np.asarray(valid_mask, dtype=np.bool_),
-        "neighbor_map": np.asarray(neighbor_map, dtype=np.int32),
-        "can_refine": np.asarray(can_refine, dtype=np.bool_),
-        "max_ref_level": MAX_REF_LEVEL,
-    }
+    dog_bone.set_boundary_velocity(
+        faces=["top"],
+        velocity=[0.0, 0.0, PULL_RATE],
+        # velocity = [0.0, PULL_RATE, 0.0],
+        distance=GRIP_DISTANCE,
+        debug=True,
+    )
 
     return SimulationSetup(
         bodies=dog_bone.bodies,
@@ -185,5 +150,5 @@ def build_setup()-> SimulationSetup:
             "steps_per_export": STEPS_PER,
             "show_progress": True,
             "profile_timings": True,
-        }
+        },
     )

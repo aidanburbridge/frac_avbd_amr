@@ -855,3 +855,155 @@ def build_neighbor_map(nodes: list[Leaf], key_to_id: dict[tuple[int, int, int, i
                 neighbors[node_idx, d_idx] = key_to_id[nk]
     
     return neighbors
+
+
+def build_hierarchical_bodies_bonds_amr(
+        coarse_occ: np.ndarray,
+        hierarchy_origin: np.ndarray,
+        hierarchy_h_base: float,
+        *,
+        max_level: int,
+        contains_fn=None,
+        body_origin: Optional[np.ndarray] = None,
+        body_h_base: Optional[float] = None,
+        density: float = 1.0,
+        penalty_gain: float = 1e5,
+        static: bool = False,
+        show_progress: bool = False,
+        E: float = 1.0,
+        nu: float = 0.3,
+        tensile_strength: float = 1.0,
+        fracture_toughness: float = 1.0,
+        damping_val: float = 0.0):
+    """
+    Build a hierarchical voxel body set + bonds + AMR arrays from a coarse occupancy grid.
+
+    Returns:
+        bodies, bonds, amr_dict
+    """
+    nodes, _, parent_list, child_start, child_count, valid_mask, neighbor_map, can_refine = build_full_hierarchy(
+        coarse_occ=coarse_occ,
+        max_level=max_level,
+        origin=hierarchy_origin,
+        h_base=hierarchy_h_base,
+        contains_fn=contains_fn,
+    )
+
+    if body_origin is None:
+        body_origin = hierarchy_origin
+    if body_h_base is None:
+        body_h_base = hierarchy_h_base
+
+    bodies, mapping, active_list = instantiate_boxes_from_tree(
+        nodes,
+        origin=body_origin,
+        h_base=body_h_base,
+        density=density,
+        penalty_gain=penalty_gain,
+        static=static,
+        show_progress=show_progress,
+        valid_mask=valid_mask,
+    )
+
+    bonds = build_contsraints_from_hierarchy(
+        nodes,
+        bodies,
+        mapping,
+        E=E,
+        nu=nu,
+        tensile_strength=tensile_strength,
+        fracture_toughness=fracture_toughness,
+        damping_val=damping_val,
+        valid_mask=valid_mask,
+        max_level=max_level,
+    )
+
+    amr_dict = {
+        "parent_list": np.asarray(parent_list, dtype=np.int32),
+        "child_start": np.asarray(child_start, dtype=np.int32),
+        "child_count": np.asarray(child_count, dtype=np.int32),
+        "level": np.asarray([lf.level for lf in nodes], dtype=np.int8),
+        "active": np.asarray(active_list, dtype=np.bool_),
+        "valid_mask": np.asarray(valid_mask, dtype=np.bool_),
+        "neighbor_map": np.asarray(neighbor_map, dtype=np.int32),
+        "can_refine": np.asarray(can_refine, dtype=np.bool_),
+        "max_ref_level": int(max_level),
+    }
+
+    return bodies, bonds, amr_dict
+
+
+def make_flat_amr_block(n_bodies: int) -> dict:
+    """Build a no-hierarchy AMR block for rigid/non-refining bodies."""
+    n = int(n_bodies)
+    return {
+        "parent_list": np.full(n, -1, dtype=np.int32),
+        "child_start": np.full(n, -1, dtype=np.int32),
+        "child_count": np.zeros(n, dtype=np.int32),
+        "level": np.zeros(n, dtype=np.int8),
+        "active": np.ones(n, dtype=np.bool_),
+        "valid_mask": np.ones(n, dtype=np.bool_),
+        "neighbor_map": np.full((n, 6), -1, dtype=np.int32),
+        "can_refine": np.zeros(n, dtype=np.bool_),
+        "max_ref_level": 0,
+    }
+
+
+def merge_amr_blocks(amr_blocks: list[dict]) -> dict:
+    """
+    Merge multiple local AMR blocks into one global AMR dict (with index offsetting).
+    """
+    total = int(sum(len(np.asarray(block["level"])) for block in amr_blocks))
+
+    parent_list = np.full(total, -1, dtype=np.int32)
+    child_start = np.full(total, -1, dtype=np.int32)
+    child_count = np.zeros(total, dtype=np.int32)
+    level = np.zeros(total, dtype=np.int8)
+    active = np.zeros(total, dtype=np.bool_)
+    valid_mask = np.zeros(total, dtype=np.bool_)
+    neighbor_map = np.full((total, 6), -1, dtype=np.int32)
+    can_refine = np.zeros(total, dtype=np.bool_)
+
+    max_ref_level = 0
+    offset = 0
+    for block in amr_blocks:
+        local_level = np.asarray(block["level"], dtype=np.int8)
+        n = int(len(local_level))
+        if n == 0:
+            continue
+        sl = slice(offset, offset + n)
+
+        local_parent = np.asarray(block["parent_list"], dtype=np.int32).copy()
+        local_parent[local_parent >= 0] += offset
+        parent_list[sl] = local_parent
+
+        local_child_start = np.asarray(block.get("child_start", block.get("children_start")), dtype=np.int32).copy()
+        local_child_start[local_child_start >= 0] += offset
+        child_start[sl] = local_child_start
+
+        child_count[sl] = np.asarray(block.get("child_count", block.get("children_count")), dtype=np.int32)
+        level[sl] = local_level
+        active[sl] = np.asarray(block["active"], dtype=np.bool_)
+        valid_mask[sl] = np.asarray(block["valid_mask"], dtype=np.bool_)
+
+        local_neighbor = np.asarray(block["neighbor_map"], dtype=np.int32).copy()
+        local_neighbor[local_neighbor >= 0] += offset
+        neighbor_map[sl, :] = local_neighbor
+
+        if "can_refine" in block:
+            can_refine[sl] = np.asarray(block["can_refine"], dtype=np.bool_)
+
+        max_ref_level = max(max_ref_level, int(block.get("max_ref_level", int(np.max(local_level)))))
+        offset += n
+
+    return {
+        "parent_list": parent_list,
+        "child_start": child_start,
+        "child_count": child_count,
+        "level": level,
+        "active": active,
+        "valid_mask": valid_mask,
+        "neighbor_map": neighbor_map,
+        "can_refine": can_refine,
+        "max_ref_level": int(max_ref_level),
+    }
