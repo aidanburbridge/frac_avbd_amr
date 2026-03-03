@@ -95,6 +95,8 @@ mutable struct SimulationState
     refine_blocked::BitVector
     refine_queue::Vector{Int}
     refine_out::Vector{Int}
+    body_refine_cooldown::Vector{Int}
+    bond_fracture_cooldown::Vector{Int}
 
     # Hierarchy lists
     # TODO there must be a way to make this somehow more compact - do I really need all of these lists?
@@ -147,6 +149,8 @@ mutable struct SimulationState
         refine_blocked = falses(length(bodies))
         refine_queue = Int[]
         refine_out = Int[]
+        body_refine_cooldown = zeros(Int, length(bodies))
+        bond_fracture_cooldown = Int[]
         sizehint!(refine_queue, 64)
         sizehint!(refine_out, 64)
         level = fill(0, length(bodies))
@@ -169,6 +173,7 @@ mutable struct SimulationState
             active_body_ids, active_bond_ids, bond_mark, bond_mark_epoch,
             seed_neighbor_ids, seed_lambda_sums, seed_counts,
             active_pos, refine_mark, refine_mark_epoch, refine_blocked, refine_queue, refine_out,
+            body_refine_cooldown, bond_fracture_cooldown,
             active, valid_mask, can_refine, level, parent_list, children_start, children_count,
             neighbor_map, max_level, max_level_per_body, default_cfg)
 
@@ -465,6 +470,9 @@ function dual_update!(sim::SimulationState, alpha::Float64)
 
     # List of bodies to be refined 
     refinement_list = Int[]
+    refine_votes = zeros(Int, length(sim.bodies))
+    fracture_list = Int[]
+    fracture_mark = falses(length(sim.bond_constraints))
 
     for con_id in sim.active_bond_ids
         con = sim.bond_constraints[con_id]
@@ -486,10 +494,10 @@ function dual_update!(sim::SimulationState, alpha::Float64)
             continue
         end
 
-        levelA = sim.level[a_idx]
-        levelB = sim.level[b_idx]
-        capA = (levelA >= local_max_ref_level(sim, a_idx)) || !has_valid_child(sim, a_idx)
-        capB = (levelB >= local_max_ref_level(sim, b_idx)) || !has_valid_child(sim, b_idx)
+        capA = Criteria.endpoint_at_fracture_cap(sim, a_idx)
+        capB = Criteria.endpoint_at_fracture_cap(sim, b_idx)
+        can_refine_A = Criteria.endpoint_can_schedule_refine(sim, a_idx, capA)
+        can_refine_B = Criteria.endpoint_can_schedule_refine(sim, b_idx, capB)
 
         # TODO essentially need to check if over threshold -> refine, UNLESS already @ max_ref_level, then break/fracture
 
@@ -502,11 +510,13 @@ function dual_update!(sim::SimulationState, alpha::Float64)
             # TODO REFINEMENT CRITERIA
             # if abs(lam_r) >= ref_crit
             if Criteria.should_refine(sim.criteria, sim, con, lam_r, r)
-                if !capA
+                if can_refine_A
                     push!(refinement_list, a_idx)
+                    refine_votes[a_idx] += 1
                 end
-                if !capB
+                if can_refine_B
                     push!(refinement_list, b_idx)
+                    refine_votes[b_idx] += 1
                 end
             end
 
@@ -515,25 +525,28 @@ function dual_update!(sim::SimulationState, alpha::Float64)
             #if abs(lam_r) >= (con.fracture[r] * 10)
             if Criteria.should_fracture(sim.criteria, sim, con, lam_r, r)
                 if capA && capB
-                    # d = abs(sigma) - abs(lam_r)
-                    # con.damage += d
-                    con.is_broken = true
-                    con.penalty_k = @SVector zeros(3)
-                    con.lambda = @SVector zeros(3)
+                    # Stage fracture event (commit after inner iterations).
+                    if !fracture_mark[con_id] && sim.bond_fracture_cooldown[con_id] == 0
+                        fracture_mark[con_id] = true
+                        push!(fracture_list, con_id)
+                    end
                     break
                 else
                     # NOT @ finest level -> push to refine
-                    if !capA
+                    if can_refine_A
                         push!(refinement_list, a_idx)
+                        refine_votes[a_idx] += 1
                     end
-                    if !capB
+                    if can_refine_B
                         push!(refinement_list, b_idx)
+                        refine_votes[b_idx] += 1
                     end
                 end
             end
 
             if lam_r > con.f_min[r] && lam_r < con.f_max[r]
-                new_k = pk[r] + sim.beta * abs(con.C[r])
+                dk = Criteria.penalty_increment(sim.beta, con.C[r])
+                new_k = pk[r] + dk
                 new_k = min(new_k, con.k_max[r])
                 if !isinf(con.stiffness[r])
                     new_k = min(new_k, con.stiffness[r])
@@ -563,12 +576,14 @@ function dual_update!(sim::SimulationState, alpha::Float64)
                 lam = setindex(lam, clamp(sigma, con.f_min[r], con.f_max[r]), r)
 
                 if lam[r] > con.f_min[r] && lam[r] < con.f_max[r]
-                    new_k = pk[r] + sim.beta * abs(con.C[r])
+                    dk = Criteria.penalty_increment(sim.beta, con.C[r])
+                    new_k = pk[r] + dk
                     new_k = min(new_k, con.k_max[r])
                     pk = setindex(pk, new_k, r)
                 end
             else
-                new_k = pk[r] + sim.beta * abs(con.C[r])
+                dk = Criteria.penalty_increment(sim.beta, con.C[r])
+                new_k = pk[r] + dk
                 new_k = min(new_k, min(con.k_max[r], con.stiffness[r]))
                 pk = setindex(pk, new_k, r)
             end
@@ -579,7 +594,7 @@ function dual_update!(sim::SimulationState, alpha::Float64)
         AVBDConstraints.update_bounds!(con)
     end
 
-    return max_violation, refinement_list
+    return max_violation, Criteria.apply_refine_budget(sim, refinement_list, refine_votes), fracture_list
 end
 
 function update_vel!(sim::SimulationState, invdt::Float64)
@@ -763,6 +778,7 @@ function init_simulation(
     end
     sim.bond_mark = zeros(Int, length(sim.bond_constraints))
     sim.bond_mark_epoch = 0
+    sim.bond_fracture_cooldown = zeros(Int, length(sim.bond_constraints))
 
     return sim
 end
@@ -822,80 +838,118 @@ end
 end
 
 function step_simulation!(sim::SimulationState)
+    Criteria.decay_cooldowns!(sim)
 
-    dt = sim.dt
-    inv_dt = 1 / dt
-    inv_dt2 = 1 / (dt * dt)
-
-    # Inertial solve
-    predict_inertia!(sim)
-
-    # TODO CHECK time diffrence between running with collision detection and contact constraints vs. just bonds
-    # Build contact constraints
-    detect_collisions!(sim)
-
-    # warm start constraints
-    warm_start!(sim) # Python builds incident map here - inside the constraint loop 
-
-    #total_iters = sim.iterations + (sim.stabilize ? 1 : 0)
-    inner_passes = sim.iterations
+    dt_base = sim.dt
+    snapshot = Criteria.snapshot_step_state(sim)
 
     curr_max_violation = Inf
     refine_list = Int[]
+    fracture_list = Int[]
+    converged = false
+    alpha_log = sim.alpha
 
-    for in_it in 1:inner_passes
-
-        alpha_eff = sim.stabilize ? 1.0 : sim.alpha
-
-        # Loop over bodies aka primal loop
-        for b_id in sim.active_body_ids
-            body = sim.bodies[b_id]
-            # solve constriants not in loop but via linear algebra
-            body.is_static && continue
-
-            # TODO include a L-scheme term here that adds numerical inertia
-            primal_solve!(sim, body,
-                sim.bond_incidence[body.id+1],
-                sim.contact_incidence[body.id+1],
-                dt, inv_dt2, alpha_eff)  # Uses eval_bond
-
-            #assert_finite_body!(body, "after primal_solve in_it=$in_it")
+    attempt = 0
+    while true
+        # Retry uses a smaller dt and restored state
+        sim.dt = Criteria.attempt_dt(dt_base, attempt)
+        if attempt > 0
+            Criteria.restore_step_state!(sim, snapshot)
         end
 
-        # TODO should dual update output a list of voxels to refine OR should it happen in dual update? -> probably shouldn't
-        curr_max_violation, refine_list = dual_update!(sim, alpha_eff)
+        dt = sim.dt
+        inv_dt = 1 / dt
+        inv_dt2 = 1 / (dt * dt)
 
-        # Early out - skip prescribed num of iterations if below tolerance
-        curr_max_violation < EARLY_OUT_TOL && break
+        # Inertial solve
+        predict_inertia!(sim)
 
+        # Build contact constraints
+        detect_collisions!(sim)
+
+        # warm start constraints
+        warm_start!(sim)
+
+        inner_passes = sim.iterations
+        curr_max_violation = Inf
+        empty!(refine_list)
+        empty!(fracture_list)
+
+        for _ in 1:inner_passes
+            alpha_eff = sim.stabilize ? 1.0 : sim.alpha
+
+            for b_id in sim.active_body_ids
+                body = sim.bodies[b_id]
+                body.is_static && continue
+
+                primal_solve!(sim, body,
+                    sim.bond_incidence[body.id+1],
+                    sim.contact_incidence[body.id+1],
+                    dt, inv_dt2, alpha_eff)
+            end
+
+            max_v, refine_iter, frac_iter = dual_update!(sim, alpha_eff)
+            curr_max_violation = max_v
+            append!(refine_list, refine_iter)
+            append!(fracture_list, frac_iter)
+
+            curr_max_violation < EARLY_OUT_TOL && break
+        end
+
+        converged = curr_max_violation < EARLY_OUT_TOL
+
+        refine_list, fracture_list, raw_refine_count, raw_fracture_count =
+            Criteria.prepare_step_events(refine_list, fracture_list)
+
+        if Criteria.can_retry_attempt(attempt) &&
+           Criteria.should_retry_step(sim, curr_max_violation, raw_refine_count, raw_fracture_count, EARLY_OUT_TOL)
+            attempt += 1
+            continue
+        end
+        break
     end
 
+    # S6: commit topology changes only after inner solve converges.
     if DEBUG_REFINE_ALL
         refine_list = copy(sim.active_body_ids)
     end
 
-    # # TODO do refinement step here
-    if !isempty(refine_list)
-        if size(sim.neighbor_map, 2) == 6
-            refine_list = enforce_2to1!(sim, refine_list)
+    # Commit topology changes only on converged solves.
+    if converged
+        # Commit fractures first, then refinement.
+        for con_id in fracture_list
+            con = sim.bond_constraints[con_id]
+            con.is_broken && continue
+            con.is_active || continue
+            con.is_broken = true
+            con.penalty_k = @SVector zeros(3)
+            con.lambda = @SVector zeros(3)
+            sim.bond_fracture_cooldown[con_id] = Criteria.FRACTURE_COOLDOWN_STEPS
         end
-        for v in refine_list
-            refine_voxel!(sim, v)
+
+        if !isempty(refine_list)
+            if size(sim.neighbor_map, 2) == 6
+                refine_list = enforce_2to1!(sim, refine_list)
+                refine_list, _ = Criteria.cap_events(refine_list, fracture_list)
+            end
+            for v in refine_list
+                sim.body_refine_cooldown[v] > 0 && continue
+                refine_voxel!(sim, v)
+                sim.body_refine_cooldown[v] = Criteria.REFINE_COOLDOWN_STEPS
+            end
         end
     end
 
     # Velocity derivation from new positions
-    update_vel!(sim, inv_dt)
-
-    alpha_log = sim.alpha
+    update_vel!(sim, 1 / sim.dt)
 
     # Stabilization pass
-    if sim.stabilize && isempty(refine_list) #HACK - just skip stabilization when refinement occurs
+    if sim.stabilize && isempty(refine_list)
         alpha_stabil = 0.05
         for b_id in sim.active_body_ids
             body = sim.bodies[b_id]
             body.is_static && continue
-            primal_solve!(sim, body, sim.bond_incidence[body.id+1], sim.contact_incidence[body.id+1], dt, inv_dt2, alpha_stabil)
+            primal_solve!(sim, body, sim.bond_incidence[body.id+1], sim.contact_incidence[body.id+1], sim.dt, 1 / (sim.dt * sim.dt), alpha_stabil)
         end
         dual_update!(sim, alpha_stabil)
         alpha_log = alpha_stabil
@@ -929,32 +983,6 @@ end
     return 0
 end
 
-@inline function has_valid_child(sim::SimulationState, body_idx::Int)
-    if length(sim.can_refine) == length(sim.bodies)
-        return sim.can_refine[body_idx]
-    end
-    node_id = sim.bodies[body_idx].id
-    start0 = sim.children_start[node_id+1]
-    count = sim.children_count[node_id+1]
-    if start0 < 0 || count <= 0
-        return false
-    end
-    for child_node in start0:(start0+count-1)
-        child_idx = child_node + 1
-        if sim.valid_mask[child_idx]
-            return true
-        end
-    end
-    return false
-end
-
-@inline function local_max_ref_level(sim::SimulationState, body_idx::Int)
-    if length(sim.max_ref_level_per_body) == length(sim.bodies)
-        return sim.max_ref_level_per_body[body_idx]
-    end
-    return sim.max_ref_level
-end
-
 function enforce_2to1!(sim::SimulationState, refine_list::Vector{Int})
     sim.refine_mark_epoch += 1
     epoch = sim.refine_mark_epoch
@@ -983,7 +1011,7 @@ function enforce_2to1!(sim::SimulationState, refine_list::Vector{Int})
 
         L = sim.level[v]
         target_level = L + 1
-        if target_level > local_max_ref_level(sim, v)
+        if target_level > Criteria.local_max_ref_level(sim, v)
             sim.refine_blocked[v] = true
             continue
         end
@@ -994,7 +1022,7 @@ function enforce_2to1!(sim::SimulationState, refine_list::Vector{Int})
             nb_idx > 0 || continue
 
             if sim.level[nb_idx] < target_level - 1
-                if has_valid_child(sim, nb_idx)
+                if Criteria.has_valid_child(sim, nb_idx)
                     if sim.refine_mark[nb_idx] != epoch
                         sim.refine_mark[nb_idx] = epoch
                         push!(sim.refine_queue, nb_idx)
