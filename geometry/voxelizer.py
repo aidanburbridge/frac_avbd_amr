@@ -143,6 +143,7 @@ class STLVoxelizer:
         """
         Compute grid shape n=(Nx,Ny,Nz), origin, and 1D center arrays for size h.
         Adds pad_voxels of empty space around the AABB for robust flood-fill.
+        Grid is centered on the AABB midpoint to preserve geometric symmetry.
 
         Input:
             - aabb_mins: min values of mesh AABB
@@ -156,7 +157,8 @@ class STLVoxelizer:
         n = np.ceil(size / h).astype(int)                           # Number of voxels that fit along each axis
         n = np.maximum(n, 1)                                        # Clamp to at least 1
         n = n + 2 * pad_voxels                                      # Add safety padding
-        origin = np.asarray(aabb_mins) - pad_voxels * h             # world coordinate of the (0,0,0) voxel corner
+        midpoint = 0.5 * (np.asarray(aabb_mins) + np.asarray(aabb_maxs))
+        origin = midpoint - 0.5 * n.astype(float) * h               # world coordinate of the (0,0,0) voxel corner
         
         # Centers
         x_centers = origin[0] + (np.arange(n[0]) + 0.5) * h         # x-coordinates of voxel centers

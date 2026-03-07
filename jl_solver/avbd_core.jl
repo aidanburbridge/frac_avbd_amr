@@ -387,6 +387,9 @@ function primal_solve!(sim::SimulationState, b::Body, bonds::Vector{Int}, contac
     if !isfinite(b.mass) || b.mass <= 0.0 || !all(isfinite, b.inertia_diag)
         return
     end
+    if !(all(isfinite, b.pos) && all(isfinite, b.quat) && all(isfinite, b.vel) && all(isfinite, b.ang_vel))
+        return
+    end
 
     m_val = b.mass * invdt2
     I_val = b.inertia_diag * invdt2
@@ -456,7 +459,14 @@ function primal_solve!(sim::SimulationState, b::Body, bonds::Vector{Int}, contac
         H[i, i] += 1e-6
     end
 
+    if !(all(isfinite, H) && all(isfinite, F))
+        return
+    end
+
     dx = H \ F
+    if !all(isfinite, dx)
+        return
+    end
     b.pos += dx[1:3]
 
     dq = rotvec_to_quat(Vec3(dx[4], dx[5], dx[6]))
@@ -841,6 +851,7 @@ function step_simulation!(sim::SimulationState)
     Criteria.decay_cooldowns!(sim)
 
     dt_base = sim.dt
+    dt_used = dt_base
     snapshot = Criteria.snapshot_step_state(sim)
 
     curr_max_violation = Inf
@@ -852,7 +863,11 @@ function step_simulation!(sim::SimulationState)
     attempt = 0
     while true
         # Retry uses a smaller dt and restored state
-        sim.dt = Criteria.attempt_dt(dt_base, attempt)
+        dt_trial = Criteria.attempt_dt(dt_base, attempt)
+        if !(isfinite(dt_trial) && dt_trial > 0.0)
+            dt_trial = dt_base
+        end
+        sim.dt = dt_trial
         if attempt > 0
             Criteria.restore_step_state!(sim, snapshot)
         end
@@ -860,6 +875,7 @@ function step_simulation!(sim::SimulationState)
         dt = sim.dt
         inv_dt = 1 / dt
         inv_dt2 = 1 / (dt * dt)
+        dt_used = dt
 
         # Inertial solve
         predict_inertia!(sim)
@@ -941,7 +957,7 @@ function step_simulation!(sim::SimulationState)
     end
 
     # Velocity derivation from new positions
-    update_vel!(sim, 1 / sim.dt)
+    update_vel!(sim, 1 / dt_used)
 
     # Stabilization pass
     if sim.stabilize && isempty(refine_list)
@@ -949,11 +965,14 @@ function step_simulation!(sim::SimulationState)
         for b_id in sim.active_body_ids
             body = sim.bodies[b_id]
             body.is_static && continue
-            primal_solve!(sim, body, sim.bond_incidence[body.id+1], sim.contact_incidence[body.id+1], sim.dt, 1 / (sim.dt * sim.dt), alpha_stabil)
+            primal_solve!(sim, body, sim.bond_incidence[body.id+1], sim.contact_incidence[body.id+1], dt_used, 1 / (dt_used * dt_used), alpha_stabil)
         end
         dual_update!(sim, alpha_stabil)
         alpha_log = alpha_stabil
     end
+
+    # Keep base timestep fixed across frames; cutback applies only to retry attempts.
+    sim.dt = dt_base
 
     log_step!(sim.energy_log, sim.bodies, sim.bond_constraints, sim.contact_constraints, alpha_log,
         sim.active_body_ids, sim.active_bond_ids)
@@ -1083,6 +1102,16 @@ function refine_voxel!(sim::SimulationState, parent_idx::Int)
 
         if !sim.valid_mask[child_idx]
             continue
+        end
+
+        # Preserve boundary/kinematic behavior through refinement.
+        if parent.inv_mass == 0.0
+            child.is_static = parent.is_static
+            child.mass = parent.mass
+            child.inv_mass = parent.inv_mass
+            child.inertia_diag = parent.inertia_diag
+            child.inv_inertia_diag = parent.inv_inertia_diag
+            child.inv_inertia_world = parent.inv_inertia_world
         end
 
         set_active!(sim, child_idx, true)
