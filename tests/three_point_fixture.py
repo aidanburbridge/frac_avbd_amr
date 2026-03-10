@@ -111,7 +111,14 @@ def _build_voxel_assembly(
     )
 
     assembly = VoxelAssembly(boxes, bonds)
-    assembly.align_longest_axis(align_axis)
+    target_idx = {"x": 0, "y": 1, "z": 2}[align_axis.lower()]
+    current_idx = int(np.argmax(np.asarray(stlvox.mesh.extents, dtype=float)))
+    if current_idx != target_idx:
+        v_curr = np.zeros(3, dtype=float)
+        v_target = np.zeros(3, dtype=float)
+        v_curr[current_idx] = 1.0
+        v_target[target_idx] = 1.0
+        assembly.rotate(axis=np.cross(v_curr, v_target), angle=90.0, degrees=True)
 
     return assembly, phys_h
 
