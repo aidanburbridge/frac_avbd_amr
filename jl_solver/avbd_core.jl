@@ -27,6 +27,8 @@ export SimulationState, init_simulation, step_simulation!
 # ---------- CONSTANTS ---------- #
 const EARLY_OUT_TOL = 1e-5 # TODO have this as a parameter as a fraction of h (voxel size) ~0.1% 
 const DEBUG_REFINE_ALL = false # Debug: force refinement of all active bodies (set false to disable)
+const DEBUG_EVENT_TRACE = true#get(ENV, "AVBD_DEBUG_EVENTS", "0") == "1"
+const EVENT_COMMIT_TOL = 1e-3 # Permit topology commits when event residuals are near-converged.
 const DEFAULT_RNG_SEED = 12345
 
 @inline function configured_rng_seed()::Int
@@ -45,10 +47,10 @@ end
 # # End dumb criterion
 
 # Energy-first debug criterion (physics-consistent baseline):
-# - refine in process zone: kappa_E in [0.75, 1.00)
+# - refine once kappa_E >= 0.75 (no upper cap)
 # - fracture at kappa_E >= 1.00
 ref_specs = [
-    RefineSpec(REFINE_ENERGY, SVector(0.75, 1.00)),
+    RefineSpec(REFINE_ENERGY, SVector(0.75, 0.0)),
 ]
 frac_specs = [
     FractureSpec(FRAC_ENERGY, SVector(1.00, 0.0)),
@@ -494,7 +496,6 @@ function dual_update!(sim::SimulationState, alpha::Float64)
         con.is_active || continue
 
         eval_bond(con)
-        max_violation = max(max_violation, maximum(abs.(con.C)))
 
         pk = con.penalty_k
         lam = con.lambda
@@ -518,6 +519,8 @@ function dual_update!(sim::SimulationState, alpha::Float64)
             #lambda_base = isinf(con.stiffness[r]) ? lam[r] : 0.0
             sigma = Criteria.bond_sigma(sim, con, pk[r], r) # + lambda_base
             lam_r = clamp(sigma, con.f_min[r], con.f_max[r])
+            # Convergence for compliant bonds should use dual residual, not absolute C.
+            max_violation = max(max_violation, abs(lam_r - lam[r]))
             lam = setindex(lam, lam_r, r)
 
             # TODO REFINEMENT CRITERIA
@@ -923,6 +926,17 @@ function step_simulation!(sim::SimulationState)
 
         refine_list, fracture_list, raw_refine_count, raw_fracture_count =
             Criteria.prepare_step_events(refine_list, fracture_list)
+        if DEBUG_EVENT_TRACE
+            step_idx = length(sim.energy_log.kinetic) + 1
+            println("[AVBD] step=", step_idx,
+                " max_v=", curr_max_violation,
+                " converged=", converged,
+                " raw_ref=", raw_refine_count,
+                " raw_frac=", raw_fracture_count,
+                " ref=", length(refine_list),
+                " frac=", length(fracture_list),
+                " active=", length(sim.active_body_ids))
+        end
         trial_accounted = preview_accounted_energy(
             sim.energy_log, sim.bodies, sim.bond_constraints, sim.contact_constraints,
             sim.alpha, sim.active_body_ids, sim.active_bond_ids
@@ -953,8 +967,13 @@ function step_simulation!(sim::SimulationState)
         refine_list = copy(sim.active_body_ids)
     end
 
-    # Commit topology changes only on converged solves.
-    if converged
+    has_topology_events = !isempty(refine_list) || !isempty(fracture_list)
+    topology_ready = converged || (has_topology_events && curr_max_violation < EVENT_COMMIT_TOL)
+
+    # Commit topology changes on converged solves OR near-converged event steps.
+    if topology_ready
+        committed_frac = 0
+        committed_ref = 0
         # Commit fractures first, then refinement.
         for con_id in fracture_list
             con = sim.bond_constraints[con_id]
@@ -964,6 +983,7 @@ function step_simulation!(sim::SimulationState)
             con.penalty_k = @SVector zeros(3)
             con.lambda = @SVector zeros(3)
             sim.bond_fracture_cooldown[con_id] = Criteria.FRACTURE_COOLDOWN_STEPS
+            committed_frac += 1
         end
 
         if !isempty(refine_list)
@@ -973,10 +993,27 @@ function step_simulation!(sim::SimulationState)
             end
             for v in refine_list
                 sim.body_refine_cooldown[v] > 0 && continue
+                n_before = length(sim.active_body_ids)
                 refine_voxel!(sim, v)
+                if length(sim.active_body_ids) > n_before
+                    committed_ref += 1
+                end
                 sim.body_refine_cooldown[v] = Criteria.REFINE_COOLDOWN_STEPS
             end
         end
+        if DEBUG_EVENT_TRACE
+            println("[AVBD] commit converged=", converged,
+                " topology_ready=", topology_ready,
+                " committed_ref=", committed_ref,
+                " committed_frac=", committed_frac,
+                " active_after=", length(sim.active_body_ids))
+        end
+    elseif DEBUG_EVENT_TRACE && has_topology_events
+        println("[AVBD] skipped_topology converged=", converged,
+            " max_v=", curr_max_violation,
+            " tol=", EVENT_COMMIT_TOL,
+            " ref=", length(refine_list),
+            " frac=", length(fracture_list))
     end
 
     # Velocity derivation from new positions

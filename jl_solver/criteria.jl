@@ -106,13 +106,13 @@ end
 
     elseif spec.kind == REFINE_ENERGY
         # Energy-consistent process-zone refinement:
-        # params[1] = lower kappa threshold (on), params[2] = upper threshold (< fracture onset).
+        # params[1] = lower kappa threshold (on), params[2] = optional upper threshold.
+        # If params[2] <= 0, upper cap is disabled.
         r == 1 || return false
-        _bond_in_tension(con) || return false
 
         kappa_e = _update_energy_kappa!(con)
         k_on = spec.params[1]
-        k_upper = spec.params[2] > 0.0 ? spec.params[2] : Inf
+        k_upper = spec.params[2] > k_on ? spec.params[2] : Inf
         return (kappa_e >= k_on) && (kappa_e < k_upper)
 
     elseif spec.kind == REFINE_R2_DAMAGE_BAND
@@ -283,10 +283,12 @@ end
 # ---------- Helper Functions ---------- #
 
 @inline function _bond_in_tension(con)::Bool
-    # Returns true only if bond is in tension
+    # Returns true only if bond is in opening tension.
+    # Keep sign convention consistent with get_effective_stiffness in avbd_constraints.jl,
+    # where C[1] > 0 is treated as tensile opening.
     sigma_n = con.penalty_k[1] * con.C[1]
     lam_n = clamp(sigma_n, con.f_min[1], con.f_max[1])
-    return lam_n < 0.0
+    return lam_n > 0.0
 end
 
 @inline function _bond_strain_energy(con)::Float64
@@ -484,6 +486,10 @@ end
     return sim.body_refine_cooldown[body_idx] == 0
 end
 
+@inline function _refine_cap_distance(sim, body_idx::Int)::Int
+    return max(_local_max_ref_level(sim, body_idx) - sim.level[body_idx], 0)
+end
+
 @inline function apply_refine_budget(sim, refinement_list::Vector{Int}, refine_votes::Vector{Int})
     isempty(refinement_list) && return refinement_list
 
@@ -496,7 +502,13 @@ end
     n_keep = ceil(Int, R13_REFINE_TOP_FRAC * n_active)
     n_keep = clamp(n_keep, 1, length(candidates))
 
-    sort!(candidates, by=i -> refine_votes[i], rev=true)
+    # Gate refinement toward fracture-cap closure:
+    # prioritize bodies one split away from local cap, then by drive votes.
+    sort!(candidates, by=i -> (
+        _refine_cap_distance(sim, i) <= 1 ? 1 : 0,
+        refine_votes[i],
+        sim.level[i]
+    ), rev=true)
     return candidates[1:n_keep]
 end
 
