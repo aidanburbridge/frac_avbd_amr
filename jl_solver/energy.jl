@@ -6,20 +6,22 @@ using ..Maths: Vec3, Quat, rotate_vec, quat_to_rotmat
 using ..Collisions: Body
 using ..AVBDConstraints: BondConstraint, ContactConstraint, compute_constraint!, get_effective_stiffness
 
-export EnergyLog, log_step!, record_fracture_work!
+export EnergyLog, log_step!, record_fracture_work!, record_viscous_work!, preview_accounted_energy
 
 mutable struct EnergyLog
     kinetic::Vector{Float64}
     bond_potential::Vector{Float64}
     contact_potential::Vector{Float64}
     fracture_work::Vector{Float64}
+    viscous_work::Vector{Float64}
     mech_energy::Vector{Float64}
     accounted_energy::Vector{Float64}
 
     accumulated_fracture_work::Float64
+    accumulated_viscous_work::Float64
 
     function EnergyLog()
-        new(Float64[], Float64[], Float64[], Float64[], Float64[], Float64[], 0.0)
+        new(Float64[], Float64[], Float64[], Float64[], Float64[], Float64[], Float64[], 0.0, 0.0)
     end
 end
 
@@ -130,20 +132,39 @@ function record_fracture_work!(energy_log::EnergyLog, work::Float64)
     energy_log.accumulated_fracture_work += work
 end
 
+function record_viscous_work!(energy_log::EnergyLog, work::Float64)
+    if isfinite(work) && work > 0.0
+        energy_log.accumulated_viscous_work += work
+    end
+end
+
+function preview_accounted_energy(energy_log::EnergyLog, bodies::Vector{Body}, bonds::Vector{BondConstraint}, contacts::Vector{ContactConstraint},
+    alpha::Float64, active_body_ids::Vector{Int}, active_bond_ids::Vector{Int})
+    T = compute_kinetic(bodies, active_body_ids)
+    U_bond = compute_bond_potential(bonds, active_bond_ids)
+    U_contact = compute_contact_potential(contacts, alpha)
+    W_frac = energy_log.accumulated_fracture_work
+    W_visc = energy_log.accumulated_viscous_work
+    E_mech = T + U_bond + U_contact
+    return E_mech + W_frac + W_visc
+end
+
 function log_step!(energy_log::EnergyLog, bodies::Vector{Body}, bonds::Vector{BondConstraint}, contacts::Vector{ContactConstraint}, alpha::Float64)
 
     T = compute_kinetic(bodies)
     U_bond = compute_bond_potential(bonds)
     U_contact = compute_contact_potential(contacts, alpha)
     W_frac = energy_log.accumulated_fracture_work
+    W_visc = energy_log.accumulated_viscous_work
 
     E_mech = T + U_bond + U_contact
-    E_accounted = E_mech + W_frac
+    E_accounted = E_mech + W_frac + W_visc
 
     push!(energy_log.kinetic, T)
     push!(energy_log.bond_potential, U_bond)
     push!(energy_log.contact_potential, U_contact)
     push!(energy_log.fracture_work, W_frac)
+    push!(energy_log.viscous_work, W_visc)
     push!(energy_log.mech_energy, E_mech)
     push!(energy_log.accounted_energy, E_accounted)
 
@@ -156,14 +177,16 @@ function log_step!(energy_log::EnergyLog, bodies::Vector{Body}, bonds::Vector{Bo
     U_bond = compute_bond_potential(bonds, active_bond_ids)
     U_contact = compute_contact_potential(contacts, alpha)
     W_frac = energy_log.accumulated_fracture_work
+    W_visc = energy_log.accumulated_viscous_work
 
     E_mech = T + U_bond + U_contact
-    E_accounted = E_mech + W_frac
+    E_accounted = E_mech + W_frac + W_visc
 
     push!(energy_log.kinetic, T)
     push!(energy_log.bond_potential, U_bond)
     push!(energy_log.contact_potential, U_contact)
     push!(energy_log.fracture_work, W_frac)
+    push!(energy_log.viscous_work, W_visc)
     push!(energy_log.mech_energy, E_mech)
     push!(energy_log.accounted_energy, E_accounted)
 end

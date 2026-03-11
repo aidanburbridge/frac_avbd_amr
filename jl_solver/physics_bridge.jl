@@ -169,8 +169,8 @@ function write_energy_csv(sim::AVBDCore.SimulationState, filename::String, frame
     t = (idx - 1) * sim.dt
 
     open(filename, "w") do io
-        write(io, "frame,time,kinetic,bond_potential,contact_potential,fracture_work,mech_energy,accounted_energy\n")
-        write(io, string(frame_idx, ",", t, ",", log.kinetic[idx], ",", log.bond_potential[idx], ",", log.contact_potential[idx], ",", log.fracture_work[idx], ",", log.mech_energy[idx], ",", log.accounted_energy[idx], "\n"))
+        write(io, "frame,time,kinetic,bond_potential,contact_potential,fracture_work,viscous_work,mech_energy,accounted_energy\n")
+        write(io, string(frame_idx, ",", t, ",", log.kinetic[idx], ",", log.bond_potential[idx], ",", log.contact_potential[idx], ",", log.fracture_work[idx], ",", log.viscous_work[idx], ",", log.mech_energy[idx], ",", log.accounted_energy[idx], "\n"))
     end
 end
 

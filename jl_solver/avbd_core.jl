@@ -44,12 +44,14 @@ end
 # ]
 # # End dumb criterion
 
-# Energy based criterion
+# Energy-first debug criterion (physics-consistent baseline):
+# - refine in process zone: kappa_E in [0.75, 1.00)
+# - fracture at kappa_E >= 1.00
 ref_specs = [
-    RefineSpec(REFINE_ENERGY, SVector(0.8, 0.0)),
+    RefineSpec(REFINE_ENERGY, SVector(0.75, 1.00)),
 ]
 frac_specs = [
-    FractureSpec(FRAC_STRETCH, SVector(1.0, 0.0)),  # critical stretch at cap
+    FractureSpec(FRAC_ENERGY, SVector(1.00, 0.0)),
 ]
 cfg = CriteriaConfig(ref_specs, ANY, frac_specs, ANY)
 
@@ -477,6 +479,7 @@ end
 function dual_update!(sim::SimulationState, alpha::Float64)
     # Dual update will now return a max constraint violation 
     max_violation = 0.0
+    viscous_step_work = 0.0
 
     # List of bodies to be refined 
     refinement_list = Int[]
@@ -513,7 +516,7 @@ function dual_update!(sim::SimulationState, alpha::Float64)
 
         for r in 1:3
             #lambda_base = isinf(con.stiffness[r]) ? lam[r] : 0.0
-            sigma = pk[r] * con.C[r]# + lambda_base
+            sigma = Criteria.bond_sigma(sim, con, pk[r], r) # + lambda_base
             lam_r = clamp(sigma, con.f_min[r], con.f_max[r])
             lam = setindex(lam, lam_r, r)
 
@@ -569,6 +572,9 @@ function dual_update!(sim::SimulationState, alpha::Float64)
             con.penalty_k = pk
             con.lambda = lam
         end
+
+        viscous_step_work += Criteria.bond_viscous_dissipation(sim, con)
+        Criteria.commit_bond_history!(con)
     end
 
     #Threads.@threads 
@@ -604,6 +610,7 @@ function dual_update!(sim::SimulationState, alpha::Float64)
         AVBDConstraints.update_bounds!(con)
     end
 
+    record_viscous_work!(sim.energy_log, viscous_step_work)
     return max_violation, Criteria.apply_refine_budget(sim, refinement_list, refine_votes), fracture_list
 end
 
@@ -916,11 +923,27 @@ function step_simulation!(sim::SimulationState)
 
         refine_list, fracture_list, raw_refine_count, raw_fracture_count =
             Criteria.prepare_step_events(refine_list, fracture_list)
+        trial_accounted = preview_accounted_energy(
+            sim.energy_log, sim.bodies, sim.bond_constraints, sim.contact_constraints,
+            sim.alpha, sim.active_body_ids, sim.active_bond_ids
+        )
 
-        if Criteria.can_retry_attempt(attempt) &&
-           Criteria.should_retry_step(sim, curr_max_violation, raw_refine_count, raw_fracture_count, EARLY_OUT_TOL)
-            attempt += 1
-            continue
+        retry_needed = Criteria.should_retry_step(
+            sim, curr_max_violation, raw_refine_count, raw_fracture_count, EARLY_OUT_TOL;
+            trial_accounted=trial_accounted
+        )
+        if retry_needed
+            if Criteria.can_retry_attempt(attempt)
+                attempt += 1
+                continue
+            else
+                # Reject step when energy/convergence guards fail and no retries remain.
+                Criteria.restore_step_state!(sim, snapshot)
+                curr_max_violation = Inf
+                converged = false
+                empty!(refine_list)
+                empty!(fracture_list)
+            end
         end
         break
     end
