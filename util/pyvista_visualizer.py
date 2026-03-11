@@ -63,6 +63,7 @@ class SimulationSetup:
     friction: float = 0.3
     sync_bodies: bool = True
     python_solver_params: Dict[str, object] = field(default_factory=dict)
+    amr_params: Dict[str, object] = field(default_factory=dict)
     metadata: Dict[str, object] = field(default_factory=dict)
     headless_steps: Optional[int] = None
     default_save_stem: Optional[str] = None
@@ -381,6 +382,8 @@ def build_solver_from_setup(
             gravity=setup.gravity,
             friction=setup.friction,
             sync_bodies=setup.sync_bodies,
+            amr=getattr(setup, "amr_params", None),
+            solver_params=getattr(setup, "python_solver_params", None),
         )
         body_list = bodies
     elif solver_choice == "python":
@@ -873,6 +876,8 @@ def run_solver_headless(
         print(f"[data export] Binary export enabled, set to: {export_path}")
 
         solver.write_frame(str(export_path / "frame_0000.bin"))
+        if hasattr(solver, "write_energy_csv"):
+            solver.write_energy_csv(str(export_path / "energy_0000.csv"), 0)
 
     record_legacy = (save_path is not False) and (not use_binary)
 
@@ -948,6 +953,8 @@ def run_solver_headless(
                 frame_idx = loop_idx + 1
                 filename = export_path / f"frame_{frame_idx:04d}.bin"
                 solver.write_frame(str(filename))
+                if hasattr(solver, "write_energy_csv"):
+                    solver.write_energy_csv(str(export_path / f"energy_{frame_idx:04d}.csv"), frame_idx)
 
             if record_legacy:
                 frames.append([b.position.copy() for b in bodies_list])

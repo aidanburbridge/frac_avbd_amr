@@ -27,8 +27,8 @@ export SimulationState, init_simulation, step_simulation!
 # ---------- CONSTANTS ---------- #
 const EARLY_OUT_TOL = 1e-5 # TODO have this as a parameter as a fraction of h (voxel size) ~0.1% 
 const DEBUG_REFINE_ALL = false # Debug: force refinement of all active bodies (set false to disable)
-const DEBUG_EVENT_TRACE = true#get(ENV, "AVBD_DEBUG_EVENTS", "0") == "1"
-const EVENT_COMMIT_TOL = 1e-3 # Permit topology commits when event residuals are near-converged.
+const DEBUG_EVENT_TRACE = get(ENV, "AVBD_DEBUG_EVENTS", "0") == "1"
+const EVENT_COMMIT_TOL = 5e-2 # Retained for diagnostics; finite-residual event steps can commit topology.
 const DEFAULT_RNG_SEED = 12345
 
 @inline function configured_rng_seed()::Int
@@ -47,10 +47,10 @@ end
 # # End dumb criterion
 
 # Energy-first debug criterion (physics-consistent baseline):
-# - refine once kappa_E >= 0.75 (no upper cap)
+# - refine in process-zone band: 0.60 <= kappa_E < 1.00
 # - fracture at kappa_E >= 1.00
 ref_specs = [
-    RefineSpec(REFINE_ENERGY, SVector(0.75, 0.0)),
+    RefineSpec(REFINE_ENERGY, SVector(0.60, 0.98)),
 ]
 frac_specs = [
     FractureSpec(FRAC_ENERGY, SVector(1.00, 0.0)),
@@ -523,32 +523,15 @@ function dual_update!(sim::SimulationState, alpha::Float64)
             max_violation = max(max_violation, abs(lam_r - lam[r]))
             lam = setindex(lam, lam_r, r)
 
-            # TODO REFINEMENT CRITERIA
-            # if abs(lam_r) >= ref_crit
-            if Criteria.should_refine(sim.criteria, sim, con, lam_r, r)
-                if can_refine_A
-                    push!(refinement_list, a_idx)
-                    refine_votes[a_idx] += 1
-                end
-                if can_refine_B
-                    push!(refinement_list, b_idx)
-                    refine_votes[b_idx] += 1
-                end
+            # Extreme-basic mode: energy damage + refinement gating.
+            if r == 1
+                Criteria.update_energy_damage!(sim.criteria, con)
             end
 
-            # TODO add refinement check before fracturing! -> do NOT allow fracture unless @ finest level
-            # FRACTURE CRITERIA
-            #if abs(lam_r) >= (con.fracture[r] * 10)
-            if Criteria.should_fracture(sim.criteria, sim, con, lam_r, r)
-                if capA && capB
-                    # Stage fracture event (commit after inner iterations).
-                    if !fracture_mark[con_id] && sim.bond_fracture_cooldown[con_id] == 0
-                        fracture_mark[con_id] = true
-                        push!(fracture_list, con_id)
-                    end
-                    break
-                else
-                    # NOT @ finest level -> push to refine
+            frac_hit = Criteria.should_fracture(sim.criteria, sim, con, lam_r, r)
+            if frac_hit
+                # Refinement gating: if either endpoint can refine, refine instead of break.
+                if can_refine_A || can_refine_B
                     if can_refine_A
                         push!(refinement_list, a_idx)
                         refine_votes[a_idx] += 1
@@ -557,6 +540,21 @@ function dual_update!(sim::SimulationState, alpha::Float64)
                         push!(refinement_list, b_idx)
                         refine_votes[b_idx] += 1
                     end
+                else
+                    if !fracture_mark[con_id] && sim.bond_fracture_cooldown[con_id] == 0
+                        fracture_mark[con_id] = true
+                        push!(fracture_list, con_id)
+                    end
+                    break
+                end
+            elseif Criteria.should_refine(sim.criteria, sim, con, lam_r, r)
+                if can_refine_A
+                    push!(refinement_list, a_idx)
+                    refine_votes[a_idx] += 1
+                end
+                if can_refine_B
+                    push!(refinement_list, b_idx)
+                    refine_votes[b_idx] += 1
                 end
             end
 
@@ -690,7 +688,8 @@ function init_simulation(
     if active !== nothing
         sim.active = BitVector(active)
     else
-        sim.active = falses(n_bodies)
+        # Non-AMR scenes should run with all bodies active by default.
+        sim.active = trues(n_bodies)
     end
     if valid_mask !== nothing
         sim.valid_mask = BitVector(valid_mask)
@@ -732,8 +731,12 @@ function init_simulation(
     # Deterministic bond randomization unless overridden via AVBD_RNG_SEED.
     Random.seed!(configured_rng_seed())
 
-    #HACK adding weibull randomization to the material properties
-    weibull_shape = 5.0
+    # Optional material disorder; keep deterministic homogeneous strength by default.
+    enable_weibull = get(ENV, "AVBD_ENABLE_WEIBULL", "0") == "1"
+    weibull_shape = begin
+        s = tryparse(Float64, get(ENV, "AVBD_WEIBULL_SHAPE", "5.0"))
+        (s === nothing || s <= 0.0) ? 5.0 : s
+    end
     n_bonds = size(bond_data, 1)
     if n_bonds > 0
         sizehint!(sim.bond_constraints, n_bonds)
@@ -748,8 +751,12 @@ function init_simulation(
             kt = row[13]
             area = row[14]
 
-            U = rand() # Uniform [0,1]
-            random_factor = (-log(U))^(1.0 / weibull_shape)
+            random_factor = if enable_weibull
+                U = max(rand(), eps(Float64))
+                (-log(U))^(1.0 / weibull_shape)
+            else
+                1.0
+            end
 
             tensile = row[15] * random_factor
             Gc = row[16] * random_factor
@@ -968,9 +975,10 @@ function step_simulation!(sim::SimulationState)
     end
 
     has_topology_events = !isempty(refine_list) || !isempty(fracture_list)
-    topology_ready = converged || (has_topology_events && curr_max_violation < EVENT_COMMIT_TOL)
+    event_ready = has_topology_events && isfinite(curr_max_violation)
+    topology_ready = converged || event_ready
 
-    # Commit topology changes on converged solves OR near-converged event steps.
+    # Commit topology changes on converged solves or any finite-residual event step.
     if topology_ready
         committed_frac = 0
         committed_ref = 0
@@ -979,6 +987,12 @@ function step_simulation!(sim::SimulationState)
             con = sim.bond_constraints[con_id]
             con.is_broken && continue
             con.is_active || continue
+            # Account released elastic bond energy as fracture dissipation.
+            k_eff = get_effective_stiffness(con)
+            n_sign = abs(con.rest[1]) <= eps(Float64) ? 1.0 : sign(con.rest[1])
+            dn_open = max(0.0, n_sign * con.C[1])
+            e_break = 0.5 * (k_eff[1] * dn_open^2 + k_eff[2] * con.C[2]^2 + k_eff[3] * con.C[3]^2)
+            e_break > 0.0 && record_fracture_work!(sim.energy_log, e_break)
             con.is_broken = true
             con.penalty_k = @SVector zeros(3)
             con.lambda = @SVector zeros(3)
@@ -1011,7 +1025,7 @@ function step_simulation!(sim::SimulationState)
     elseif DEBUG_EVENT_TRACE && has_topology_events
         println("[AVBD] skipped_topology converged=", converged,
             " max_v=", curr_max_violation,
-            " tol=", EVENT_COMMIT_TOL,
+            " finite_required=true",
             " ref=", length(refine_list),
             " frac=", length(fracture_list))
     end

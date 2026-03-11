@@ -357,14 +357,13 @@ end
 
     bond.is_broken && return @SVector zeros(3)
 
-    d_factor = max(0.0, 1.0 - bond.damage)
+    d_factor = max(1e-3, 1.0 - clamp(bond.damage, 0.0, 0.999))
 
-    if bond.damage >= 0.95
-        bond.is_broken = true
-        return @SVector zeros(3)
-    end
-
-    k_n = (bond.C[1] > 0) ? (bond.stiffness[1] * d_factor) : bond.stiffness[1]
+    # Make opening/compression split orientation-invariant w.r.t. bond normal sign.
+    rest_n = bond.rest[1]
+    n_sign = abs(rest_n) <= eps(Float64) ? 1.0 : sign(rest_n)
+    opening = (n_sign * bond.C[1]) > 0.0
+    k_n = opening ? (bond.stiffness[1] * d_factor) : bond.stiffness[1]
 
     k_t1 = bond.stiffness[2] * d_factor
     k_t2 = bond.stiffness[3] * d_factor

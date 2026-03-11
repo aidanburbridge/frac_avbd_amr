@@ -188,10 +188,9 @@ function get_visualization_data(sim::AVBDCore.SimulationState)
     # Need to create stress tensor - symmetric
     stress_data = zeros(FLOAT, length(active_body_indices), 6)
 
-    # Active bonds: unbroken, active, and both endpoints active
+    # Active bonds for metadata: include broken bonds so exported damage can reach 1.0.
     active_bond_count = 0
     for bond in sim.bond_constraints
-        bond.is_broken && continue
         bond.is_active || continue
         a_idx = bond.bodyA.id + 1
         b_idx = bond.bodyB.id + 1
@@ -249,10 +248,9 @@ function get_visualization_data(sim::AVBDCore.SimulationState)
 
     end
 
-    # Reuse the same active-bond pass to emit metadata
+    # Reuse an active-bond pass to emit metadata (including broken bonds).
     bond_out_idx = 0
     for bond in sim.bond_constraints
-        bond.is_broken && continue
         bond.is_active || continue
         a_idx = bond.bodyA.id + 1
         b_idx = bond.bodyB.id + 1
@@ -263,11 +261,18 @@ function get_visualization_data(sim::AVBDCore.SimulationState)
         bA = bond.bodyA
         bB = bond.bodyB
 
-        rest_len = max(abs(bond.rest[1]), 1e-12)
-        strain_n = bond.C[1] / rest_len
-        strain_t1 = bond.C[2] / rest_len
-        strain_t2 = bond.C[3] / rest_len
-        eff_strain = sqrt(strain_n^2 + strain_t1^2 + strain_t2^2)
+        rest_len = sqrt(bond.rest[1]^2 + bond.rest[2]^2 + bond.rest[3]^2)
+        hA = minimum(bA.size)
+        hB = minimum(bB.size)
+        char_len = max(rest_len, 0.5 * (hA + hB), 1e-12)
+        eff_strain = if bond.is_broken
+            max(bond.max_eff_strain, 0.0)
+        else
+            strain_n = bond.C[1] / char_len
+            strain_t1 = bond.C[2] / char_len
+            strain_t2 = bond.C[3] / char_len
+            sqrt(strain_n^2 + strain_t1^2 + strain_t2^2)
+        end
 
         damage_val = bond.is_broken ? 1.0 : clamp(bond.damage, 0.0, 1.0)
         k_eff_n = bond.is_broken ? 0.0 : bond.k_eff[1]
@@ -278,7 +283,7 @@ function get_visualization_data(sim::AVBDCore.SimulationState)
         bond_data[bond_out_idx, 1] = Float64(id_to_local[bA.id + 1] - 1)
         bond_data[bond_out_idx, 2] = Float64(id_to_local[bB.id + 1] - 1)
         bond_data[bond_out_idx, 3] = eff_strain
-        bond_data[bond_out_idx, 4] = bond.max_eff_strain
+        bond_data[bond_out_idx, 4] = max(bond.max_eff_strain, eff_strain)
         bond_data[bond_out_idx, 5] = damage_val
         bond_data[bond_out_idx, 6] = k_eff_n
         bond_data[bond_out_idx, 7] = k_eff_t1

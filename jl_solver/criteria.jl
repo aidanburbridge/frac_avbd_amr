@@ -26,6 +26,7 @@ export CriteriaConfig, RefineSpec, FractureSpec, RefineKind, FractureKind, Logic
     endpoint_can_schedule_refine, apply_refine_budget,
     has_valid_child, local_max_ref_level, penalty_increment,
     bond_sigma, bond_viscous_dissipation, commit_bond_history!,
+    update_energy_damage!,
     decay_cooldowns!, cap_events, prepare_step_events,
     should_retry_step, can_retry_attempt, attempt_dt, energy_guard_trip,
     StepSnapshot, snapshot_step_state, restore_step_state!
@@ -37,11 +38,11 @@ export CriteriaConfig, RefineSpec, FractureSpec, RefineKind, FractureKind, Logic
 @enum RefineKind REFINE_LAMBDA REFINE_ENERGY REFINE_R2_DAMAGE_BAND REFINE_R3_NEAR_INIT REFINE_R4_GRADIENT REFINE_R8_STRETCH REFINE_R9_KAPPA
 @enum FractureKind FRAC_LAMBDA FRAC_STRETCH FRAC_ENERGY FRAC_CZM
 
-const R13_REFINE_TOP_FRAC = 0.002
-const MAX_REFINE_EVENTS_PER_STEP = 32
-const MAX_BREAK_EVENTS_PER_STEP = 16
-const REFINE_COOLDOWN_STEPS = 2
-const FRACTURE_COOLDOWN_STEPS = 2
+const R13_REFINE_TOP_FRAC = 1.0
+const MAX_REFINE_EVENTS_PER_STEP = 512
+const MAX_BREAK_EVENTS_PER_STEP = 512
+const REFINE_COOLDOWN_STEPS = 0
+const FRACTURE_COOLDOWN_STEPS = 0
 const CUTBACK_RETRY_ENABLED = false
 const CUTBACK_RETRY_MAX = 1
 const CUTBACK_FACTOR = 0.5
@@ -65,6 +66,7 @@ const DAMAGE_SOFT_BAND = 0.25
 const CRACK_BAND_REF_LEN = 0.0  # <=0 disables scaling
 const ENERGY_GUARD_ENABLED = false
 const ENERGY_GUARD_REL_JUMP = 5.0
+const SIMPLE_CRITERIA_MODE = true
 
 const _REFINE_PERSIST = Dict{UInt64,Int}()
 const _FRACTURE_PERSIST = Dict{UInt64,Int}()
@@ -164,6 +166,12 @@ end
 @inline function should_refine(config::CriteriaConfig, sim, con, lam_r, r)::Bool
     r == 1 || return false
 
+    if SIMPLE_CRITERIA_MODE
+        k_on, k_upper, _ = _simple_energy_thresholds(config)
+        drive = _energy_drive(con)
+        return (drive >= k_on) && (drive < k_upper)
+    end
+
     raw = if config.refine_logic == ANY
         any(spec -> _check_refinement_criteria(spec, con, lam_r, r), config.refine_specs)
     else
@@ -197,8 +205,8 @@ end
         _bond_in_tension(con) || return false
 
         # Rest length w/ safety
-        len_0 = max(abs(con.rest[1]), eps(Float64))
-        s = abs(con.C[1]) / len_0
+        len_0 = _char_length(con)
+        s = _opening_disp(con) / len_0
 
         # Critical stretch derived from existing force cap + stiffness
         cap = max(con.fracture[1], eps(Float64))
@@ -211,7 +219,6 @@ end
     elseif spec.kind == FRAC_ENERGY
         # Energy-based fracture with irreversible history variable.
         r == 1 || return false
-        _bond_in_tension(con) || return false
 
         kappa_e = _update_energy_kappa!(con)
         k_frac = spec.params[1]
@@ -229,8 +236,8 @@ end
         r == 1 || return false
         _bond_in_tension(con) || return false
 
-        # Opening-only normal separation under current sign convention
-        dn = max(0.0, -con.C[1])
+        # Opening-only normal separation with orientation-invariant sign handling.
+        dn = _opening_disp(con)
         dt1 = abs(con.C[2])
         dt2 = abs(con.C[3])
 
@@ -266,6 +273,12 @@ end
 @inline function should_fracture(config::CriteriaConfig, sim, con, lam_r, r)::Bool
     r == 1 || return false
 
+    if SIMPLE_CRITERIA_MODE
+        _, _, k_frac = _simple_energy_thresholds(config)
+        drive = _energy_drive(con)
+        return drive >= k_frac
+    end
+
     raw = if config.fracture_logic == ANY
         any(spec -> _check_fracture_criteria(spec, sim, con, lam_r, r), config.fracture_specs)
     else
@@ -283,23 +296,38 @@ end
 # ---------- Helper Functions ---------- #
 
 @inline function _bond_in_tension(con)::Bool
-    # Returns true only if bond is in opening tension.
-    # Keep sign convention consistent with get_effective_stiffness in avbd_constraints.jl,
-    # where C[1] > 0 is treated as tensile opening.
-    sigma_n = con.penalty_k[1] * con.C[1]
-    lam_n = clamp(sigma_n, con.f_min[1], con.f_max[1])
-    return lam_n > 0.0
+    return _opening_disp(con) > 0.0
+end
+
+@inline function _normal_sign(con)::Float64
+    rest_n = con.rest[1]
+    if abs(rest_n) <= eps(Float64)
+        return 1.0
+    end
+    return sign(rest_n)
+end
+
+@inline function _opening_disp(con)::Float64
+    # Normal orientation can differ per bond. Use rest sign to make opening
+    # detection orientation-invariant.
+    s = _normal_sign(con)
+    return max(0.0, s * con.C[1])
 end
 
 @inline function _bond_strain_energy(con)::Float64
     k_eff = get_effective_stiffness(con)
-    return 0.5 * (k_eff[1] * con.C[1]^2 + k_eff[2] * con.C[2]^2 + k_eff[3] * con.C[3]^2)
+    dn = _opening_disp(con)  # opening-only normal contribution
+    return 0.5 * (k_eff[1] * dn^2 + k_eff[2] * con.C[2]^2 + k_eff[3] * con.C[3]^2)
 end
 
 @inline function _energy_drive(con)::Float64
-    e_cap = _fracture_energy_cap(con)
-    e_cap = max(e_cap, eps(Float64))
-    return _bond_strain_energy(con) / e_cap
+    k_eff = get_effective_stiffness(con)
+    dn = _opening_disp(con)
+    en = 0.5 * k_eff[1] * dn^2
+    et = 0.5 * (k_eff[2] * con.C[2]^2 + k_eff[3] * con.C[3]^2)
+
+    en_cap, et_cap = _fracture_energy_cap(con)
+    return en / en_cap + et / et_cap
 end
 
 @inline function _update_energy_kappa!(con)::Float64
@@ -311,23 +339,67 @@ end
     return k_new
 end
 
-@inline function _fracture_energy_cap(con)::Float64
+@inline function _simple_energy_thresholds(config::CriteriaConfig)
+    k_on = 0.60
+    k_upper = 0.98
+    k_frac = 1.00
+
+    for spec in config.refine_specs
+        if spec.kind == REFINE_ENERGY
+            k_on = spec.params[1]
+            k_upper = spec.params[2] > k_on ? spec.params[2] : k_frac
+            break
+        end
+    end
+    for spec in config.fracture_specs
+        if spec.kind == FRAC_ENERGY
+            k_frac = spec.params[1]
+            break
+        end
+    end
+
+    # Keep refinement below fracture in simple mode.
+    k_upper = min(k_upper, k_frac)
+    return k_on, k_upper, k_frac
+end
+
+@inline function update_energy_damage!(config::CriteriaConfig, con)
+    SIMPLE_CRITERIA_MODE || return con.damage
+    k_on, _, k_frac = _simple_energy_thresholds(config)
+    drive = _energy_drive(con)
+    denom = max(k_frac - k_on, eps(Float64))
+    # Keep softening bounded below full break; fracture event controls true failure.
+    d_target = clamp((drive - k_on) / denom, 0.0, 0.90)
+    con.damage = max(con.damage, d_target)
+    return con.damage
+end
+
+@inline function _fracture_energy_cap(con)::Tuple{Float64,Float64}
     cap1 = max(con.fracture[1], eps(Float64))
     cap2 = max(con.fracture[2], eps(Float64))
     cap3 = max(con.fracture[3], eps(Float64))
     k1 = max(con.stiffness[1], eps(Float64))
     k2 = max(con.stiffness[2], eps(Float64))
     k3 = max(con.stiffness[3], eps(Float64))
-    base = 0.5 * ((cap1^2) / k1 + (cap2^2) / k2 + (cap3^2) / k3)
+    en_cap = 0.5 * (cap1^2) / k1
+    et_cap = 0.5 * ((cap2^2) / k2 + (cap3^2) / k3)
     if CRACK_BAND_REF_LEN > 0.0
         h = _char_length(con)
-        return base * (h / CRACK_BAND_REF_LEN)
+        scale = h / CRACK_BAND_REF_LEN
+        en_cap *= scale
+        et_cap *= scale
     end
-    return base
+    return max(en_cap, eps(Float64)), max(et_cap, eps(Float64))
 end
 
 @inline function _char_length(con)::Float64
-    return max(abs(con.rest[1]), eps(Float64))
+    l0 = sqrt(con.rest[1]^2 + con.rest[2]^2 + con.rest[3]^2)
+    if l0 > eps(Float64)
+        return l0
+    end
+    hA = minimum(con.bodyA.size)
+    hB = minimum(con.bodyB.size)
+    return max(0.5 * (hA + hB), eps(Float64))
 end
 
 @inline function _traction_utilization(con)::Float64
@@ -338,7 +410,7 @@ end
     cap2 = max(con.fracture[2], eps(Float64))
     cap3 = max(con.fracture[3], eps(Float64))
 
-    lam_n_open = max(0.0, -lam[1])
+    lam_n_open = max(0.0, _normal_sign(con) * lam[1])
     lam_t1 = abs(lam[2])
     lam_t2 = abs(lam[3])
 
@@ -347,7 +419,7 @@ end
 
 @inline function _effective_stretch(con)::Float64
     len0 = _char_length(con)
-    dn = max(0.0, -con.C[1])
+    dn = _opening_disp(con)
     dt = sqrt(con.C[2]^2 + con.C[3]^2)
     return sqrt(dn^2 + dt^2) / len0
 end
@@ -500,6 +572,10 @@ end
 
     n_active = length(sim.active_body_ids)
     n_keep = ceil(Int, R13_REFINE_TOP_FRAC * n_active)
+    # Keep at least a pair when possible so both sides of a critical bond can refine.
+    if length(candidates) >= 2
+        n_keep = max(n_keep, 2)
+    end
     n_keep = clamp(n_keep, 1, length(candidates))
 
     # Gate refinement toward fracture-cap closure:

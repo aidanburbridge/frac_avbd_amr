@@ -2,6 +2,7 @@ import argparse
 import struct
 import numpy as np
 from pathlib import Path
+import shutil
 from tqdm import tqdm
 from util.vtk_exporter import VTKExporter
 
@@ -173,6 +174,10 @@ def process_run(run_dir_str):
     
     files = sorted(list(raw_dir.glob("*.bin")))
     print(f"Processing {len(files)} frames...")
+
+    # Preserve per-frame energy ledgers if they were written by the solver.
+    for csv_path in sorted(raw_dir.glob("energy_*.csv")):
+        shutil.copy2(csv_path, vtk_dir / csv_path.name)
     
     for f in tqdm(files):
         process_frame(f, exporter)
