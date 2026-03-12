@@ -23,11 +23,17 @@ Notes
 -----
 - Picked voxel IDs are body indices in the instantiated `boxes` list.
 - These IDs can be copied directly into `tests/L_bar.py` as explicit boundary IDs.
+
+Usage
+-----
+- `python -m util.selection_tool L_bar`
+  Loads STL/voxel settings from `tests/L_bar.py` (with CLI flags as explicit overrides).
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import os
 import sys
@@ -58,18 +64,24 @@ DEFAULT_MAX_REF_LEVEL = 2
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Interactive voxel-ID picker for STL fixtures.")
-    parser.add_argument("--stl", default=DEFAULT_STL, help="Path to input STL file.")
+    parser.add_argument(
+        "test",
+        nargs="?",
+        default=None,
+        help="Optional test setup module under tests/ (e.g. L_bar or tests/L_bar.py).",
+    )
+    parser.add_argument("--stl", default=None, help="Path to input STL file (overrides test config).")
     parser.add_argument(
         "--resolution",
         type=int,
-        default=DEFAULT_RESOLUTION,
-        help="Target occupied voxel count for STL voxelization.",
+        default=None,
+        help="Target occupied voxel count for STL voxelization (overrides test config).",
     )
     parser.add_argument(
         "--max-ref-level",
         type=int,
-        default=DEFAULT_MAX_REF_LEVEL,
-        help="Maximum AMR hierarchy level (same meaning as in tests/L_bar.py).",
+        default=None,
+        help="Maximum AMR hierarchy level (same meaning as in tests/L_bar.py; overrides test config).",
     )
     parser.add_argument(
         "--scope",
@@ -82,26 +94,111 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--flood-fill",
+        dest="flood_fill",
         action="store_true",
-        help="Enable flood-fill interior solidification during voxelization.",
+        help="Enable flood-fill interior solidification during voxelization (overrides test config).",
+    )
+    parser.add_argument(
+        "--no-flood-fill",
+        dest="flood_fill",
+        action="store_false",
+        help="Disable flood-fill interior solidification during voxelization (overrides test config).",
     )
     parser.add_argument(
         "--pad-voxels",
         type=int,
-        default=1,
-        help="AABB padding (voxels) used during voxelization.",
+        default=None,
+        help="AABB padding (voxels) used during voxelization (overrides test config).",
     )
     parser.add_argument(
         "--repair",
+        dest="repair",
         action="store_true",
-        help="Enable trimesh repair when loading STL.",
+        help="Enable trimesh repair when loading STL (overrides test config).",
+    )
+    parser.add_argument(
+        "--no-repair",
+        dest="repair",
+        action="store_false",
+        help="Disable trimesh repair when loading STL (overrides test config).",
     )
     parser.add_argument(
         "--output",
         default=None,
         help="JSON output path for saved selection (default: <stl_stem>_voxel_selection.json).",
     )
+    parser.set_defaults(flood_fill=None, repair=None)
     return parser.parse_args()
+
+
+def _normalize_test_name(raw_name: str) -> str:
+    name = (raw_name or "").strip()
+    if not name:
+        return ""
+    name = name.replace("\\", "/")
+    if name.endswith(".py"):
+        name = name[:-3]
+    if "/" in name:
+        name = name.rsplit("/", 1)[-1]
+    if name.startswith("tests."):
+        name = name.split(".", 1)[1]
+    return name
+
+
+def _first_attr(module, names: tuple[str, ...]):
+    for attr in names:
+        if hasattr(module, attr):
+            return getattr(module, attr)
+    return None
+
+
+def _load_test_config(test_name: str) -> dict[str, object]:
+    normalized = _normalize_test_name(test_name)
+    if not normalized:
+        return {}
+
+    module_name = f"tests.{normalized}"
+    try:
+        module = importlib.import_module(module_name)
+    except ModuleNotFoundError as exc:
+        raise SystemExit(f"Could not load test module '{module_name}': {exc}") from exc
+
+    cfg: dict[str, object] = {"test_name": normalized}
+
+    stl_path = _first_attr(module, ("STL_PATH",))
+    if stl_path is not None:
+        cfg["stl_path"] = str(stl_path)
+
+    vox_res = _first_attr(module, ("VOX_RESOLUTION", "VOXEL_RESOLUTION", "VOXEL_RES", "VOX_RES"))
+    if vox_res is not None:
+        try:
+            cfg["resolution"] = int(vox_res)
+        except Exception:
+            pass
+
+    max_ref_level = _first_attr(module, ("MAX_REF_LEVEL", "MAX_LEVEL", "MAX_REFINEMENT_LEVEL"))
+    if max_ref_level is not None:
+        try:
+            cfg["max_ref_level"] = int(max_ref_level)
+        except Exception:
+            pass
+
+    flood_fill = _first_attr(module, ("FLOOD_FILL",))
+    if flood_fill is not None:
+        cfg["flood_fill"] = bool(flood_fill)
+
+    pad_voxels = _first_attr(module, ("PAD_VOXELS", "PAD"))
+    if pad_voxels is not None:
+        try:
+            cfg["pad_voxels"] = int(pad_voxels)
+        except Exception:
+            pass
+
+    repair = _first_attr(module, ("REPAIR_MESH", "REPAIR"))
+    if repair is not None:
+        cfg["repair"] = bool(repair)
+
+    return cfg
 
 
 def _contains_fn_factory(stl_voxelizer: vox.STLVoxelizer):
@@ -203,7 +300,20 @@ def build_pick_mesh(bodies: list, selectable_ids: np.ndarray) -> tuple[pv.DataSe
 
 def main() -> int:
     args = parse_args()
-    stl_path = Path(args.stl).expanduser()
+
+    test_cfg = _load_test_config(args.test) if args.test else {}
+    test_name = test_cfg.get("test_name")
+
+    stl_value = args.stl if args.stl is not None else test_cfg.get("stl_path", DEFAULT_STL)
+    resolution = int(args.resolution if args.resolution is not None else test_cfg.get("resolution", DEFAULT_RESOLUTION))
+    max_ref_level = int(
+        args.max_ref_level if args.max_ref_level is not None else test_cfg.get("max_ref_level", DEFAULT_MAX_REF_LEVEL)
+    )
+    flood_fill = bool(args.flood_fill if args.flood_fill is not None else test_cfg.get("flood_fill", False))
+    pad_voxels = int(args.pad_voxels if args.pad_voxels is not None else test_cfg.get("pad_voxels", 1))
+    repair = bool(args.repair if args.repair is not None else test_cfg.get("repair", False))
+
+    stl_path = Path(str(stl_value)).expanduser()
     if not stl_path.is_file():
         raise SystemExit(f"STL not found: {stl_path}")
 
@@ -222,11 +332,11 @@ def main() -> int:
         voxel_origin,
     ) = build_hierarchy_bodies(
         stl_path=stl_path,
-        resolution=args.resolution,
-        max_ref_level=args.max_ref_level,
-        flood_fill=args.flood_fill,
-        pad_voxels=args.pad_voxels,
-        repair=args.repair,
+        resolution=resolution,
+        max_ref_level=max_ref_level,
+        flood_fill=flood_fill,
+        pad_voxels=pad_voxels,
+        repair=repair,
     )
 
     selectable_mask = valid_mask & active_mask
@@ -259,6 +369,13 @@ def main() -> int:
         fixed_list = sorted(fixed_ids)
         load_list = sorted(load_ids)
         print()
+        if test_name:
+            print(f"test = tests.{test_name}")
+        print(f"stl = {stl_path}")
+        print(
+            f"resolution = {resolution} | max_ref_level = {max_ref_level} | "
+            f"flood_fill = {flood_fill} | pad_voxels = {pad_voxels} | repair = {repair}"
+        )
         print(f"mode = {mode['name']}")
         print(
             f"counts: total={len(bodies)} selectable={int(selectable_ids.size)} "
@@ -272,11 +389,15 @@ def main() -> int:
     def _save_json() -> None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
+            "test_name": test_name,
             "stl_path": str(stl_path),
-            "vox_resolution": int(args.resolution),
-            "max_ref_level": int(args.max_ref_level),
+            "vox_resolution": int(resolution),
+            "max_ref_level": int(max_ref_level),
             "scope": "highest",
             "scope_requested": args.scope,
+            "flood_fill": bool(flood_fill),
+            "pad_voxels": int(pad_voxels),
+            "repair": bool(repair),
             "voxel_h": float(voxel_h),
             "origin": voxel_origin.tolist(),
             "counts": {

@@ -15,7 +15,7 @@ from util.voxel_assembly import VoxelAssembly
 # -------------------- Geometry (meters) -------------------- #
 MM = 1.0e-3
 STL_PATH = r"C:\Users\aidan\Documents\TUM\Thesis\L bar fracture.stl"
-VOX_RESOLUTION = 1000
+VOX_RESOLUTION = 200
 
 
 # -------------------- Boundary-condition controls -------------------- #
@@ -29,9 +29,8 @@ LOAD_VELOCITY = np.array([0.0, 0.0, 2.0e-3], dtype=float)
 # Optional explicit voxel-ID sets from util.selection_tool.
 FIXED_VOXEL_IDS: tuple[int, ...] = ()
 LOAD_VOXEL_IDS: tuple[int, ...] = ()
-FIXED_VOXEL_IDS = [0, 73, 146, 219, 292, 365, 5037, 5110, 5183, 5256, 5329, 5402, 10074, 10147, 10220, 10293, 10366, 10439, 15111, 15184, 15257, 15330, 15403, 15476, 20148, 20221, 20294, 20367, 20440, 20513, 25185, 25258, 25331, 25404, 25477, 25550, 30222, 30295, 30368, 30441, 30514, 30587, 35259, 35332, 35405, 35478, 35551, 35624, 40296, 40369, 40442, 40515, 40588, 40661]
-LOAD_VOXEL_IDS = [55188, 55261, 55334, 57159, 57232, 57305, 59130, 59203, 59276, 61101, 61174, 61247, 63072, 63145, 63218, 65043, 65116, 65189]  
-
+FIXED_VOXEL_IDS = [0, 17, 34, 59, 618, 643, 668, 709, 1620, 1645, 1670, 1711, 2622, 2647, 2672, 2713, 3624, 3649, 3674, 3715]
+LOAD_VOXEL_IDS = [5760, 5801, 6138, 6179, 6516, 6557]
 # -------------------- Material / solver -------------------- #
 DENSITY = 1150.0
 PENALTY_GAIN = 1.0e6
@@ -46,7 +45,7 @@ STEPS_PER_EXPORT = max(1, int(DT_RENDER / DT_PHYSICS))
 ITER = 80
 GRAV = 0.0
 FRICTION = 0.0
-STEPS = 2500
+STEPS = 5000
 MAX_REF_LEVEL = 2
 
 PYTHON_SOLVER_PARAMS = {
