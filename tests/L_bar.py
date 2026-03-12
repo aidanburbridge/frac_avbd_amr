@@ -26,7 +26,11 @@ BOTTOM_FIX_DEPTH = 20.0 * MM
 LOAD_PATCH_WIDTH = 20.0 * MM
 LOAD_BAND_THICKNESS = 20.0 * MM
 LOAD_VELOCITY = np.array([0.0, 0.0, 2.0e-3], dtype=float)
-
+# Optional explicit voxel-ID sets from util.selection_tool.
+FIXED_VOXEL_IDS: tuple[int, ...] = ()
+LOAD_VOXEL_IDS: tuple[int, ...] = ()
+FIXED_VOXEL_IDS = [0, 73, 146, 219, 292, 365, 5037, 5110, 5183, 5256, 5329, 5402, 10074, 10147, 10220, 10293, 10366, 10439, 15111, 15184, 15257, 15330, 15403, 15476, 20148, 20221, 20294, 20367, 20440, 20513, 25185, 25258, 25331, 25404, 25477, 25550, 30222, 30295, 30368, 30441, 30514, 30587, 35259, 35332, 35405, 35478, 35551, 35624, 40296, 40369, 40442, 40515, 40588, 40661]
+LOAD_VOXEL_IDS = [55188, 55261, 55334, 57159, 57232, 57305, 59130, 59203, 59276, 61101, 61174, 61247, 63072, 63145, 63218, 65043, 65116, 65189]  
 
 # -------------------- Material / solver -------------------- #
 DENSITY = 1150.0
@@ -79,6 +83,31 @@ def _select_bodies_by_center_box(
     return selected
 
 
+def _select_bodies_by_ids(
+    assembly: VoxelAssembly,
+    ids: tuple[int, ...],
+    *,
+    valid_mask: np.ndarray | None = None,
+    label: str = "selection",
+) -> list:
+    total = len(assembly.bodies)
+    unique_ids = sorted(set(int(i) for i in ids))
+    out_of_range = [idx for idx in unique_ids if idx < 0 or idx >= total]
+    if out_of_range:
+        preview = out_of_range[:20]
+        suffix = " ..." if len(out_of_range) > len(preview) else ""
+        raise ValueError(f"{label} IDs out of range for {total} bodies: {preview}{suffix}")
+
+    if valid_mask is not None:
+        outside_valid = [idx for idx in unique_ids if not bool(valid_mask[idx])]
+        if outside_valid:
+            preview = outside_valid[:20]
+            suffix = " ..." if len(outside_valid) > len(preview) else ""
+            raise ValueError(f"{label} IDs include voxels outside the valid STL interior: {preview}{suffix}")
+
+    return [assembly.bodies[idx] for idx in unique_ids]
+
+
 def _set_targets_fixed(targets: list) -> None:
     for body in targets:
         body.set_static()
@@ -129,6 +158,23 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
     )
 
     lbar = VoxelAssembly(boxes, bonds)
+    for idx, body in enumerate(lbar.bodies):
+        body.body_id = idx
+
+    valid_mask = np.asarray(
+        amr_dict.get("valid_mask", np.ones(len(lbar.bodies), dtype=bool)),
+        dtype=bool,
+    )
+
+    explicit_fixed_ids = tuple(sorted(set(int(i) for i in FIXED_VOXEL_IDS)))
+    explicit_load_ids = tuple(sorted(set(int(i) for i in LOAD_VOXEL_IDS)))
+    overlap_ids = sorted(set(explicit_fixed_ids).intersection(explicit_load_ids))
+    if overlap_ids:
+        raise ValueError(
+            f"FIXED_VOXEL_IDS and LOAD_VOXEL_IDS overlap: {overlap_ids[:20]}"
+            f"{' ...' if len(overlap_ids) > 20 else ''}"
+        )
+
     bounds = lbar.bounds()
 
     x_min, _, z_min = bounds.mins
@@ -146,12 +192,20 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
     x_corner = x_min + INNER_STEP * scale_x
     z_inner = z_min + INNER_STEP * scale_z
 
-    fix_depth = max(BOTTOM_FIX_DEPTH * scale_z, 1.5 * raw_h)
-    fixed_targets = _select_bodies_by_center_box(
-        lbar,
-        x=(x_min, x_corner + 0.5 * raw_h),
-        z=(z_min, z_min + fix_depth),
-    )
+    if explicit_fixed_ids:
+        fixed_targets = _select_bodies_by_ids(
+            lbar,
+            explicit_fixed_ids,
+            valid_mask=valid_mask,
+            label="fixed",
+        )
+    else:
+        fix_depth = max(BOTTOM_FIX_DEPTH * scale_z, 1.5 * raw_h)
+        fixed_targets = _select_bodies_by_center_box(
+            lbar,
+            x=(x_min, x_corner + 0.5 * raw_h),
+            z=(z_min, z_min + fix_depth),
+        )
 
     # Displacement patch at inner horizontal edge, 30 mm from right outer edge.
     x_center = x_max - LOAD_OFFSET_FROM_RIGHT * scale_x
@@ -161,29 +215,45 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
     x_hi = min(x_max - 0.5 * raw_h, x_center + x_half)
     z_hi = min(z_max, z_inner + max(LOAD_BAND_THICKNESS * scale_z, 1.5 * raw_h))
 
-    load_targets = _select_bodies_by_center_box(
-        lbar,
-        x=(x_lo, x_hi),
-        z=(z_inner, z_hi),
-    )
+    if explicit_load_ids:
+        load_targets = _select_bodies_by_ids(
+            lbar,
+            explicit_load_ids,
+            valid_mask=valid_mask,
+            label="load",
+        )
+    else:
+        load_targets = _select_bodies_by_center_box(
+            lbar,
+            x=(x_lo, x_hi),
+            z=(z_inner, z_hi),
+        )
 
     if not fixed_targets:
+        if explicit_fixed_ids:
+            raise ValueError("No fixed voxels selected from explicit FIXED_VOXEL_IDS.")
         raise ValueError("No fixed support voxels selected. Increase BOTTOM_FIX_DEPTH or increase VOX_RESOLUTION.")
     if not load_targets:
-        raise ValueError(
-            "No load-patch voxels selected. Adjust LOAD_OFFSET_FROM_RIGHT / LOAD_PATCH_WIDTH / VOX_RESOLUTION."
-        )
+        if explicit_load_ids:
+            raise ValueError("No load voxels selected from explicit LOAD_VOXEL_IDS.")
+        raise ValueError("No load-patch voxels selected. Adjust LOAD_OFFSET_FROM_RIGHT / LOAD_PATCH_WIDTH / VOX_RESOLUTION.")
 
     _set_targets_fixed(fixed_targets)
     _set_targets_kinematic_velocity(load_targets, LOAD_VELOCITY)
 
     print(f"L-bar voxels: {len(lbar.bodies)}")
     print(f"L-bar bonds: {len(bonds)}")
-    print(f"Fixed voxels: {len(fixed_targets)}")
-    print(
-        f"Load voxels: {len(load_targets)} "
-        f"(x=[{x_lo:.4f}, {x_hi:.4f}], z=[{z_inner:.4f}, {z_hi:.4f}])"
-    )
+    if explicit_fixed_ids:
+        print(f"Fixed voxels: {len(fixed_targets)} (explicit FIXED_VOXEL_IDS)")
+    else:
+        print(f"Fixed voxels: {len(fixed_targets)}")
+    if explicit_load_ids:
+        print(f"Load voxels: {len(load_targets)} (explicit LOAD_VOXEL_IDS)")
+    else:
+        print(
+            f"Load voxels: {len(load_targets)} "
+            f"(x=[{x_lo:.4f}, {x_hi:.4f}], z=[{z_inner:.4f}, {z_hi:.4f}])"
+        )
 
     return SimulationSetup(
         bodies=lbar.bodies,
@@ -206,6 +276,8 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
             "load_patch_width": LOAD_PATCH_WIDTH,
             "load_band_thickness": LOAD_BAND_THICKNESS,
             "bottom_fix_depth": BOTTOM_FIX_DEPTH,
+            "fixed_voxel_ids": list(explicit_fixed_ids),
+            "load_voxel_ids": list(explicit_load_ids),
         },
         headless_steps=STEPS,
         headless_kwargs={
