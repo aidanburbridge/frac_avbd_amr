@@ -363,13 +363,27 @@ end
     return k_on, k_upper, k_frac
 end
 
+@inline function _simple_fracture_soft_band(config::CriteriaConfig)::Float64
+    soft_band = 0.10
+    for spec in config.fracture_specs
+        if spec.kind == FRAC_ENERGY
+            if spec.params[2] > 0.0
+                soft_band = spec.params[2]
+            end
+            break
+        end
+    end
+    return max(soft_band, eps(Float64))
+end
+
 @inline function update_energy_damage!(config::CriteriaConfig, con)
     SIMPLE_CRITERIA_MODE || return con.damage
-    k_on, _, k_frac = _simple_energy_thresholds(config)
+    _, _, k_frac = _simple_energy_thresholds(config)
     drive = _energy_drive(con)
-    denom = max(k_frac - k_on, eps(Float64))
-    # Keep softening bounded below full break; fracture event controls true failure.
-    d_target = clamp((drive - k_on) / denom, 0.0, 0.90)
+    soft_band = _simple_fracture_soft_band(config)
+    # Minimal CZM-like evolution: damage starts at fracture onset and reaches 1
+    # over a small energy overdrive band.
+    d_target = clamp((drive - k_frac) / soft_band, 0.0, 1.0)
     con.damage = max(con.damage, d_target)
     return con.damage
 end

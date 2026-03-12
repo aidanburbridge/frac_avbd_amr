@@ -1,8 +1,5 @@
 """
-L-bar fixture test with an interior load patch.
-
-This scene demonstrates how to target non-extreme regions (interior edges)
-using coordinate windows over voxel centers.
+L-bar fracture fixture loaded from STL.
 """
 
 from __future__ import annotations
@@ -10,27 +7,22 @@ from __future__ import annotations
 import numpy as np
 
 import geometry.octree as oct
+import geometry.voxelizer as vox
 from util.pyvista_visualizer import SimulationSetup
 from util.voxel_assembly import VoxelAssembly
 
 
 # -------------------- Geometry (meters) -------------------- #
 MM = 1.0e-3
-
-LEG_WIDTH = 250.0 * MM            # left vertical leg width
-TOTAL_WIDTH = 500.0 * MM          # full top width
-TOTAL_HEIGHT = 500.0 * MM         # full height
-INNER_EDGE_HEIGHT = 250.0 * MM    # z location of inner horizontal edge
-THICKNESS = 20.0 * MM             # extrusion thickness (out-of-plane, y-axis)
-VOX_SIZE = 10.0 * MM              # base voxel edge length
+STL_PATH = r"C:\Users\aidan\Documents\TUM\Thesis\L bar fracture.stl"
+VOX_RESOLUTION = 1000
 
 
 # -------------------- Boundary-condition controls -------------------- #
+OUTER_DIM = 500.0 * MM
+INNER_STEP = 250.0 * MM
+LOAD_OFFSET_FROM_RIGHT = 30.0 * MM
 BOTTOM_FIX_DEPTH = 20.0 * MM
-
-# Load is applied upward at the underside of the inner horizontal edge,
-# centered at this x-offset from the inner corner.
-LOAD_OFFSET_FROM_CORNER = 220.0 * MM
 LOAD_PATCH_WIDTH = 20.0 * MM
 LOAD_BAND_THICKNESS = 20.0 * MM
 LOAD_VELOCITY = np.array([0.0, 0.0, 2.0e-3], dtype=float)
@@ -51,6 +43,7 @@ ITER = 80
 GRAV = 0.0
 FRICTION = 0.0
 STEPS = 2500
+MAX_REF_LEVEL = 2
 
 PYTHON_SOLVER_PARAMS = {
     "mu": 0.2,
@@ -60,25 +53,6 @@ PYTHON_SOLVER_PARAMS = {
     "gamma": 0.99,
     "debug_contacts": False,
 }
-
-
-def _cells(length: float, h: float) -> int:
-    return max(1, int(round(length / h)))
-
-
-def _build_lbar_occ() -> np.ndarray:
-    nx = _cells(TOTAL_WIDTH, VOX_SIZE)
-    ny = _cells(THICKNESS, VOX_SIZE)
-    nz = _cells(TOTAL_HEIGHT, VOX_SIZE)
-
-    leg_cells = min(nx, _cells(LEG_WIDTH, VOX_SIZE))
-    inner_k = min(nz - 1, _cells(INNER_EDGE_HEIGHT, VOX_SIZE))
-
-    occ = np.zeros((nx, ny, nz), dtype=bool)
-    occ[:leg_cells, :, :] = True      # full-height vertical leg
-    occ[:, :, inner_k:] = True        # top horizontal leg
-    return occ
-
 
 def _select_bodies_by_center_box(
     assembly: VoxelAssembly,
@@ -124,23 +98,30 @@ def _set_targets_kinematic_velocity(targets: list, velocity: np.ndarray) -> None
 
 
 def build_setup(sync_bodies: bool = True) -> SimulationSetup:
-    occ = _build_lbar_occ()
-    origin = np.zeros(3, dtype=float)
+    stlvox = vox.STLVoxelizer(STL_PATH, flood_fill=False)
+    occ, raw_origin, raw_h = stlvox.voxelize_to_resolution(VOX_RESOLUTION)
 
-    leaves, h_base = oct.octree_from_occ(occ, h_base=VOX_SIZE)
-    boxes, mapping, _ = oct.instantiate_boxes_from_tree(
-        leaves,
-        origin=origin,
-        h_base=h_base,
+    # Keep hierarchy refinement clipped to the STL interior.
+    def _contains_fn(pts: np.ndarray) -> np.ndarray:
+        return vox._contains_points_chunked(
+            stlvox.mesh,
+            np.asarray(pts, dtype=float),
+            chunk=200_000,
+            show_progress=False,
+        )
+
+    boxes, bonds, amr_dict = oct.build_hierarchical_bodies_bonds_amr(
+        coarse_occ=occ,
+        hierarchy_origin=raw_origin,
+        hierarchy_h_base=raw_h,
+        max_level=MAX_REF_LEVEL,
+        contains_fn=_contains_fn,
+        body_origin=raw_origin,
+        body_h_base=raw_h,
         density=DENSITY,
         penalty_gain=PENALTY_GAIN,
         static=False,
         show_progress=False,
-    )
-    bonds = oct.build_constraints_from_tree(
-        leaves,
-        boxes,
-        mapping,
         E=E_MODULUS,
         nu=NU,
         tensile_strength=TENSILE_STRENGTH,
@@ -150,36 +131,47 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
     lbar = VoxelAssembly(boxes, bonds)
     bounds = lbar.bounds()
 
-    x_min, _, z_min = bounds.mins[0], bounds.mins[1], bounds.mins[2]
-    x_max = bounds.maxs[0]
+    x_min, _, z_min = bounds.mins
+    x_max, _, z_max = bounds.maxs
+    x_span = x_max - x_min
+    z_span = z_max - z_min
 
-    x_corner = x_min + LEG_WIDTH
-    z_inner = z_min + INNER_EDGE_HEIGHT
+    if x_span <= 0.0 or z_span <= 0.0:
+        raise ValueError("Invalid L-bar bounds from voxelized STL.")
 
-    # 1) Fixed bottom of the vertical leg
+    # Drawn geometry ratios from 500/250/30 mm sketch.
+    scale_x = x_span / OUTER_DIM
+    scale_z = z_span / OUTER_DIM
+
+    x_corner = x_min + INNER_STEP * scale_x
+    z_inner = z_min + INNER_STEP * scale_z
+
+    fix_depth = max(BOTTOM_FIX_DEPTH * scale_z, 1.5 * raw_h)
     fixed_targets = _select_bodies_by_center_box(
         lbar,
-        x=(x_min, x_corner + 0.5 * VOX_SIZE),
-        z=(z_min, z_min + BOTTOM_FIX_DEPTH),
+        x=(x_min, x_corner + 0.5 * raw_h),
+        z=(z_min, z_min + fix_depth),
     )
 
-    # 2) Interior load patch on the underside of the inner horizontal edge
-    x_center = min(x_corner + LOAD_OFFSET_FROM_CORNER, x_max - 0.5 * VOX_SIZE)
-    x_half = 0.5 * LOAD_PATCH_WIDTH
-    x_lo = max(x_corner + 0.5 * VOX_SIZE, x_center - x_half)
-    x_hi = min(x_max - 0.5 * VOX_SIZE, x_center + x_half)
+    # Displacement patch at inner horizontal edge, 30 mm from right outer edge.
+    x_center = x_max - LOAD_OFFSET_FROM_RIGHT * scale_x
+    patch_width = max(LOAD_PATCH_WIDTH * scale_x, 2.0 * raw_h)
+    x_half = 0.5 * patch_width
+    x_lo = max(x_corner + 0.5 * raw_h, x_center - x_half)
+    x_hi = min(x_max - 0.5 * raw_h, x_center + x_half)
+    z_hi = min(z_max, z_inner + max(LOAD_BAND_THICKNESS * scale_z, 1.5 * raw_h))
 
     load_targets = _select_bodies_by_center_box(
         lbar,
         x=(x_lo, x_hi),
-        z=(z_inner, z_inner + LOAD_BAND_THICKNESS),
+        z=(z_inner, z_hi),
     )
 
     if not fixed_targets:
-        raise ValueError("No fixed support voxels selected. Increase BOTTOM_FIX_DEPTH or reduce VOX_SIZE.")
+        raise ValueError("No fixed support voxels selected. Increase BOTTOM_FIX_DEPTH or increase VOX_RESOLUTION.")
     if not load_targets:
         raise ValueError(
-            "No load-patch voxels selected. Adjust LOAD_OFFSET_FROM_CORNER / LOAD_PATCH_WIDTH / VOX_SIZE."
+            "No load-patch voxels selected. Adjust LOAD_OFFSET_FROM_RIGHT / LOAD_PATCH_WIDTH / VOX_RESOLUTION."
         )
 
     _set_targets_fixed(fixed_targets)
@@ -190,7 +182,7 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
     print(f"Fixed voxels: {len(fixed_targets)}")
     print(
         f"Load voxels: {len(load_targets)} "
-        f"(x=[{x_lo:.4f}, {x_hi:.4f}], z=[{z_inner:.4f}, {z_inner + LOAD_BAND_THICKNESS:.4f}])"
+        f"(x=[{x_lo:.4f}, {x_hi:.4f}], z=[{z_inner:.4f}, {z_hi:.4f}])"
     )
 
     return SimulationSetup(
@@ -202,15 +194,18 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
         friction=FRICTION,
         sync_bodies=sync_bodies,
         python_solver_params=PYTHON_SOLVER_PARAMS,
+        amr_params=amr_dict,
         metadata={
-            "vox_size": VOX_SIZE,
-            "leg_width": LEG_WIDTH,
-            "total_width": TOTAL_WIDTH,
-            "total_height": TOTAL_HEIGHT,
-            "inner_edge_height": INNER_EDGE_HEIGHT,
-            "load_offset_from_corner": LOAD_OFFSET_FROM_CORNER,
+            "stl_path": STL_PATH,
+            "vox_resolution": VOX_RESOLUTION,
+            "h_base": raw_h,
+            "max_ref_level": MAX_REF_LEVEL,
+            "outer_dim": OUTER_DIM,
+            "inner_step": INNER_STEP,
+            "load_offset_from_right": LOAD_OFFSET_FROM_RIGHT,
             "load_patch_width": LOAD_PATCH_WIDTH,
             "load_band_thickness": LOAD_BAND_THICKNESS,
+            "bottom_fix_depth": BOTTOM_FIX_DEPTH,
         },
         headless_steps=STEPS,
         headless_kwargs={

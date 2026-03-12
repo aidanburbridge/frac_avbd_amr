@@ -30,6 +30,14 @@ const DEBUG_REFINE_ALL = false # Debug: force refinement of all active bodies (s
 const DEBUG_EVENT_TRACE = get(ENV, "AVBD_DEBUG_EVENTS", "0") == "1"
 const EVENT_COMMIT_TOL = 5e-2 # Retained for diagnostics; finite-residual event steps can commit topology.
 const DEFAULT_RNG_SEED = 12345
+const REFINED_BOND_WEAKENING = begin
+    s = tryparse(Float64, get(ENV, "AVBD_REFINED_BOND_WEAKENING", "0.97"))
+    if s === nothing
+        0.97
+    else
+        clamp(s, 0.5, 1.0)
+    end
+end
 
 @inline function configured_rng_seed()::Int
     seed_str = get(ENV, "AVBD_RNG_SEED", string(DEFAULT_RNG_SEED))
@@ -53,7 +61,8 @@ ref_specs = [
     RefineSpec(REFINE_ENERGY, SVector(0.60, 0.98)),
 ]
 frac_specs = [
-    FractureSpec(FRAC_ENERGY, SVector(1.00, 0.0)),
+    # params = [k_frac, soft_band]
+    FractureSpec(FRAC_ENERGY, SVector(1.00, 0.10)),
 ]
 cfg = CriteriaConfig(ref_specs, ANY, frac_specs, ANY)
 
@@ -523,15 +532,11 @@ function dual_update!(sim::SimulationState, alpha::Float64)
             max_violation = max(max_violation, abs(lam_r - lam[r]))
             lam = setindex(lam, lam_r, r)
 
-            # Extreme-basic mode: energy damage + refinement gating.
-            if r == 1
-                Criteria.update_energy_damage!(sim.criteria, con)
-            end
-
             frac_hit = Criteria.should_fracture(sim.criteria, sim, con, lam_r, r)
             if frac_hit
-                # Refinement gating: if either endpoint can refine, refine instead of break.
-                if can_refine_A || can_refine_B
+                # Refinement gating: only allow fracture once both endpoints are at local
+                # refinement cap. Otherwise, keep refining the available endpoint(s).
+                if !(capA && capB)
                     if can_refine_A
                         push!(refinement_list, a_idx)
                         refine_votes[a_idx] += 1
@@ -541,11 +546,17 @@ function dual_update!(sim::SimulationState, alpha::Float64)
                         refine_votes[b_idx] += 1
                     end
                 else
-                    if !fracture_mark[con_id] && sim.bond_fracture_cooldown[con_id] == 0
-                        fracture_mark[con_id] = true
-                        push!(fracture_list, con_id)
+                    # Damage evolves only at admissible fracture level (CZM-style softening).
+                    if r == 1
+                        Criteria.update_energy_damage!(sim.criteria, con)
                     end
-                    break
+                    if con.damage >= 1.0
+                        if !fracture_mark[con_id] && sim.bond_fracture_cooldown[con_id] == 0
+                            fracture_mark[con_id] = true
+                            push!(fracture_list, con_id)
+                        end
+                        break
+                    end
                 end
             elseif Criteria.should_refine(sim.criteria, sim, con, lam_r, r)
                 if can_refine_A
@@ -760,6 +771,15 @@ function init_simulation(
 
             tensile = row[15] * random_factor
             Gc = row[16] * random_factor
+            # Slightly weaken bonds that live on finer AMR levels.
+            if REFINED_BOND_WEAKENING < 1.0 && length(sim.level) == n_bodies
+                lvlA = sim.level[idxA+1]
+                lvlB = sim.level[idxB+1]
+                lvl = max(lvlA, lvlB)
+                if lvl > 0
+                    tensile *= REFINED_BOND_WEAKENING^lvl
+                end
+            end
             damp_val = size(bond_data, 2) >= 17 ? row[17] : 0.0
             bA = bodies[idxA+1]
             bB = bodies[idxB+1]
@@ -975,10 +995,9 @@ function step_simulation!(sim::SimulationState)
     end
 
     has_topology_events = !isempty(refine_list) || !isempty(fracture_list)
-    event_ready = has_topology_events && isfinite(curr_max_violation)
-    topology_ready = converged || event_ready
+    topology_ready = converged
 
-    # Commit topology changes on converged solves or any finite-residual event step.
+    # Commit topology changes only after converged inner solve.
     if topology_ready
         committed_frac = 0
         committed_ref = 0
