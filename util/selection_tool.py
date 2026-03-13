@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import inspect
 import json
 import os
 import sys
@@ -150,6 +151,13 @@ def _first_attr(module, names: tuple[str, ...]):
         if hasattr(module, attr):
             return getattr(module, attr)
     return None
+
+
+def _voxelizer_default(name: str, fallback):
+    param = inspect.signature(vox.STLVoxelizer.__init__).parameters.get(name)
+    if param is None or param.default is inspect._empty:
+        return fallback
+    return param.default
 
 
 def _load_test_config(test_name: str) -> dict[str, object]:
@@ -303,15 +311,22 @@ def main() -> int:
 
     test_cfg = _load_test_config(args.test) if args.test else {}
     test_name = test_cfg.get("test_name")
+    default_flood_fill = bool(_voxelizer_default("flood_fill", True))
+    default_pad_voxels = int(_voxelizer_default("pad_voxels", 1))
+    default_repair = bool(_voxelizer_default("repair", True))
 
     stl_value = args.stl if args.stl is not None else test_cfg.get("stl_path", DEFAULT_STL)
     resolution = int(args.resolution if args.resolution is not None else test_cfg.get("resolution", DEFAULT_RESOLUTION))
     max_ref_level = int(
         args.max_ref_level if args.max_ref_level is not None else test_cfg.get("max_ref_level", DEFAULT_MAX_REF_LEVEL)
     )
-    flood_fill = bool(args.flood_fill if args.flood_fill is not None else test_cfg.get("flood_fill", False))
-    pad_voxels = int(args.pad_voxels if args.pad_voxels is not None else test_cfg.get("pad_voxels", 1))
-    repair = bool(args.repair if args.repair is not None else test_cfg.get("repair", False))
+    flood_fill = bool(
+        args.flood_fill if args.flood_fill is not None else test_cfg.get("flood_fill", default_flood_fill)
+    )
+    pad_voxels = int(
+        args.pad_voxels if args.pad_voxels is not None else test_cfg.get("pad_voxels", default_pad_voxels)
+    )
+    repair = bool(args.repair if args.repair is not None else test_cfg.get("repair", default_repair))
 
     stl_path = Path(str(stl_value)).expanduser()
     if not stl_path.is_file():

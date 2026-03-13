@@ -25,7 +25,7 @@ LOAD_OFFSET_FROM_RIGHT = 30.0 * MM
 BOTTOM_FIX_DEPTH = 20.0 * MM
 LOAD_PATCH_WIDTH = 20.0 * MM
 LOAD_BAND_THICKNESS = 20.0 * MM
-LOAD_VELOCITY = np.array([0.0, 2.0, 0.0], dtype=float)
+LOAD_VELOCITY = np.array([0.0, 3.0, 0.0], dtype=float)
 # Optional explicit voxel-ID sets from util.selection_tool.
 FIXED_VOXEL_IDS: tuple[int, ...] = ()
 LOAD_VOXEL_IDS: tuple[int, ...] = ()
@@ -45,7 +45,7 @@ STEPS_PER_EXPORT = max(1, int(DT_RENDER / DT_PHYSICS))
 ITER = 80
 GRAV = 0.0
 FRICTION = 0.0
-STEPS = 5000
+STEPS = 8000
 MAX_REF_LEVEL = 2
 
 PYTHON_SOLVER_PARAMS = {
