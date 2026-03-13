@@ -25,12 +25,12 @@ LOAD_OFFSET_FROM_RIGHT = 30.0 * MM
 BOTTOM_FIX_DEPTH = 20.0 * MM
 LOAD_PATCH_WIDTH = 20.0 * MM
 LOAD_BAND_THICKNESS = 20.0 * MM
-LOAD_VELOCITY = np.array([0.0, 3.0, 0.0], dtype=float)
+LOAD_VELOCITY = np.array([0.0, 5.0, 0.0], dtype=float)
 # Optional explicit voxel-ID sets from util.selection_tool.
 FIXED_VOXEL_IDS: tuple[int, ...] = ()
 LOAD_VOXEL_IDS: tuple[int, ...] = ()
 FIXED_VOXEL_IDS = [0, 17, 34, 59, 618, 643, 668, 709, 1620, 1645, 1670, 1711, 2622, 2647, 2672, 2713, 3624, 3649, 3674, 3715]
-LOAD_VOXEL_IDS = [5760, 5801, 6138, 6179, 6516, 6557]
+LOAD_VOXEL_IDS = [5760, 5801, 5842, 5883, 6138, 6179, 6220, 6261, 6516, 6557, 6598, 6639, 6894, 6935, 6976, 7017]
 # -------------------- Material / solver -------------------- #
 DENSITY = 1150.0
 PENALTY_GAIN = 1.0e6
