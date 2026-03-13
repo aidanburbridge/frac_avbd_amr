@@ -25,7 +25,7 @@ LOAD_OFFSET_FROM_RIGHT = 30.0 * MM
 BOTTOM_FIX_DEPTH = 20.0 * MM
 LOAD_PATCH_WIDTH = 20.0 * MM
 LOAD_BAND_THICKNESS = 20.0 * MM
-LOAD_VELOCITY = np.array([0.0, 0.0, 2.0e-3], dtype=float)
+LOAD_VELOCITY = np.array([0.0, 2.0, 0.0], dtype=float)
 # Optional explicit voxel-ID sets from util.selection_tool.
 FIXED_VOXEL_IDS: tuple[int, ...] = ()
 LOAD_VOXEL_IDS: tuple[int, ...] = ()
