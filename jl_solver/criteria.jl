@@ -44,11 +44,12 @@ SimpleFracture(threshold::Real=1.0) = FractureSpec(FRAC_LAMBDA, SVector(Float64(
 @inline function _check_refinement_criteria(spec::RefineSpec, con, lam_r, r)::Bool
     # Simple lambda refinement check
     if spec.kind == REFINE_LAMBDA
-        # Refine if tension is ever over lambda threshold: simple/dumb rule
-        _bond_in_tension(con) || return false
+        # Mixed-mode traction utilization:
+        # opening normal traction + both tangential shear components.
+        # Compressive normal traction does not contribute.
+        r == 1 || return false
         thresh_mul = spec.params[1]
-        cap = max(con.fracture[r], eps(Float64))
-        return abs(lam_r) >= thresh_mul * cap
+        return _bond_traction_drive(con) >= thresh_mul
 
     elseif spec.kind == REFINE_ENERGY
         # Refine on a bond-normalized initiation energy scale.
@@ -87,11 +88,12 @@ end
 @inline function _check_fracture_criteria(spec::FractureSpec, con, lam_r, r)::Bool
     # Simple lambda fracture check
     if spec.kind == FRAC_LAMBDA
-        # Fracture if over certain lambda (w/ ratio): dumb check
-        _bond_in_tension(con) || return false
+        # Mixed-mode traction utilization:
+        # opening normal traction + both tangential shear components.
+        # Compressive normal traction does not contribute.
+        r == 1 || return false
         thresh_mul = spec.params[1]
-        cap = max(con.fracture[r], eps(Float64))
-        return abs(lam_r) >= thresh_mul * cap
+        return _bond_traction_drive(con) >= thresh_mul
 
     elseif spec.kind == FRAC_STRETCH
         # Fracture if stretch is 
@@ -157,6 +159,25 @@ end
     en = 0.5 * con.stiffness[1] * dn^2
     et = 0.5 * (con.stiffness[2] * con.C[2]^2 + con.stiffness[3] * con.C[3]^2)
     return en, et
+end
+
+@inline function _bond_traction_components(con)::Tuple{Float64,Float64,Float64}
+    sigma_n = clamp(con.penalty_k[1] * con.C[1], con.f_min[1], con.f_max[1])
+    sigma_t1 = clamp(con.penalty_k[2] * con.C[2], con.f_min[2], con.f_max[2])
+    sigma_t2 = clamp(con.penalty_k[3] * con.C[3], con.f_min[3], con.f_max[3])
+
+    fn_open = max(0.0, _normal_sign(con) * sigma_n)
+    ft1 = abs(sigma_t1)
+    ft2 = abs(sigma_t2)
+    return fn_open, ft1, ft2
+end
+
+@inline function _bond_traction_drive(con)::Float64
+    fn_open, ft1, ft2 = _bond_traction_components(con)
+    cap_n = max(con.fracture[1], eps(Float64))
+    cap_t1 = max(con.fracture[2], eps(Float64))
+    cap_t2 = max(con.fracture[3], eps(Float64))
+    return sqrt((fn_open / cap_n)^2 + (ft1 / cap_t1)^2 + (ft2 / cap_t2)^2)
 end
 
 @inline function _bond_energy_budget(con)::Float64

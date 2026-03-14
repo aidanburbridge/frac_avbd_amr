@@ -44,9 +44,9 @@ end
 # ]
 # # End dumb criterion
 
-# Energy-based cohesive criterion
+# Stress-driven refinement + energy-based cohesive fracture
 ref_specs = [
-    RefineSpec(REFINE_ENERGY, SVector(0.60, 0.98)),
+    RefineSpec(REFINE_LAMBDA, SVector(0.70, 0.0)),
 ]
 frac_specs = [
     FractureSpec(FRAC_ENERGY, SVector(1.00, 0.0)),
@@ -514,15 +514,10 @@ function dual_update!(sim::SimulationState, alpha::Float64)
             # FRACTURE CRITERIA
             #if abs(lam_r) >= (con.fracture[r] * 10)
             if Criteria.should_fracture(sim.criteria, sim, con, lam_r, r)
-                if !(capA && capB)
-                    # NOT @ finest level -> push to refine
-                    if !capA
-                        push!(refinement_list, a_idx)
-                    end
-                    if !capB
-                        push!(refinement_list, b_idx)
-                    end
-                end
+                # Fracture does not drive AMR placement. Refinement location is
+                # controlled by the refinement criterion; capped bonds enter the
+                # cohesive damage pass after convergence.
+                nothing
             end
 
             if lam_r > con.f_min[r] && lam_r < con.f_max[r]

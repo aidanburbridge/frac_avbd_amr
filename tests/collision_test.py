@@ -10,6 +10,13 @@ import pyvista as pv
 from py_solver import collisions, constraints
 import numpy as np
 
+BODY_A_COLOR = "#c43c39"
+BODY_B_COLOR = "#2f6db3"
+NORMAL_COLOR = "black"
+TANGENT_COLOR = "#2f9e44"
+MANIFOLD_COLOR = "#ffd84d"
+MANIFOLD_EDGE_COLOR = "black"
+
 # wrong way
 boxA = box_3D((0., 0.5, 2.9), (0.2, 0.1, 0.4, 0.5), (0,0,0), (0,0,0), 1000, 10, (2,2,2), static=False)
 boxB = box_3D((0.8, 1., 1.2), (0.0, 0.0, 0.0, 0.0), (0,0,0), (0,0,0), 1000, 10, (2,2,2), static=False)
@@ -95,7 +102,7 @@ else:
 
 bodies_list = [boxA, boxB]
 coll_contacts = collisions.get_collisions(bodies_list)
-print("Coll contacts: ", coll_contacts)
+print("Contact constraints: ", coll_contacts)
 
 const_list = []
 pts_to_color = []
@@ -118,6 +125,55 @@ def make_translation(R: np.ndarray, t: np.ndarray) -> np.ndarray:
     trans_mat[:3,:3] = R
     trans_mat[:3,3] = t
     return trans_mat
+
+def unit(v: np.ndarray) -> np.ndarray:
+    v = np.asarray(v, dtype=float).reshape(3)
+    return v / (np.linalg.norm(v) + 1e-12)
+
+def fallback_tangent_basis(normal: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    n = unit(normal)
+    ref = np.array([1.0, 0.0, 0.0], dtype=float)
+    if abs(np.dot(n, ref)) > 0.9:
+        ref = np.array([0.0, 1.0, 0.0], dtype=float)
+    t1 = unit(np.cross(n, ref))
+    t2 = unit(np.cross(n, t1))
+    return t1, t2
+
+def contact_center() -> np.ndarray:
+    if isinstance(contact_pts, np.ndarray) and len(contact_pts):
+        return np.mean(contact_pts, axis=0)
+    if isinstance(clipped_poly, np.ndarray) and len(clipped_poly):
+        return np.mean(clipped_poly, axis=0)
+    return 0.5 * (ref_body.position[:3] + inc_body.position[:3])
+
+def add_labels(plotter: pv.Plotter, points, labels, text_color="black", font_size=18):
+    pts = np.asarray(points, dtype=float)
+    if pts.size == 0:
+        return
+    plotter.add_point_labels(
+        pts,
+        labels,
+        text_color=text_color,
+        font_size=font_size,
+        show_points=False,
+        fill_shape=False,
+        always_visible=True,
+    )
+
+def add_labeled_vector(
+    plotter: pv.Plotter,
+    origin: np.ndarray,
+    direction: np.ndarray,
+    label: str,
+    color: str,
+    length: float,
+    label_offset: float,
+):
+    origin = np.asarray(origin, dtype=float).reshape(1, 3)
+    direction = unit(direction).reshape(1, 3) * float(length)
+    plotter.add_arrows(origin, direction, mag=1.0, color=color)
+    label_pos = origin[0] + direction[0] + unit(direction[0]) * label_offset
+    add_labels(plotter, [label_pos], [label], text_color=color, font_size=20)
 
 def create_cube_mesh(b: box_3D, color="blue", opacity=0.5, show_edges=True):
     w,h,d = b.size
@@ -162,47 +218,80 @@ def color_axes(plotter: pv.Plotter, axes, origin=(0,0,0), scale=0.75, axis_color
         a = a/ (np.linalg.norm(a) + 1e-12)
         plotter.add_arrows(origin, np.array([a])*scale, color=axis_color)
 
-def paint_face(plotter:pv.Plotter, vertices:np.ndarray, face_color="red"):
-    faces = np.hstack([[4, 0, 1, 2, 3]])
-    face = pv.PolyData(vertices, faces)
-
-    plotter.add_mesh(face, color=face_color)#, opacity=1)
+def paint_face(
+    plotter: pv.Plotter,
+    vertices: np.ndarray,
+    face_color=MANIFOLD_COLOR,
+    edge_color=MANIFOLD_EDGE_COLOR,
+    opacity=0.98,
+    line_width=6,
+):
+    if vertices is None or len(vertices) < 3:
+        return
+    face_ids = np.hstack([[len(vertices)], np.arange(len(vertices), dtype=int)])
+    face = pv.PolyData(np.asarray(vertices, dtype=float), face_ids)
+    plotter.add_mesh(
+        face,
+        color=face_color,
+        opacity=opacity,
+        show_edges=True,
+        edge_color=edge_color,
+        line_width=line_width,
+        smooth_shading=True,
+    )
 
 def main():
     pv.set_plot_theme("document")
-    
-    plotter = pv.Plotter()
-    plotter.add_axes()
-    #plotter.show_grid(color="gray")
+    plotter = pv.Plotter(window_size=(1600, 1200))
+    plotter.set_background("white")
 
-    mesh1, mesh1_dict = create_cube_mesh(boxA, color="blue")    # A is blue
-    mesh2, mesh2_dict = create_cube_mesh(boxB, color="red")     # B is red
+    mesh1, mesh1_dict = create_cube_mesh(boxA, color=BODY_A_COLOR, opacity=0.28, show_edges=False)
+    mesh2, mesh2_dict = create_cube_mesh(boxB, color=BODY_B_COLOR, opacity=0.28, show_edges=False)
 
     plotter.add_mesh(mesh1, **mesh1_dict)
     plotter.add_mesh(mesh2, **mesh2_dict)
 
-    # print("Best axis: ", sat_result, label)
-    # print("Contact normal: ", contact_normal)
+    patch_center = contact_center()
+    if const_list:
+        t1, t2 = (unit(const_list[0].tangents[0]), unit(const_list[0].tangents[1]))
+    else:
+        t1, t2 = fallback_tangent_basis(contact_normal)
 
-    #paint_face(plotter, ref_face, face_color="black")
-    #paint_face(plotter, inc_face, face_color="white")
+    scene_scale = max(
+        np.linalg.norm(boxA.position[:3] - boxB.position[:3]),
+        np.max(boxA.size),
+        np.max(boxB.size),
+        1.0,
+    )
+    vector_length = 0.45 * scene_scale
+    label_offset = 0.06 * scene_scale
+    body_label_offset = 0.18 * scene_scale
 
-    color_axes(plotter, np.asarray([contact_normal]), origin=ref_body.position[:3], axis_color="green", scale=1)
-    color_axes(plotter, np.asarray([ref_axis]), origin=ref_body.position[:3], axis_color="black")
-    color_axes(plotter, np.asarray([inc_axis]), origin=inc_body.position[:3], axis_color="white")
+    paint_face(plotter, clipped_poly)
 
-    # for c in contact_points:
-    #     color_points(plotter, c.point)
-    
-    #color_contacts(plotter, contacts)
-    #color_points(plotter, clip)
+    add_labeled_vector(plotter, patch_center, contact_normal, "n", NORMAL_COLOR, vector_length, label_offset)
+    add_labeled_vector(plotter, patch_center, t1, "t1", TANGENT_COLOR, 0.9 * vector_length, label_offset)
+    add_labeled_vector(plotter, patch_center, t2, "t2", TANGENT_COLOR, 0.9 * vector_length, label_offset)
 
-    #color_points(plotter, clipped_poly, point_color="purple", point_radius=.02)
-    #color_points(plotter, contact_pts, point_color="yellow", point_radius=.03)
-
-    # Color constraint points
-    # for i, pt in enumerate(contact_pts):
-    #     color_vectors(plotter, pt, contact_normal, depths[i])
+    body_label_dir = unit(contact_normal + 0.35 * t2)
+    add_labels(
+        plotter,
+        [boxA.position[:3] - body_label_dir * body_label_offset],
+        ["Body A"],
+        text_color=BODY_A_COLOR,
+    )
+    add_labels(
+        plotter,
+        [boxB.position[:3] + body_label_dir * body_label_offset],
+        ["Body B"],
+        text_color=BODY_B_COLOR,
+    )
+    add_labels(
+        plotter,
+        [patch_center + (0.18 * scene_scale) * (0.4 * t1 + t2)],
+        ["Contact manifold"],
+        text_color="black",
+    )
     
     print(f"\nNum contacts: {len(contact_list)}")
 
@@ -217,29 +306,29 @@ def main():
         print(f"Constraint body id A: {bodyA}, body B: {bodyB}")
 
         print(f"\njA: \t{jA[0][:3]}\njB: \t{jB[0][:3]}\npA: \t{pA}\npB: \t{pB}\ndepth: \t{c.depth}")
-        # A
-        color_vectors(plotter, pA, jA[0][:3], c.depth, arrow_color="blue")
-        color_point(plotter, pA, point_color="blue", point_radius=.03)
-        # B
-        color_vectors(plotter, pB, jB[0][:3], c.depth, arrow_color="red")
-        color_point(plotter, pB, point_color="red", point_radius=.03)    
         constraint_calc = float(np.dot(c.contact.normal, (pA - pB))) + 1e-9
         print(f"\nConstraint calculation: {constraint_calc}")
 
 
 
-    print("Manual test:\n")
+    print("Contact manifold (manual build):\n")
     for con in contact_list:
         print(f"\t Pair ({id(con.bodyA)%1000}, {id(con.bodyB)%1000}), point: {con.point.round(3)}, normal: {con.normal.round(3)}, depth: {con.depth.round(3)}")
 
-    print("Collision test:\n")
+    print("Contact constraints (collision pipeline):\n")
     for con in coll_contacts:
         print(f"\t Pair ({id(con.bodyA)%1000}, {id(con.bodyB)%1000}), point: {con.point.round(3)}, normal: {con.normal.round(3)}, depth: {con.depth.round(3)}")
 
 
-    plotter.camera_position = "iso"
-    plotter.enable_parallel_projection()  # Enable orthographic (parallel) projection
-    plotter.show(title="Testing box contacts.")
+    camera_dir = unit(0.45 * contact_normal + 0.95 * t1 + 0.35 * t2)
+    plotter.camera_position = (
+        patch_center + 3.0 * scene_scale * camera_dir,
+        patch_center,
+        t2,
+    )
+    plotter.enable_parallel_projection()
+    plotter.camera.zoom(1.6)
+    plotter.show(title="Contact manifold visualization")
 
 if __name__ == "__main__":
     main()
