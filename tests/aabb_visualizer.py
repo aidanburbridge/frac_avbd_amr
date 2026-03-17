@@ -10,7 +10,7 @@ if str(REPO_ROOT) not in sys.path:
 import numpy as np
 import pyvista as pv
 
-from geometry.primitives import box_3D
+from geometry.primitives import AABB3, box_3D
 from py_solver import collisions
 from tests.collision_pyvista_common import (
     BODY_A_COLOR,
@@ -28,12 +28,16 @@ from tests.collision_pyvista_common import (
 
 NEUTRAL_BODY_COLOR = "#c7cdd6"
 NEUTRAL_AABB_COLOR = "#8d949c"
-BODY_A_LABEL_DOWN = 0.0
+BODY_C_COLOR = "#2f9e44"
+BODY_A_LABEL_DOWN = -0.3
 BODY_B_LABEL_DOWN = 1.0
-BODY_A_LABEL_X = -0.2
-BODY_B_LABEL_X = 0.1
-AABB_A_LABEL_X = -0.2
-AABB_B_LABEL_X = 0.1
+BODY_C_LABEL_DOWN = 0.0
+BODY_A_LABEL_X = -0.25
+BODY_B_LABEL_X = 0.12
+BODY_C_LABEL_X = 0.18
+GRID_PADDING_X = 0.95
+GRID_PADDING_Y = 0.30
+GRID_PADDING_Z = 0.22
 
 
 def overlap_bounds(aabbA, aabbB):
@@ -67,6 +71,82 @@ def aabb_center(aabb) -> np.ndarray:
     )
 
 
+def projection_quad(aabb, plane: str, plane_value: float) -> np.ndarray:
+    if plane == "xy":
+        return np.array(
+            [
+                [aabb.min_x, aabb.min_y, plane_value],
+                [aabb.max_x, aabb.min_y, plane_value],
+                [aabb.max_x, aabb.max_y, plane_value],
+                [aabb.min_x, aabb.max_y, plane_value],
+            ],
+            dtype=float,
+        )
+    if plane == "xz":
+        return np.array(
+            [
+                [aabb.min_x, plane_value, aabb.min_z],
+                [aabb.max_x, plane_value, aabb.min_z],
+                [aabb.max_x, plane_value, aabb.max_z],
+                [aabb.min_x, plane_value, aabb.max_z],
+            ],
+            dtype=float,
+        )
+    if plane == "yz":
+        return np.array(
+            [
+                [plane_value, aabb.min_y, aabb.min_z],
+                [plane_value, aabb.max_y, aabb.min_z],
+                [plane_value, aabb.max_y, aabb.max_z],
+                [plane_value, aabb.min_y, aabb.max_z],
+            ],
+            dtype=float,
+        )
+    raise ValueError(f"Unsupported projection plane: {plane}")
+
+
+def add_projection_patch(
+    plotter: pv.Plotter,
+    aabb,
+    plane: str,
+    plane_value: float,
+    color: str,
+    *,
+    opacity: float,
+    edge_color: str | None = None,
+    line_width: float = 2.0,
+):
+    verts = projection_quad(aabb, plane, plane_value)
+    faces = np.hstack([[4, 0, 1, 2, 3]])
+    patch = pv.PolyData(verts, faces)
+    plotter.add_mesh(
+        patch,
+        color=color,
+        opacity=opacity,
+        show_edges=True,
+        edge_color=(edge_color or color),
+        line_width=line_width,
+        smooth_shading=True,
+    )
+
+
+def add_invisible_padding_cubes(
+    plotter: pv.Plotter,
+    mins: np.ndarray,
+    maxs: np.ndarray,
+    *,
+    marker_size: float,
+):
+    for center in (mins, maxs):
+        marker = pv.Cube(
+            center=tuple(np.asarray(center, dtype=float)),
+            x_length=marker_size,
+            y_length=marker_size,
+            z_length=marker_size,
+        )
+        plotter.add_mesh(marker, opacity=0.0, show_edges=False, lighting=False)
+
+
 def make_context_body(
     center,
     quat=(0.0, 0.0, 0.0, 0.0),
@@ -90,12 +170,18 @@ def make_context_body(
 
 def main():
     boxA, boxB = build_demo_bodies()
-    context_bodies = [
-        make_context_body(center=(-4.1, -2.3, 0.0), quat=(0.18, 0.05, 0.12, 0.2), size=(1.15, 1.15, 1.15), body_id=3),
-        make_context_body(center=(4.8, -2.8, 0.2), quat=(0.12, -0.08, 0.16, 0.22), size=(1.3, 1.0, 1.1), body_id=4),
-        make_context_body(center=(5.6, 3.9, 4.2), quat=(0.14, 0.11, 0.05, -0.16), size=(1.0, 1.35, 1.0), body_id=5),
-    ]
-    bodies = [boxA, boxB, *context_bodies]
+    slight_yaw = np.deg2rad(18.0)
+    boxB.position[3:] = np.array(
+        [np.cos(0.5 * slight_yaw), 0.0, 0.0, np.sin(0.5 * slight_yaw)],
+        dtype=float,
+    )
+    bodyC = make_context_body(
+        center=(-1.35, 2.45, 4.45),
+        quat=(0.08, 0.0, 0.0, 0.12),
+        size=(1.55, 1.35, 1.15),
+        body_id=3,
+    )
+    bodies = [boxA, boxB, bodyC]
     broad_pairs = collisions.broad_phase(bodies, set())
     ab_pair = next(
         (
@@ -109,21 +195,20 @@ def main():
 
     aabbA = boxA.get_aabb()
     aabbB = boxB.get_aabb()
+    aabbC = bodyC.get_aabb()
     overlap_mins, overlap_maxs = overlap_bounds(aabbA, aabbB)
     has_overlap = bool(np.all(overlap_maxs > overlap_mins))
 
     plotter = pv.Plotter(window_size=(1600, 1200))
     plotter.set_background("white")
     plotter.add_axes()
-    plotter.show_grid(color="lightgray")
 
     add_body(plotter, boxA, BODY_A_COLOR)
     add_body(plotter, boxB, BODY_B_COLOR)
+    add_body(plotter, bodyC, BODY_C_COLOR, opacity=0.20, show_edges=False)
     add_aabb(plotter, aabbA, BODY_A_COLOR)
     add_aabb(plotter, aabbB, BODY_B_COLOR)
-    for idx, body in enumerate(context_bodies, start=3):
-        add_body(plotter, body, NEUTRAL_BODY_COLOR, opacity=0.18, show_edges=False)
-        add_aabb(plotter, body.get_aabb(), NEUTRAL_AABB_COLOR, fill_opacity=0.04, line_width=2.5)
+    add_aabb(plotter, aabbC, BODY_C_COLOR, fill_opacity=0.06, line_width=3.0)
 
     body_pts = np.vstack([body.get_corners() for body in bodies])
     scene_pts = body_pts.copy()
@@ -141,62 +226,120 @@ def main():
         scene_pts = np.vstack([scene_pts, overlap_mins, overlap_maxs])
 
     scale = scene_scale(scene_pts)
+    projection_eps = 0.012 * scale
 
     mins = np.min(scene_pts, axis=0)
     maxs = np.max(scene_pts, axis=0)
     center = 0.5 * (mins + maxs)
+    span = np.maximum(maxs - mins, 1e-9)
+    pad = np.array(
+        [
+            GRID_PADDING_X * span[0],
+            GRID_PADDING_Y * span[1],
+            GRID_PADDING_Z * span[2],
+        ],
+        dtype=float,
+    )
+    padded_mins = mins - pad
+    padded_maxs = maxs + pad
+    padded_center = 0.5 * (padded_mins + padded_maxs)
+    add_invisible_padding_cubes(
+        plotter,
+        padded_mins,
+        padded_maxs,
+        marker_size=0.02 * scale,
+    )
+    plotter.show_grid(color="lightgray")
     x_axis = np.array([1.0, 0.0, 0.0], dtype=float)
     y_axis = np.array([0.0, 1.0, 0.0], dtype=float)
     z_axis = np.array([0.0, 0.0, 1.0], dtype=float)
     camera_dir = unit(np.array([1.55, -1.05, 0.8], dtype=float))
     body_a_center = np.array(boxA.position[:3], dtype=float)
     body_b_center = np.array(boxB.position[:3], dtype=float)
+    body_c_center = np.array(bodyC.position[:3], dtype=float)
     aabb_a_center = aabb_center(aabbA)
     aabb_b_center = aabb_center(aabbB)
+    aabb_c_center = aabb_center(aabbC)
+    xy_plane_z = padded_mins[2] + projection_eps
+    xz_plane_y = padded_maxs[1] - projection_eps
+    yz_plane_x = padded_mins[0] + projection_eps
+
+    add_projection_patch(plotter, aabbA, "xy", xy_plane_z, BODY_A_COLOR, opacity=0.12)
+    add_projection_patch(plotter, aabbB, "xy", xy_plane_z, BODY_B_COLOR, opacity=0.12)
+    add_projection_patch(plotter, aabbC, "xy", xy_plane_z, BODY_C_COLOR, opacity=0.10)
+    add_projection_patch(plotter, aabbA, "xz", xz_plane_y, BODY_A_COLOR, opacity=0.10)
+    add_projection_patch(plotter, aabbB, "xz", xz_plane_y, BODY_B_COLOR, opacity=0.10)
+    add_projection_patch(plotter, aabbC, "xz", xz_plane_y, BODY_C_COLOR, opacity=0.08)
+    add_projection_patch(plotter, aabbA, "yz", yz_plane_x, BODY_A_COLOR, opacity=0.10)
+    add_projection_patch(plotter, aabbB, "yz", yz_plane_x, BODY_B_COLOR, opacity=0.10)
+    add_projection_patch(plotter, aabbC, "yz", yz_plane_x, BODY_C_COLOR, opacity=0.08)
 
     body_a_label_pos = body_a_center + BODY_A_LABEL_X * scale * x_axis - BODY_A_LABEL_DOWN * z_axis
     body_b_label_pos = body_b_center + BODY_B_LABEL_X * scale * x_axis - BODY_B_LABEL_DOWN * z_axis
-    aabb_a_label_pos = aabb_a_center + (
-        AABB_A_LABEL_X * scale * x_axis
-        + 0.10 * scale * y_axis
-        + 0.06 * scale * z_axis
-    )
-    aabb_b_label_pos = aabb_b_center + (
-        AABB_B_LABEL_X * scale * x_axis
-        + 0.04 * scale * y_axis
-        + 0.03 * scale * z_axis
-    )
+    body_c_label_pos = body_c_center + BODY_C_LABEL_X * scale * x_axis - BODY_C_LABEL_DOWN * z_axis
+    label_a_pos = 0.5 * (body_a_label_pos + aabb_a_center) + 0.06 * scale * y_axis + 0.04 * scale * z_axis
+    label_b_pos = 0.5 * (body_b_label_pos + aabb_b_center) + 0.02 * scale * y_axis + 0.03 * scale * z_axis
+    label_c_pos = 0.5 * (body_c_label_pos + aabb_c_center) + 0.05 * scale * y_axis + 0.04 * scale * z_axis
 
     add_labels(
         plotter,
-        [body_a_label_pos],
-        ["Body A"],
+        [label_a_pos],
+        ["Body/AABB A"],
         text_color=BODY_A_COLOR,
     )
     add_labels(
         plotter,
-        [body_b_label_pos],
-        ["Body B"],
+        [label_b_pos],
+        ["Body/AABB B"],
         text_color=BODY_B_COLOR,
-    )
-
-    add_labels(
-        plotter,
-        [aabb_a_label_pos],
-        ["AABB A"],
-        text_color=BODY_A_COLOR,
-        font_size=17,
     )
     add_labels(
         plotter,
-        [aabb_b_label_pos],
-        ["AABB B"],
-        text_color=BODY_B_COLOR,
-        font_size=17,
+        [label_c_pos],
+        ["Body/AABB C"],
+        text_color=BODY_C_COLOR,
     )
 
     if has_overlap:
         overlap_center = 0.5 * (overlap_mins + overlap_maxs)
+        overlap_aabb = AABB3(
+            float(overlap_mins[0]),
+            float(overlap_maxs[0]),
+            float(overlap_mins[1]),
+            float(overlap_maxs[1]),
+            float(overlap_mins[2]),
+            float(overlap_maxs[2]),
+        )
+        add_projection_patch(
+            plotter,
+            overlap_aabb,
+            "xy",
+            xy_plane_z + 0.35 * projection_eps,
+            MANIFOLD_COLOR,
+            opacity=0.18,
+            edge_color=MANIFOLD_EDGE_COLOR,
+            line_width=2.8,
+        )
+        add_projection_patch(
+            plotter,
+            overlap_aabb,
+            "xz",
+            xz_plane_y - 0.35 * projection_eps,
+            MANIFOLD_COLOR,
+            opacity=0.16,
+            edge_color=MANIFOLD_EDGE_COLOR,
+            line_width=2.8,
+        )
+        add_projection_patch(
+            plotter,
+            overlap_aabb,
+            "yz",
+            yz_plane_x + 0.35 * projection_eps,
+            MANIFOLD_COLOR,
+            opacity=0.16,
+            edge_color=MANIFOLD_EDGE_COLOR,
+            line_width=2.8,
+        )
         candidate_label_pos = overlap_center + (
             + 0.08 * scale * x_axis
             + 0.16 * scale * y_axis
@@ -227,8 +370,8 @@ def main():
         # )
 
     plotter.camera_position = (
-        overlap_center + 3.2 * scale * camera_dir,
-        overlap_center,
+        padded_center + 4.4 * scale * camera_dir,
+        padded_center,
         z_axis,
     )
     plotter.enable_parallel_projection()
