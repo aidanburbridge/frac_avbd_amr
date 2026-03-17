@@ -29,15 +29,16 @@ from tests.collision_pyvista_common import (
 NEUTRAL_BODY_COLOR = "#c7cdd6"
 NEUTRAL_AABB_COLOR = "#8d949c"
 BODY_C_COLOR = "#2f9e44"
-BODY_A_LABEL_DOWN = -0.3
+BODY_A_LABEL_DOWN = -3
 BODY_B_LABEL_DOWN = 1.0
-BODY_C_LABEL_DOWN = 0.0
+BODY_C_LABEL_DOWN = -1.2
 BODY_A_LABEL_X = -0.25
-BODY_B_LABEL_X = 0.12
-BODY_C_LABEL_X = 0.18
-GRID_PADDING_X = 0.95
+BODY_B_LABEL_X = 0.5
+BODY_C_LABEL_X = -0.4
+GRID_PADDING_X = 0.3
 GRID_PADDING_Y = 0.30
-GRID_PADDING_Z = 0.22
+GRID_PADDING_Z = 0.25
+GRID_PADDING_Y_POSITIVE_SHIFT = 1
 
 
 def overlap_bounds(aabbA, aabbB):
@@ -176,7 +177,7 @@ def main():
         dtype=float,
     )
     bodyC = make_context_body(
-        center=(-1.35, 2.45, 4.45),
+        center=(-4, 1.0, 1.3),
         quat=(0.08, 0.0, 0.0, 0.12),
         size=(1.55, 1.35, 1.15),
         body_id=3,
@@ -242,6 +243,7 @@ def main():
     )
     padded_mins = mins - pad
     padded_maxs = maxs + pad
+    padded_maxs[1] += GRID_PADDING_Y_POSITIVE_SHIFT
     padded_center = 0.5 * (padded_mins + padded_maxs)
     add_invisible_padding_cubes(
         plotter,
