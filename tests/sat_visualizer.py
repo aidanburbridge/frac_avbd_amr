@@ -35,6 +35,11 @@ OVERLAP_LABEL_OFFSET = (-0.1, 0.0, -0.16)
 PROJECTION_BODY_A_LABEL_OFFSET = (-0.3, 0.0, -0.07)
 PROJECTION_BODY_B_LABEL_OFFSET = (0.0, 0.0, -0.10)
 
+AXIS_RADIUS_SCALE = 0.0055
+PROJECTION_RADIUS_SCALE = 0.013
+OVERLAP_RADIUS_MULTIPLIER = 1.08
+CYLINDER_GAP_SCALE = 0.004
+
 
 def xyz_offset(offset_xyz, scale: float, x_axis: np.ndarray, y_axis: np.ndarray, z_axis: np.ndarray) -> np.ndarray:
     dx, dy, dz = np.asarray(offset_xyz, dtype=float)
@@ -118,12 +123,13 @@ def main():
         dtype=float,
     )
     axis_half = 0.50 * (padded_maxs[0] - padded_mins[0])
+    axis_radius = AXIS_RADIUS_SCALE * scale
     add_tube_segment(
         plotter,
         axis_mid - axis_half * test_axis,
         axis_mid + axis_half * test_axis,
         NORMAL_COLOR,
-        radius=0.0055 * scale,
+        radius=axis_radius,
     )
     add_labels(
         plotter,
@@ -142,24 +148,31 @@ def main():
     minB, maxB = project_interval(boxB, test_axis, interval_origin)
     overlap_lo = max(minA, minB)
     overlap_hi = min(maxA, maxB)
-    interval_radius = 0.013 * scale
-    red_offset = 0.024 * scale * z_axis
-    blue_offset = -0.018 * scale * z_axis
-    green_offset = -0.060 * scale * z_axis
+    projection_radius = PROJECTION_RADIUS_SCALE * scale
+    overlap_radius = OVERLAP_RADIUS_MULTIPLIER * projection_radius
+    cylinder_gap = CYLINDER_GAP_SCALE * scale
+    red_offset = (axis_radius + projection_radius + cylinder_gap) * z_axis
+    blue_offset = -(axis_radius + projection_radius + cylinder_gap) * z_axis
+    green_offset = -(
+        axis_radius
+        + 2.0 * projection_radius
+        + overlap_radius
+        + 2.0 * cylinder_gap
+    ) * z_axis
 
     add_tube_segment(
         plotter,
         interval_origin + test_axis * minA + red_offset,
         interval_origin + test_axis * maxA + red_offset,
         BODY_A_COLOR,
-        radius=interval_radius,
+        radius=projection_radius,
     )
     add_tube_segment(
         plotter,
         interval_origin + test_axis * minB + blue_offset,
         interval_origin + test_axis * maxB + blue_offset,
         BODY_B_COLOR,
-        radius=interval_radius,
+        radius=projection_radius,
     )
     if overlap_hi > overlap_lo:
         add_tube_segment(
@@ -167,7 +180,7 @@ def main():
             interval_origin + test_axis * overlap_lo + green_offset,
             interval_origin + test_axis * overlap_hi + green_offset,
             TANGENT_COLOR,
-            radius=1.08 * interval_radius,
+            radius=overlap_radius,
         )
         translation = overlap_hi - overlap_lo
         add_labels(
