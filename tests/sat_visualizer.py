@@ -10,186 +10,211 @@ if str(REPO_ROOT) not in sys.path:
 import numpy as np
 import pyvista as pv
 
-from py_solver import collisions
 from tests.collision_pyvista_common import (
     BODY_A_COLOR,
     BODY_B_COLOR,
-    MANIFOLD_COLOR,
     NORMAL_COLOR,
     TANGENT_COLOR,
     add_body,
-    add_labeled_vector,
     add_labels,
     add_tube_segment,
     build_demo_bodies,
-    choose_perpendicular,
     scene_scale,
     unit,
 )
 
+GRID_PADDING_X = 0.55
+GRID_PADDING_Y = 0.40
+GRID_PADDING_Z = 0.32
+GRID_PADDING_Y_POSITIVE_SHIFT = 0.55
+
+BODY_A_LABEL_OFFSET = (-0.2, 0.0, 0.2)
+BODY_B_LABEL_OFFSET = (0.2, 0.0, 0.1)
+AXIS_TO_TEST_LABEL_OFFSET = (-0.3, 0.0, 0.05)
+OVERLAP_LABEL_OFFSET = (-0.1, 0.0, -0.16)
+PROJECTION_BODY_A_LABEL_OFFSET = (-0.3, 0.0, -0.07)
+PROJECTION_BODY_B_LABEL_OFFSET = (0.0, 0.0, -0.10)
+
+
+def xyz_offset(offset_xyz, scale: float, x_axis: np.ndarray, y_axis: np.ndarray, z_axis: np.ndarray) -> np.ndarray:
+    dx, dy, dz = np.asarray(offset_xyz, dtype=float)
+    return scale * (dx * x_axis + dy * y_axis + dz * z_axis)
+
 
 def project_interval(body, axis: np.ndarray, origin: np.ndarray) -> tuple[float, float]:
-    corners = body.get_corners()
-    vals = (corners - origin) @ unit(axis)
+    vals = (np.asarray(body.get_corners(), dtype=float) - np.asarray(origin, dtype=float)) @ unit(axis)
     return float(np.min(vals)), float(np.max(vals))
-
-
-def aligned_face_axis(body, axis: np.ndarray) -> np.ndarray:
-    axes = body.get_axes()
-    idx = int(np.argmax(np.abs(axes @ unit(axis))))
-    face_axis = axes[idx].astype(float)
-    if np.dot(face_axis, axis) < 0.0:
-        face_axis = -face_axis
-    return unit(face_axis)
 
 
 def main():
     boxA, boxB = build_demo_bodies()
-    sat_axis, overlap, tag = collisions._sat_and_overlap(boxA, boxB)
-    if sat_axis is None:
-        raise RuntimeError("The demo bodies do not overlap, so SAT produced no contact axis.")
-
-    sat_axis = unit(sat_axis)
-    axis_A = aligned_face_axis(boxA, sat_axis)
-    axis_B = aligned_face_axis(boxB, sat_axis)
+    boxA.size = (2.0, 2.0, 2.0)
+    boxB.size = (2.0, 2.0, 2.0)
+    boxA.position[:3] = np.array([-1.0, 0.0, 3.1], dtype=float)
+    boxB.position[:3] = np.array([1.25, 0.2, 4.1], dtype=float)
+    boxA.position[3:] = np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
+    slight_yaw = np.deg2rad(42.0)
+    boxB.position[3:] = np.array(
+        [np.cos(0.5 * slight_yaw), 0.0, np.sin(0.5 * slight_yaw), 0.0],
+        dtype=float,
+    )
 
     plotter = pv.Plotter(window_size=(1600, 1200))
     plotter.set_background("white")
+    plotter.add_axes()
 
-    add_body(plotter, boxA, BODY_A_COLOR)
-    add_body(plotter, boxB, BODY_B_COLOR)
+    add_body(plotter, boxA, BODY_A_COLOR, opacity=0.3, show_edges=True)
+    add_body(plotter, boxB, BODY_B_COLOR, opacity=0.3, show_edges=True)
 
     body_pts = np.vstack([boxA.get_corners(), boxB.get_corners()])
-    scale = scene_scale(body_pts)
-    centerA = boxA.position[:3]
-    centerB = boxB.position[:3]
-    patch_center = 0.5 * (centerA + centerB)
+    scene_pts = body_pts.copy()
+    scale = scene_scale(scene_pts)
 
-    perp = choose_perpendicular(sat_axis)
-    lift = choose_perpendicular(sat_axis, preferred=perp)
+    mins = np.min(scene_pts, axis=0)
+    maxs = np.max(scene_pts, axis=0)
+    span = np.maximum(maxs - mins, 1e-9)
+    pad = np.array(
+        [
+            GRID_PADDING_X * span[0],
+            GRID_PADDING_Y * span[1],
+            GRID_PADDING_Z * span[2],
+        ],
+        dtype=float,
+    )
+    padded_mins = mins - pad
+    padded_maxs = maxs + pad
+    padded_maxs[1] += GRID_PADDING_Y_POSITIVE_SHIFT
+    padded_center = 0.5 * (padded_mins + padded_maxs)
 
-    label_offset = 0.07 * scale
-    body_label_offset = 0.23 * scale
-    vector_length = 0.42 * scale
-    interval_radius = 0.018 * scale
+    x_axis = np.array([1.0, 0.0, 0.0], dtype=float)
+    y_axis = np.array([0.0, 1.0, 0.0], dtype=float)
+    z_axis = np.array([0.0, 0.0, 1.0], dtype=float)
+    test_axis = x_axis
+    camera_dir = unit(np.array([0.16, -1.0, 0.06], dtype=float))
+    body_a_center = np.asarray(boxA.position[:3], dtype=float)
+    body_b_center = np.asarray(boxB.position[:3], dtype=float)
 
     add_labels(
         plotter,
-        [centerA - lift * body_label_offset],
+        [body_a_center + xyz_offset(BODY_A_LABEL_OFFSET, scale, x_axis, y_axis, z_axis)],
         ["Body A"],
         text_color=BODY_A_COLOR,
+        font_size=24,
     )
     add_labels(
         plotter,
-        [centerB + lift * body_label_offset],
+        [body_b_center + xyz_offset(BODY_B_LABEL_OFFSET, scale, x_axis, y_axis, z_axis)],
         ["Body B"],
         text_color=BODY_B_COLOR,
+        font_size=24,
     )
 
-    add_labeled_vector(
-        plotter,
-        patch_center,
-        sat_axis,
-        "minimum-overlap axis n",
-        NORMAL_COLOR,
-        length=vector_length,
-        label_offset=label_offset,
-        font_size=18,
+    axis_mid = np.array(
+        [
+            padded_center[0],
+            padded_center[1],
+            padded_mins[2] + 0.12 * (padded_maxs[2] - padded_mins[2]),
+        ],
+        dtype=float,
     )
-    add_labeled_vector(
-        plotter,
-        centerA,
-        axis_A,
-        "A face axis",
-        TANGENT_COLOR,
-        length=0.78 * vector_length,
-        label_offset=label_offset,
-        font_size=18,
-    )
-    add_labeled_vector(
-        plotter,
-        centerB,
-        axis_B,
-        "B face axis",
-        TANGENT_COLOR,
-        length=0.78 * vector_length,
-        label_offset=label_offset,
-        font_size=18,
-    )
-
-    proj_origin = patch_center - 0.55 * scale * lift
-    minA, maxA = project_interval(boxA, sat_axis, proj_origin)
-    minB, maxB = project_interval(boxB, sat_axis, proj_origin)
-    overlap_lo = max(minA, minB)
-    overlap_hi = min(maxA, maxB)
-
-    a_offset = 0.18 * scale * perp
-    b_offset = -0.18 * scale * perp
+    axis_half = 0.50 * (padded_maxs[0] - padded_mins[0])
     add_tube_segment(
         plotter,
-        proj_origin + sat_axis * minA + a_offset,
-        proj_origin + sat_axis * maxA + a_offset,
+        axis_mid - axis_half * test_axis,
+        axis_mid + axis_half * test_axis,
+        NORMAL_COLOR,
+        radius=0.0055 * scale,
+    )
+    add_labels(
+        plotter,
+        [
+            axis_mid
+            - 0.60 * axis_half * test_axis
+            + xyz_offset(AXIS_TO_TEST_LABEL_OFFSET, scale, x_axis, y_axis, z_axis)
+        ],
+        ["Axis to test"],
+        text_color="black",
+        font_size=16,
+    )
+
+    interval_origin = axis_mid
+    minA, maxA = project_interval(boxA, test_axis, interval_origin)
+    minB, maxB = project_interval(boxB, test_axis, interval_origin)
+    overlap_lo = max(minA, minB)
+    overlap_hi = min(maxA, maxB)
+    interval_radius = 0.013 * scale
+    red_offset = 0.024 * scale * z_axis
+    blue_offset = -0.018 * scale * z_axis
+    green_offset = -0.060 * scale * z_axis
+
+    add_tube_segment(
+        plotter,
+        interval_origin + test_axis * minA + red_offset,
+        interval_origin + test_axis * maxA + red_offset,
         BODY_A_COLOR,
         radius=interval_radius,
     )
     add_tube_segment(
         plotter,
-        proj_origin + sat_axis * minB + b_offset,
-        proj_origin + sat_axis * maxB + b_offset,
+        interval_origin + test_axis * minB + blue_offset,
+        interval_origin + test_axis * maxB + blue_offset,
         BODY_B_COLOR,
         radius=interval_radius,
     )
     if overlap_hi > overlap_lo:
         add_tube_segment(
             plotter,
-            proj_origin + sat_axis * overlap_lo,
-            proj_origin + sat_axis * overlap_hi,
-            MANIFOLD_COLOR,
-            radius=1.12 * interval_radius,
+            interval_origin + test_axis * overlap_lo + green_offset,
+            interval_origin + test_axis * overlap_hi + green_offset,
+            TANGENT_COLOR,
+            radius=1.08 * interval_radius,
         )
-
-    add_labels(
-        plotter,
-        [proj_origin + sat_axis * (0.5 * (minA + maxA)) + a_offset + 0.10 * scale * lift],
-        ["projection of Body A"],
-        text_color=BODY_A_COLOR,
-    )
-    add_labels(
-        plotter,
-        [proj_origin + sat_axis * (0.5 * (minB + maxB)) + b_offset - 0.10 * scale * lift],
-        ["projection of Body B"],
-        text_color=BODY_B_COLOR,
-    )
-    if overlap_hi > overlap_lo:
+        translation = overlap_hi - overlap_lo
         add_labels(
             plotter,
-            [proj_origin + sat_axis * (0.5 * (overlap_lo + overlap_hi)) + 0.14 * scale * lift],
-            ["minimum overlap"],
-            text_color="black",
+            [
+                interval_origin
+                + test_axis * (0.5 * (overlap_lo + overlap_hi))
+                + xyz_offset(OVERLAP_LABEL_OFFSET, scale, x_axis, y_axis, z_axis)
+            ],
+            [f"Overlap = {translation:.2f}"],
+            text_color=TANGENT_COLOR,
+            font_size=16,
         )
 
     add_labels(
         plotter,
-        [patch_center - 0.22 * scale * lift - 0.24 * scale * perp],
-        [f"SAT tag: {tag}"],
-        text_color="black",
+        [
+            interval_origin
+            + test_axis * (0.5 * (minA + maxA))
+            + xyz_offset(PROJECTION_BODY_A_LABEL_OFFSET, scale, x_axis, y_axis, z_axis)
+        ],
+        ["Projection of Body A"],
+        text_color=BODY_A_COLOR,
+        font_size=16,
+    )
+    add_labels(
+        plotter,
+        [
+            interval_origin
+            + test_axis * (0.5 * (minB + maxB))
+            + xyz_offset(PROJECTION_BODY_B_LABEL_OFFSET, scale, x_axis, y_axis, z_axis)
+        ],
+        ["Projection of Body B"],
+        text_color=BODY_B_COLOR,
         font_size=16,
     )
 
-    camera_side = choose_perpendicular(sat_axis, preferred=np.array([0.0, 0.0, 1.0], dtype=float))
-    camera_up = unit(np.cross(camera_side, sat_axis))
-    camera_dir = unit(1.15 * camera_side + 0.45 * camera_up)
     plotter.camera_position = (
-        patch_center + 3.3 * scale * camera_dir,
-        patch_center,
-        camera_up,
+        padded_center + 5.4 * scale * camera_dir,
+        padded_center,
+        z_axis,
     )
     plotter.enable_parallel_projection()
-    plotter.camera.zoom(1.5)
+    plotter.camera.zoom(1.58)
 
-    print("SAT axis:", sat_axis)
-    print("Overlap:", overlap)
-    print("Tag:", tag)
+    print("Test axis:", test_axis)
+    print("Projected overlap:", max(0.0, overlap_hi - overlap_lo))
 
     plotter.show(title="SAT narrow-phase visualization")
 
