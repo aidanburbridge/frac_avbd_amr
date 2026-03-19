@@ -44,9 +44,9 @@ end
 # ]
 # # End dumb criterion
 
-# Stress-driven refinement + energy-based cohesive fracture
+# Onset-based refinement + cohesive onset fracture
 ref_specs = [
-    RefineSpec(REFINE_LAMBDA, SVector(0.70, 0.0)),
+    RefineSpec(REFINE_ENERGY, SVector(0.50, 1.0)),
 ]
 frac_specs = [
     FractureSpec(FRAC_ENERGY, SVector(1.00, 0.0)),

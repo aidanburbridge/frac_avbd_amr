@@ -40,6 +40,9 @@ GRID_PADDING_Y = 0.30
 GRID_PADDING_Z = 0.25
 GRID_PADDING_Y_POSITIVE_SHIFT = 1
 
+# Toggle all scene labels without changing the rest of the visualization.
+SHOW_LABELS = False
+
 
 def overlap_bounds(aabbA, aabbB):
     mins = np.array(
@@ -288,18 +291,21 @@ def main():
         [label_a_pos],
         ["Body/AABB A"],
         text_color=BODY_A_COLOR,
+        enabled=SHOW_LABELS,
     )
     add_labels(
         plotter,
         [label_b_pos],
         ["Body/AABB B"],
         text_color=BODY_B_COLOR,
+        enabled=SHOW_LABELS,
     )
     add_labels(
         plotter,
         [label_c_pos],
         ["Body/AABB C"],
         text_color=BODY_C_COLOR,
+        enabled=SHOW_LABELS,
     )
 
     if has_overlap:

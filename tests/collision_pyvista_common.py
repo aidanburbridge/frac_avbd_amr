@@ -107,7 +107,17 @@ def add_aabb(plotter: pv.Plotter, aabb: AABB3, color: str, *, fill_opacity: floa
     plotter.add_mesh(mesh, color=color, style="wireframe", line_width=line_width)
 
 
-def add_labels(plotter: pv.Plotter, points, labels, *, text_color: str = "black", font_size: int = 18):
+def add_labels(
+    plotter: pv.Plotter,
+    points,
+    labels,
+    *,
+    text_color: str = "black",
+    font_size: int = 18,
+    enabled: bool = True,
+):
+    if not enabled:
+        return
     pts = np.asarray(points, dtype=float)
     if pts.size == 0:
         return

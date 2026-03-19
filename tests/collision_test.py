@@ -17,6 +17,16 @@ TANGENT_COLOR = "#2f9e44"
 MANIFOLD_COLOR = "#ffd84d"
 MANIFOLD_EDGE_COLOR = "black"
 
+# Toggle all scene labels without changing the rest of the visualization.
+SHOW_LABELS = False
+
+N_LABEL_OFFSET = (0.0, 0.0, 0.0)
+T1_LABEL_OFFSET = (0.0, 0.0, 0.0)
+T2_LABEL_OFFSET = (0.0, 0.0, 0.0)
+BODY_A_LABEL_OFFSET = (0.0, 0.0, 0.5)
+BODY_B_LABEL_OFFSET = (0.0, 0.0, -0.5)
+CONTACT_MANIFOLD_LABEL_OFFSET = (0.0, 0.0, 0.0)
+
 # wrong way
 boxA = box_3D((0., 0.5, 2.9), (0.2, 0.1, 0.4, 0.5), (0,0,0), (0,0,0), 1000, 10, (2,2,2), static=False)
 boxB = box_3D((0.8, 1., 1.2), (0.0, 0.0, 0.0, 0.0), (0,0,0), (0,0,0), 1000, 10, (2,2,2), static=False)
@@ -130,6 +140,16 @@ def unit(v: np.ndarray) -> np.ndarray:
     v = np.asarray(v, dtype=float).reshape(3)
     return v / (np.linalg.norm(v) + 1e-12)
 
+def xyz_offset(
+    offset_xyz,
+    scene_scale: float,
+    x_axis: np.ndarray,
+    y_axis: np.ndarray,
+    z_axis: np.ndarray,
+) -> np.ndarray:
+    dx, dy, dz = np.asarray(offset_xyz, dtype=float)
+    return scene_scale * (dx * x_axis + dy * y_axis + dz * z_axis)
+
 def fallback_tangent_basis(normal: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     n = unit(normal)
     ref = np.array([1.0, 0.0, 0.0], dtype=float)
@@ -140,13 +160,15 @@ def fallback_tangent_basis(normal: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return t1, t2
 
 def contact_center() -> np.ndarray:
-    if isinstance(contact_pts, np.ndarray) and len(contact_pts):
-        return np.mean(contact_pts, axis=0)
     if isinstance(clipped_poly, np.ndarray) and len(clipped_poly):
         return np.mean(clipped_poly, axis=0)
+    if isinstance(contact_pts, np.ndarray) and len(contact_pts):
+        return np.mean(contact_pts, axis=0)
     return 0.5 * (ref_body.position[:3] + inc_body.position[:3])
 
 def add_labels(plotter: pv.Plotter, points, labels, text_color="black", font_size=18):
+    if not SHOW_LABELS:
+        return
     pts = np.asarray(points, dtype=float)
     if pts.size == 0:
         return
@@ -160,20 +182,17 @@ def add_labels(plotter: pv.Plotter, points, labels, text_color="black", font_siz
         always_visible=True,
     )
 
-def add_labeled_vector(
+def add_vector_arrow(
     plotter: pv.Plotter,
     origin: np.ndarray,
     direction: np.ndarray,
-    label: str,
     color: str,
     length: float,
-    label_offset: float,
 ):
     origin = np.asarray(origin, dtype=float).reshape(1, 3)
     direction = unit(direction).reshape(1, 3) * float(length)
     plotter.add_arrows(origin, direction, mag=1.0, color=color)
-    label_pos = origin[0] + direction[0] + unit(direction[0]) * label_offset
-    add_labels(plotter, [label_pos], [label], text_color=color, font_size=20)
+    return origin[0] + direction[0]
 
 def create_cube_mesh(b: box_3D, color="blue", opacity=0.5, show_edges=True):
     w,h,d = b.size
@@ -264,31 +283,80 @@ def main():
         1.0,
     )
     vector_length = 0.45 * scene_scale
-    label_offset = 0.06 * scene_scale
     body_label_offset = 0.18 * scene_scale
+    vector_label_offset = 0.06 * scene_scale
+    x_axis = np.array([1.0, 0.0, 0.0], dtype=float)
+    y_axis = np.array([0.0, 1.0, 0.0], dtype=float)
+    z_axis = np.array([0.0, 0.0, 1.0], dtype=float)
 
     paint_face(plotter, clipped_poly)
 
-    add_labeled_vector(plotter, patch_center, contact_normal, "n", NORMAL_COLOR, vector_length, label_offset)
-    add_labeled_vector(plotter, patch_center, t1, "t1", TANGENT_COLOR, 0.9 * vector_length, label_offset)
-    add_labeled_vector(plotter, patch_center, t2, "t2", TANGENT_COLOR, 0.9 * vector_length, label_offset)
+    n_label_anchor = add_vector_arrow(plotter, patch_center, contact_normal, NORMAL_COLOR, vector_length)
+    t1_label_anchor = add_vector_arrow(plotter, patch_center, t1, TANGENT_COLOR, 0.9 * vector_length)
+    t2_label_anchor = add_vector_arrow(plotter, patch_center, t2, TANGENT_COLOR, 0.9 * vector_length)
+
+    add_labels(
+        plotter,
+        [
+            n_label_anchor
+            + unit(contact_normal) * vector_label_offset
+            + xyz_offset(N_LABEL_OFFSET, scene_scale, x_axis, y_axis, z_axis)
+        ],
+        ["n"],
+        text_color=NORMAL_COLOR,
+        font_size=20,
+    )
+    add_labels(
+        plotter,
+        [
+            t1_label_anchor
+            + unit(t1) * vector_label_offset
+            + xyz_offset(T1_LABEL_OFFSET, scene_scale, x_axis, y_axis, z_axis)
+        ],
+        ["t1"],
+        text_color=TANGENT_COLOR,
+        font_size=20,
+    )
+    add_labels(
+        plotter,
+        [
+            t2_label_anchor
+            + unit(t2) * vector_label_offset
+            + xyz_offset(T2_LABEL_OFFSET, scene_scale, x_axis, y_axis, z_axis)
+        ],
+        ["t2"],
+        text_color=TANGENT_COLOR,
+        font_size=20,
+    )
 
     body_label_dir = unit(contact_normal + 0.35 * t2)
     add_labels(
         plotter,
-        [boxA.position[:3] - body_label_dir * body_label_offset],
+        [
+            boxA.position[:3]
+            - body_label_dir * body_label_offset
+            + xyz_offset(BODY_A_LABEL_OFFSET, scene_scale, x_axis, y_axis, z_axis)
+        ],
         ["Body A"],
         text_color=BODY_A_COLOR,
     )
     add_labels(
         plotter,
-        [boxB.position[:3] + body_label_dir * body_label_offset],
+        [
+            boxB.position[:3]
+            + body_label_dir * body_label_offset
+            + xyz_offset(BODY_B_LABEL_OFFSET, scene_scale, x_axis, y_axis, z_axis)
+        ],
         ["Body B"],
         text_color=BODY_B_COLOR,
     )
     add_labels(
         plotter,
-        [patch_center + (0.18 * scene_scale) * (0.4 * t1 + t2)],
+        [
+            patch_center
+            + (0.18 * scene_scale) * (0.4 * t1 + t2)
+            + xyz_offset(CONTACT_MANIFOLD_LABEL_OFFSET, scene_scale, x_axis, y_axis, z_axis)
+        ],
         ["Contact manifold"],
         text_color="black",
     )

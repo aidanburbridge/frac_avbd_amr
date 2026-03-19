@@ -40,6 +40,9 @@ PROJECTION_RADIUS_SCALE = 0.013
 OVERLAP_RADIUS_MULTIPLIER = 1.08
 CYLINDER_GAP_SCALE = 0.004
 
+# Toggle all scene labels without changing the rest of the visualization.
+SHOW_LABELS = False
+
 
 def xyz_offset(offset_xyz, scale: float, x_axis: np.ndarray, y_axis: np.ndarray, z_axis: np.ndarray) -> np.ndarray:
     dx, dy, dz = np.asarray(offset_xyz, dtype=float)
@@ -105,6 +108,7 @@ def main():
         ["Body A"],
         text_color=BODY_A_COLOR,
         font_size=24,
+        enabled=SHOW_LABELS,
     )
     add_labels(
         plotter,
@@ -112,6 +116,7 @@ def main():
         ["Body B"],
         text_color=BODY_B_COLOR,
         font_size=24,
+        enabled=SHOW_LABELS,
     )
 
     axis_mid = np.array(
@@ -141,6 +146,7 @@ def main():
         ["Axis to test"],
         text_color="black",
         font_size=16,
+        enabled=SHOW_LABELS,
     )
 
     interval_origin = axis_mid
@@ -193,6 +199,7 @@ def main():
             [f"Overlap = {translation:.2f}"],
             text_color=TANGENT_COLOR,
             font_size=16,
+            enabled=SHOW_LABELS,
         )
 
     add_labels(
@@ -205,6 +212,7 @@ def main():
         ["Projection of Body A"],
         text_color=BODY_A_COLOR,
         font_size=16,
+        enabled=SHOW_LABELS,
     )
     add_labels(
         plotter,
@@ -216,6 +224,7 @@ def main():
         ["Projection of Body B"],
         text_color=BODY_B_COLOR,
         font_size=16,
+        enabled=SHOW_LABELS,
     )
 
     plotter.camera_position = (
