@@ -41,6 +41,8 @@ function init_system(
     neighbor_map=nothing,
     max_ref_level=nothing,
     max_ref_level_per_body=nothing,
+    criteria_refine_stress_threshold=nothing,
+    criteria_refine_stress_exclude_kinematic::Bool=true,
 )
     # Create the SimulationState object
     # This object stays in Julia memory
@@ -48,7 +50,9 @@ function init_system(
         friction=friction, beta=beta, gamma=gamma, alpha=alpha, stabilize=stabilize,
         sizes=sizes, assembly_ids=assembly_ids,
         active=active, valid_mask=valid_mask, can_refine=can_refine, level=level, parent_list=parent_list, children_start=children_start, children_count=children_count, neighbor_map=neighbor_map,
-        max_ref_level=max_ref_level, max_ref_level_per_body=max_ref_level_per_body)
+        max_ref_level=max_ref_level, max_ref_level_per_body=max_ref_level_per_body,
+        criteria_refine_stress_threshold=criteria_refine_stress_threshold,
+        criteria_refine_stress_exclude_kinematic=criteria_refine_stress_exclude_kinematic)
     return sim
 end
 
@@ -178,15 +182,9 @@ function get_visualization_data(sim::AVBDCore.SimulationState)
     # Active bodies are sourced from sim.active_body_ids (precomputed in solver)
     active_body_indices = sim.active_body_ids
 
-    # Map global body id -> local active index (1-based) for stress and bond remapping
-    id_to_local = fill(0, length(sim.bodies))
-    for (local_idx, body_idx) in enumerate(active_body_indices)
-        body_id = sim.bodies[body_idx].id
-        id_to_local[body_id + 1] = local_idx
-    end
-
-    # Need to create stress tensor - symmetric
-    stress_data = zeros(FLOAT, length(active_body_indices), 6)
+    # Reuse the same solver-side stress accumulation that drives
+    # stress-based AMR so the exported field matches the criterion input.
+    stress_data, id_to_local = AVBDCore.Criteria.compute_body_stress_data(sim)
 
     # Active bonds for metadata: include broken bonds so exported damage can reach 1.0.
     active_bond_count = 0
@@ -200,53 +198,6 @@ function get_visualization_data(sim::AVBDCore.SimulationState)
     end
 
     bond_data = zeros(FLOAT, active_bond_count, 8)
-
-    bond_out_idx = 0
-    for bond in sim.bond_constraints
-        bond.is_broken && continue
-        bond.is_active || continue
-        a_idx = bond.bodyA.id + 1
-        b_idx = bond.bodyB.id + 1
-        if !(sim.active[a_idx] && sim.active[b_idx])
-            continue
-        end
-        bond_out_idx += 1
-        bA = bond.bodyA
-        bB = bond.bodyB
-
-        # World geometry
-        R_A = quat_to_rotmat(bA.quat)
-        n = R_A * bond.n_local
-        t1 = R_A * bond.t1_local
-        t2 = R_A * bond.t2_local
-        pA = transform_point(bond.pA_local, bA.pos, bA.quat)
-        pB = transform_point(bond.pB_local, bB.pos, bB.quat)
-
-        #dp = pA - pB
-
-        #AVBDConstraints.eval_bond(bond)
-
-        # Force calculation uses the same estimate as the solver (AL-style).
-        f_local = MVector{3,Float64}(undef)
-        for r in 1:3
-            k_val = bond.penalty_k[r]
-            lambda_base = isinf(bond.stiffness[r]) ? bond.lambda[r] : 0.0
-            f_local[r] = clamp(k_val * bond.C[r] + lambda_base, bond.f_min[r], bond.f_max[r])
-        end
-        F_world = n * f_local[1] + t1 * f_local[2] + t2 * f_local[3]
-
-        # stress calculation
-        rA = pA - bA.pos
-        volA = bA.size[1] * bA.size[2] * bA.size[3]
-        local_a = id_to_local[bA.id + 1]
-        _acc_stress!(stress_data, local_a, rA, F_world, volA)
-
-        rB = pB - bB.pos
-        volB = bB.size[1] * bB.size[2] * bB.size[3]
-        local_b = id_to_local[bB.id + 1]
-        _acc_stress!(stress_data, local_b, rB, -F_world, volB)
-
-    end
 
     # Reuse an active-bond pass to emit metadata (including broken bonds).
     bond_out_idx = 0
@@ -290,20 +241,6 @@ function get_visualization_data(sim::AVBDCore.SimulationState)
         bond_data[bond_out_idx, 8] = k_eff_t2
     end
     return stress_data, bond_data
-end
-
-function _acc_stress!(buf, idx, r, f, vol)
-    iv = 1.0 / max(vol, 1e-9)
-
-    # volumetric 
-    buf[idx, 1] += r[1] * f[1] * iv
-    buf[idx, 2] += r[2] * f[2] * iv
-    buf[idx, 3] += r[3] * f[3] * iv
-
-    # deviatoric
-    buf[idx, 4] += r[1] * f[2] * iv
-    buf[idx, 5] += r[2] * f[3] * iv
-    buf[idx, 6] += r[3] * f[1] * iv
 end
 
 end # module

@@ -38,6 +38,7 @@ E_MODULUS = 2.0e9
 NU = 0.30
 TENSILE_STRENGTH = 8.0e7
 FRACTURE_TOUGHNESS = 5.0e4
+REFINE_STRESS_THRESHOLD = 0.05 * TENSILE_STRENGTH
 
 DT_PHYSICS = 1 / 4000
 DT_RENDER = 1 / 60
@@ -55,7 +56,66 @@ PYTHON_SOLVER_PARAMS = {
     "alpha": 0.95,
     "gamma": 0.99,
     "debug_contacts": False,
+    "criteria_refine_stress_threshold": REFINE_STRESS_THRESHOLD,
+    "criteria_refine_stress_exclude_kinematic": True,
 }
+
+
+def _seed_reentrant_corner_refinement(
+    assembly: VoxelAssembly,
+    amr_dict: dict,
+    *,
+    x_corner: float,
+    z_corner: float,
+    h_base: float,
+) -> list[int]:
+    active = np.asarray(amr_dict["active"], dtype=bool).copy()
+    valid_mask = np.asarray(
+        amr_dict.get("valid_mask", np.ones(len(assembly.bodies), dtype=bool)),
+        dtype=bool,
+    )
+    level = np.asarray(amr_dict["level"], dtype=int)
+    child_start = np.asarray(
+        amr_dict.get("child_start", amr_dict.get("children_start")),
+        dtype=int,
+    )
+    child_count = np.asarray(
+        amr_dict.get("child_count", amr_dict.get("children_count")),
+        dtype=int,
+    )
+
+    tol = max(1.0e-9, 0.25 * float(h_base))
+    seeded_parents: list[int] = []
+
+    for idx, body in enumerate(assembly.bodies):
+        if level[idx] != 0 or not active[idx] or not valid_mask[idx]:
+            continue
+        if child_start[idx] < 0 or child_count[idx] <= 0:
+            continue
+
+        cx, _, cz = body.get_center()
+        hx = 0.5 * float(body.size[0]) + tol
+        hz = 0.5 * float(body.size[2]) + tol
+
+        if not (cx - hx <= x_corner <= cx + hx):
+            continue
+        if not (cz - hz <= z_corner <= cz + hz):
+            continue
+
+        active[idx] = False
+        start = int(child_start[idx])
+        count = int(child_count[idx])
+        for child_idx in range(start, start + count):
+            if 0 <= child_idx < len(active) and valid_mask[child_idx]:
+                active[child_idx] = True
+        seeded_parents.append(idx)
+
+    if not seeded_parents:
+        raise ValueError("Failed to seed the reentrant-corner refinement ring.")
+
+    amr_dict["active"] = active
+    return seeded_parents
+
 
 def _select_bodies_by_center_box(
     assembly: VoxelAssembly,
@@ -190,6 +250,13 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
 
     x_corner = x_min + INNER_STEP * scale_x
     z_inner = z_min + INNER_STEP * scale_z
+    seeded_notch_parents = _seed_reentrant_corner_refinement(
+        lbar,
+        amr_dict,
+        x_corner=x_corner,
+        z_corner=z_inner,
+        h_base=raw_h,
+    )
 
     if explicit_fixed_ids:
         fixed_targets = _select_bodies_by_ids(
@@ -253,6 +320,7 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
             f"Load voxels: {len(load_targets)} "
             f"(x=[{x_lo:.4f}, {x_hi:.4f}], z=[{z_inner:.4f}, {z_hi:.4f}])"
         )
+    print(f"Seeded notch parents: {len(seeded_notch_parents)}")
 
     return SimulationSetup(
         bodies=lbar.bodies,
@@ -275,6 +343,8 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
             "load_patch_width": LOAD_PATCH_WIDTH,
             "load_band_thickness": LOAD_BAND_THICKNESS,
             "bottom_fix_depth": BOTTOM_FIX_DEPTH,
+            "refine_stress_threshold": REFINE_STRESS_THRESHOLD,
+            "seeded_notch_parents": list(seeded_notch_parents),
             "fixed_voxel_ids": list(explicit_fixed_ids),
             "load_voxel_ids": list(explicit_load_ids),
         },

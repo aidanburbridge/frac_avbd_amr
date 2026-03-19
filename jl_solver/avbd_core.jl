@@ -35,24 +35,6 @@ const DEFAULT_RNG_SEED = 12345
     return seed === nothing ? DEFAULT_RNG_SEED : seed
 end
 
-# # Dumb criterion
-# ref_specs = [
-#     RefineSpec(REFINE_LAMBDA, SVector(0.8, 0.0)),   # threshold = 0.8
-# ]
-# frac_specs = [
-#     FractureSpec(FRAC_LAMBDA, SVector(1.0, 0.0)),   # threshold = 1.0
-# ]
-# # End dumb criterion
-
-# Onset-based refinement + cohesive onset fracture
-ref_specs = [
-    RefineSpec(REFINE_ENERGY, SVector(0.50, 1.0)),
-]
-frac_specs = [
-    FractureSpec(FRAC_ENERGY, SVector(1.00, 0.0)),
-]
-cfg = CriteriaConfig(ref_specs, ANY, frac_specs, ANY)
-
 mutable struct SimulationState
     bodies::Vector{Body}
     manifolds::Dict{Tuple{Int,Int},Manifold}
@@ -162,7 +144,7 @@ mutable struct SimulationState
         max_level_per_body = fill(max_level, length(bodies))
 
         # Refine and fracture criteria
-        default_cfg = cfg
+        default_cfg = Criteria.default_criteria_config()
 
         new(bodies, manifolds, bond_cons, contact_cons, bond_map, contact_map, bond_map_all, e_log,
             dt, grav, mu, iters, Float64(b), Float64(g), Float64(al), stabil,
@@ -611,7 +593,9 @@ function init_simulation(
     children_count::Union{AbstractVector{<:Integer},Nothing}=nothing,
     neighbor_map::Union{AbstractMatrix{<:Integer},Nothing}=nothing,
     max_ref_level::Union{Int,Nothing}=nothing,
-    max_ref_level_per_body::Union{AbstractVector{<:Integer},Nothing}=nothing,)
+    max_ref_level_per_body::Union{AbstractVector{<:Integer},Nothing}=nothing,
+    criteria_refine_stress_threshold::Union{Nothing,Float64}=nothing,
+    criteria_refine_stress_exclude_kinematic::Bool=true,)
 
     n_bodies = length(masses)
     bodies = Vector{Body}(undef, n_bodies)
@@ -636,6 +620,10 @@ function init_simulation(
         bodies, dt;
         grav=gravity, iters=iterations, mu=friction,
         b=beta, g=gamma, al=alpha, stabil=stabilize
+    )
+    sim.criteria = Criteria.build_criteria_config(
+        refine_stress_threshold=criteria_refine_stress_threshold,
+        refine_stress_exclude_kinematic=criteria_refine_stress_exclude_kinematic,
     )
 
     # TODO cleaner way to do this?
@@ -842,6 +830,11 @@ function step_simulation!(sim::SimulationState)
         # Early out - skip prescribed num of iterations if below tolerance
         curr_max_violation < EARLY_OUT_TOL && break
 
+    end
+
+    for body_idx in Criteria.collect_stress_refinement_candidates(sim.criteria, sim)
+        cap = (sim.level[body_idx] >= local_max_ref_level(sim, body_idx)) || !has_valid_child(sim, body_idx)
+        cap || push!(refine_list, body_idx)
     end
 
     damage_bonds!(sim, dt)

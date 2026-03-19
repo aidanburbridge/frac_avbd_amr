@@ -108,6 +108,10 @@ class HybridSolver:
             kwargs["stabilize"] = bool(params["stabilize"])
         elif "post_stabilize" in params:
             kwargs["stabilize"] = bool(params["post_stabilize"])
+        if "criteria_refine_stress_threshold" in params:
+            kwargs["criteria_refine_stress_threshold"] = float(params["criteria_refine_stress_threshold"])
+        if "criteria_refine_stress_exclude_kinematic" in params:
+            kwargs["criteria_refine_stress_exclude_kinematic"] = bool(params["criteria_refine_stress_exclude_kinematic"])
 
         if amr:
             kwargs["parent_list"] = np.ascontiguousarray(amr["parent_list"], dtype=np.int32)
