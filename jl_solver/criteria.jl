@@ -80,6 +80,8 @@ end
 # -------------------------------------------------- #
 
 @inline function _check_refinement_criteria(spec::RefineSpec, con, lam_r, r)::Bool
+    spec.kind != REFINE_STRESS && _bond_touches_prescribed_body(con) && return false
+
     # Simple lambda refinement check
     if spec.kind == REFINE_LAMBDA
         # Mixed-mode traction utilization:
@@ -250,6 +252,8 @@ end
 # -------------------------------------------------- #
 
 @inline function _check_fracture_criteria(spec::FractureSpec, con, lam_r, r)::Bool
+    _bond_touches_prescribed_body(con) && return false
+
     # Simple lambda fracture check
     if spec.kind == FRAC_LAMBDA
         # Mixed-mode traction utilization:
@@ -346,7 +350,7 @@ end
 )::Bool
     spec.kind == REFINE_STRESS || return false
 
-    if _stress_refine_excludes_kinematic(spec) && _body_in_prescribed_ring(sim, body_idx)
+    if _stress_refine_excludes_kinematic(spec) && _body_has_prescribed_bond(sim, body_idx)
         return false
     end
 
@@ -394,18 +398,18 @@ end
     return body.inv_mass == 0.0
 end
 
-function _body_in_prescribed_ring(sim, body_idx::Int)::Bool
-    body = sim.bodies[body_idx]
-    _body_has_prescribed_motion(body) && return true
+@inline function _bond_touches_prescribed_body(con)::Bool
+    return _body_has_prescribed_motion(con.bodyA) || _body_has_prescribed_motion(con.bodyB)
+end
 
-    size(sim.neighbor_map, 2) == 6 || return false
-    node_id = body.id
-    for dir in 1:6
-        nb_node = sim.neighbor_map[node_id + 1, dir]
-        nb_idx = _resolve_active_neighbor(sim, nb_node)
-        nb_idx <= 0 && continue
-        nb_idx == body_idx && continue
-        _body_has_prescribed_motion(sim.bodies[nb_idx]) && return true
+function _body_has_prescribed_bond(sim, body_idx::Int)::Bool
+    _body_has_prescribed_motion(sim.bodies[body_idx]) && return true
+
+    for con_id in sim.bond_incidence_all[body_idx]
+        con = sim.bond_constraints[con_id]
+        con.is_broken && continue
+        con.is_active || continue
+        _bond_touches_prescribed_body(con) && return true
     end
     return false
 end
@@ -431,6 +435,7 @@ function _max_incident_bond_onset(sim, body_idx::Int)::Float64
         con = sim.bond_constraints[con_id]
         con.is_broken && continue
         con.is_active || continue
+        _bond_touches_prescribed_body(con) && continue
 
         a_idx = con.bodyA.id + 1
         b_idx = con.bodyB.id + 1
