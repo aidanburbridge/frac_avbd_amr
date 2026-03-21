@@ -1,7 +1,7 @@
 """
 Interactive voxel-ID picker for STL-based fixtures.
 
-This script voxelizes an STL using the same hierarchy convention as `tests/L_bar.py`,
+This script voxelizes an STL using the project's standard octree hierarchy,
 then lets you tag voxel IDs as either:
     - fixed
     - load
@@ -22,12 +22,14 @@ Controls
 Notes
 -----
 - Picked voxel IDs are body indices in the instantiated `boxes` list.
-- These IDs can be copied directly into `tests/L_bar.py` as explicit boundary IDs.
+- These IDs can be copied directly into a test module as explicit boundary IDs.
 
 Usage
 -----
-- `python -m util.selection_tool L_bar`
-  Loads STL/voxel settings from `tests/L_bar.py` (with CLI flags as explicit overrides).
+- `python -m util.selection_tool <test_name>`
+  Loads STL/voxel settings from `tests/<test_name>.py` (with CLI flags as explicit overrides).
+- `python -m util.selection_tool --stl /path/to/fixture.stl --resolution 200`
+  Runs directly from an STL path without loading a test module.
 """
 
 from __future__ import annotations
@@ -58,7 +60,6 @@ import geometry.octree as oct
 import geometry.voxelizer as vox
 
 
-DEFAULT_STL = r"C:\Users\aidan\Documents\TUM\Thesis\L bar fracture.stl"
 DEFAULT_RESOLUTION = 1000
 DEFAULT_MAX_REF_LEVEL = 2
 
@@ -69,7 +70,7 @@ def parse_args() -> argparse.Namespace:
         "test",
         nargs="?",
         default=None,
-        help="Optional test setup module under tests/ (e.g. L_bar or tests/L_bar.py).",
+        help="Optional test setup module under tests/ (e.g. miehe_shear or tests/miehe_shear.py).",
     )
     parser.add_argument("--stl", default=None, help="Path to input STL file (overrides test config).")
     parser.add_argument(
@@ -82,7 +83,7 @@ def parse_args() -> argparse.Namespace:
         "--max-ref-level",
         type=int,
         default=None,
-        help="Maximum AMR hierarchy level (same meaning as in tests/L_bar.py; overrides test config).",
+        help="Maximum AMR hierarchy level for the voxel hierarchy (overrides test config).",
     )
     parser.add_argument(
         "--scope",
@@ -315,7 +316,9 @@ def main() -> int:
     default_pad_voxels = int(_voxelizer_default("pad_voxels", 1))
     default_repair = bool(_voxelizer_default("repair", True))
 
-    stl_value = args.stl if args.stl is not None else test_cfg.get("stl_path", DEFAULT_STL)
+    stl_value = args.stl if args.stl is not None else test_cfg.get("stl_path")
+    if stl_value is None:
+        raise SystemExit("Provide a test module or pass --stl to select voxels from an STL.")
     resolution = int(args.resolution if args.resolution is not None else test_cfg.get("resolution", DEFAULT_RESOLUTION))
     max_ref_level = int(
         args.max_ref_level if args.max_ref_level is not None else test_cfg.get("max_ref_level", DEFAULT_MAX_REF_LEVEL)
@@ -396,7 +399,10 @@ def main() -> int:
             f"counts: total={len(bodies)} selectable={int(selectable_ids.size)} "
             f"fixed={len(fixed_list)} load={len(load_list)}"
         )
-        print("Copy/paste into tests/L_bar.py:")
+        if test_name:
+            print(f"Copy/paste into tests/{test_name}.py:")
+        else:
+            print("Copy/paste into your test module:")
         print(f"FIXED_VOXEL_IDS = {fixed_list}")
         print(f"LOAD_VOXEL_IDS = {load_list}")
         print()
@@ -562,10 +568,10 @@ def main() -> int:
         pass
 
     help_text = (
-        "Voxel Picker Controls\n"
-        "f/l/r: mode toggles (fixed/load/rotate)\n"
-        "c:clear all | x/y/z: snap views\n"
-        "starts in rotate mode | picker active only in fixed/load modes\n"
+        "Voxel Selection Controls\n"
+        "Toggle modes with: f/l/r\n"
+        "f: select fixed | l: select load | r: rotate view\n"
+        "c:clear all | x/y/z: snap view to axis\n"
         "p:print IDs | s:save JSON | q:quit"
     )
     plotter.add_text(help_text, position="upper_left", font_size=8)

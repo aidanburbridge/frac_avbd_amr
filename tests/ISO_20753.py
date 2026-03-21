@@ -7,6 +7,7 @@ import geometry.voxelizer as vox
 import geometry.octree as oct
 import numpy as np
 
+from util.timestep import calc_damping, estimate_timestep
 from util.voxel_assembly import VoxelAssembly
 from util.simulate import SimulationSetup
 
@@ -18,10 +19,8 @@ VOXEL_RES = 100
 MAX_REF_LEVEL = 2
 
 # Shared solver params
-DT_PHYSICS = 1 / 4000
 DT_RENDER = 1 / 60
-STEPS_PER = int(DT_RENDER / DT_PHYSICS)
-ITER = 50
+ITER = 80
 GRAV = 0.0
 FRICTION = 0.0
 PULL_RATE = 0.005
@@ -36,26 +35,23 @@ DENSITY = 1150.0
 PENALTY_GAIN = 1e6
 STEPS = 3500
 ZETA_DAMP = 0.1
+REFINE_STRESS_THRESHOLD = 0.05 * TENSILE_STRENGTH
+TIME_STEP_POLICY = "load"
+TIME_STEP_USE_REFINED_SIZE = False
+TIME_STEP_WAVE_SPEED = "dilatational"
+TIME_STEP_CFL_SAFETY = 0.30
+TIME_STEP_LOAD_SAFETY = 0.25
 
 PYTHON_SOLVER_PARAMS = {
-    "mu": 0.3,
+    "mu": 0.2,
     "post_stabilize": False,
-    "beta": 10,
+    "beta": 100.0,
     "alpha": 0.95,
     "gamma": 0.99,
     "debug_contacts": False,
+    "criteria_refine_stress_threshold": REFINE_STRESS_THRESHOLD,
+    "criteria_refine_stress_exclude_kinematic": True,
 }
-
-def calc_cfl(density, young_mod, poisson, vox_size):
-    shear_mod = young_mod / (2 * (1 + poisson))
-    wave_speed = np.sqrt(shear_mod / density)
-    dt_cfl = vox_size / wave_speed
-    return dt_cfl
-
-
-def calc_damping(density, h, stiffness, zeta):
-    mass = h * h * density
-    return 2 * zeta * np.sqrt(mass * stiffness)
 
 
 def build_setup() -> SimulationSetup:
@@ -70,7 +66,22 @@ def build_setup() -> SimulationSetup:
     phys_origin = raw_origin * scale_factor
 
     visco_val = calc_damping(DENSITY, phys_h, E_MODULUS, ZETA_DAMP)
-    cfl = calc_cfl(DENSITY, E_MODULUS, NU, phys_h)  # 2.9330379512351167e-06
+    time_step = estimate_timestep(
+        density=DENSITY,
+        young_modulus=E_MODULUS,
+        poisson=NU,
+        h_base=phys_h,
+        max_ref_level=MAX_REF_LEVEL,
+        load_velocity=[0.0, 0.0, PULL_RATE],
+        tensile_strength=TENSILE_STRENGTH,
+        use_refined_size=TIME_STEP_USE_REFINED_SIZE,
+        policy=TIME_STEP_POLICY,
+        wave_speed=TIME_STEP_WAVE_SPEED,
+        cfl_safety=TIME_STEP_CFL_SAFETY,
+        load_safety=TIME_STEP_LOAD_SAFETY,
+    )
+    dt_physics = time_step.recommended_dt
+    steps_per = max(1, int(DT_RENDER / dt_physics))
 
     def _contains_fn(pts: np.ndarray) -> np.ndarray:
         return vox._contains_points_chunked(
@@ -100,10 +111,13 @@ def build_setup() -> SimulationSetup:
     )
 
     print(f"DEBUG: Instantiated {len(boxes)} bodies")
-
     print(f"Number of beam bonds: {len(beam_bonds)}")
     print(f"The damping value used for this sim: {visco_val}")
-    print(f"The cfl value used for this sim: {cfl}")
+    print(
+        f"Time step: {dt_physics:.6e} s "
+        f"({time_step.chosen_limit}; wave={time_step.dt_wave:.6e}, "
+        f"load={time_step.dt_load if time_step.dt_load is not None else float('nan'):.6e})"
+    )
 
     dog_bone = VoxelAssembly(boxes, beam_bonds)
 
@@ -126,7 +140,7 @@ def build_setup() -> SimulationSetup:
     return SimulationSetup(
         bodies=dog_bone.bodies,
         constraints=beam_bonds,
-        dt=DT_PHYSICS,
+        dt=dt_physics,
         iterations=ITER,
         gravity=GRAV,
         friction=FRICTION,
@@ -134,7 +148,7 @@ def build_setup() -> SimulationSetup:
         python_solver_params=PYTHON_SOLVER_PARAMS,
         amr_params=amr_dict,
         metadata={
-            "dt_physics": DT_PHYSICS,
+            "dt_physics": dt_physics,
             "dt_render": DT_RENDER,
             "E": E_MODULUS,
             "nu": NU,
@@ -144,10 +158,12 @@ def build_setup() -> SimulationSetup:
             "penalty_gain": PENALTY_GAIN,
             "zeta_damp": ZETA_DAMP,
             "h_base": phys_h,
+            "refine_stress_threshold": REFINE_STRESS_THRESHOLD,
+            **time_step.to_metadata(),
         },
         headless_steps=STEPS,
         headless_kwargs={
-            "steps_per_export": STEPS_PER,
+            "steps_per_export": steps_per,
             "show_progress": True,
             "profile_timings": True,
         },

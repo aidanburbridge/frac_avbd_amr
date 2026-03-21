@@ -3,6 +3,7 @@ import geometry.octree as oct
 import numpy as np
 
 from geometry.bond_data import BondData
+from util.timestep import calc_damping, estimate_timestep
 from util.voxel_assembly import VoxelAssembly
 from util.simulate import SimulationSetup
 
@@ -29,9 +30,7 @@ BEAM_VOXEL_RES = 140
 ROLLER_VOXEL_RES = 90
 
 # Shared solver params
-DT_PHYSICS = 1 / 4000
 DT_RENDER = 1 / 60
-STEPS_PER = max(1, int(DT_RENDER / DT_PHYSICS))
 ITER = 180
 GRAV = 0.0
 FRICTION = 0.2
@@ -48,6 +47,11 @@ ZETA_DAMP = 0.1
 # Per-body AMR caps
 BEAM_MAX_REF_LEVEL = 2
 ROLLER_MAX_REF_LEVEL = 0
+TIME_STEP_POLICY = "load"
+TIME_STEP_USE_REFINED_SIZE = False
+TIME_STEP_WAVE_SPEED = "dilatational"
+TIME_STEP_CFL_SAFETY = 0.30
+TIME_STEP_LOAD_SAFETY = 0.25
 
 PYTHON_SOLVER_PARAMS = {
     "mu": 0.3,
@@ -57,17 +61,6 @@ PYTHON_SOLVER_PARAMS = {
     "gamma": 1.0,
     "debug_contacts": False,
 }
-
-
-def calc_cfl(density, young_mod, poisson, vox_size):
-    shear_mod = young_mod / (2 * (1 + poisson))
-    wave_speed = np.sqrt(shear_mod / density)
-    return vox_size / wave_speed
-
-
-def calc_damping(density, h, stiffness, zeta):
-    mass = h * h * density
-    return 2 * zeta * np.sqrt(mass * stiffness)
 
 
 def _build_voxel_assembly(
@@ -261,15 +254,50 @@ def build_setup() -> SimulationSetup:
     if n_bodies != len(amr_dict["level"]):
         raise ValueError("AMR/body count mismatch after block merge")
 
-    cfl = min(calc_cfl(DENSITY, E_MODULUS, NU, beam_h), calc_cfl(DENSITY, E_MODULUS, NU, roller_h))
+    beam_time_step = estimate_timestep(
+        density=DENSITY,
+        young_modulus=E_MODULUS,
+        poisson=NU,
+        h_base=beam_h,
+        max_ref_level=BEAM_MAX_REF_LEVEL,
+        load_velocity=[0.0, 0.0, abs(PULL_RATE)],
+        tensile_strength=TENSILE_STRENGTH,
+        use_refined_size=TIME_STEP_USE_REFINED_SIZE,
+        policy=TIME_STEP_POLICY,
+        wave_speed=TIME_STEP_WAVE_SPEED,
+        cfl_safety=TIME_STEP_CFL_SAFETY,
+        load_safety=TIME_STEP_LOAD_SAFETY,
+    )
+    roller_time_step = estimate_timestep(
+        density=DENSITY,
+        young_modulus=E_MODULUS,
+        poisson=NU,
+        h_base=roller_h,
+        max_ref_level=ROLLER_MAX_REF_LEVEL,
+        load_velocity=None,
+        tensile_strength=TENSILE_STRENGTH,
+        use_refined_size=TIME_STEP_USE_REFINED_SIZE,
+        policy="wave",
+        wave_speed=TIME_STEP_WAVE_SPEED,
+        cfl_safety=TIME_STEP_CFL_SAFETY,
+        load_safety=TIME_STEP_LOAD_SAFETY,
+    )
+    dt_physics = beam_time_step.recommended_dt
+    steps_per = max(1, int(DT_RENDER / dt_physics))
+
     print(f"Fixture bodies: beam={len(beam.bodies)} left={len(left_support.bodies)} right={len(right_support.bodies)} top={len(top_indenter.bodies)}")
     print(f"Fixture bonds: total={len(all_bonds)}")
-    print(f"Estimated CFL: {cfl}")
+    print(
+        f"Beam time step: {dt_physics:.6e} s "
+        f"({beam_time_step.chosen_limit}; wave={beam_time_step.dt_wave:.6e}, "
+        f"load={beam_time_step.dt_load if beam_time_step.dt_load is not None else float('nan'):.6e})"
+    )
+    print(f"Roller wave limit: {roller_time_step.dt_wave:.6e} s")
 
     return SimulationSetup(
         bodies=all_bodies,
         constraints=all_bonds,
-        dt=DT_PHYSICS,
+        dt=dt_physics,
         iterations=ITER,
         gravity=GRAV,
         friction=FRICTION,
@@ -277,7 +305,7 @@ def build_setup() -> SimulationSetup:
         python_solver_params=PYTHON_SOLVER_PARAMS,
         amr_params=amr_dict,
         metadata={
-            "dt_physics": DT_PHYSICS,
+            "dt_physics": dt_physics,
             "dt_render": DT_RENDER,
             "beam_dims_m": [BEAM_LENGTH, BEAM_WIDTH, BEAM_HEIGHT],
             "roller_dims_m": [ROLLER_LENGTH, ROLLER_DIAMETER],
@@ -292,10 +320,12 @@ def build_setup() -> SimulationSetup:
             "zeta_damp": ZETA_DAMP,
             "beam_voxel_h": beam_h,
             "roller_voxel_h": roller_h,
+            **{f"beam_{key}": value for key, value in beam_time_step.to_metadata().items()},
+            **{f"roller_{key}": value for key, value in roller_time_step.to_metadata().items()},
         },
         headless_steps=STEPS,
         headless_kwargs={
-            "steps_per_export": STEPS_PER,
+            "steps_per_export": steps_per,
             "show_progress": True,
             "profile_timings": True,
         },

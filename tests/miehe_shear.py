@@ -1,5 +1,5 @@
 """
-L-bar fracture fixture loaded from STL.
+Miehe-style shear fracture fixture loaded from STL.
 """
 
 from __future__ import annotations
@@ -15,37 +15,52 @@ from util.voxel_assembly import VoxelAssembly
 
 # -------------------- Geometry (meters) -------------------- #
 MM = 1.0e-3
-STL_PATH = r"C:\Users\aidan\Documents\TUM\Thesis\L bar fracture.stl"
-VOX_RESOLUTION = 200
+STL_PATH = r"C:\Users\aidan\Documents\TUM\Thesis\miehe shear.stl"
+# Small 1 mm plate: keep the base grid fine enough to retain several voxels
+# through the 0.1 mm thickness before AMR refinement.
+VOX_RESOLUTION = 160
+
+# Keep L_bar-style axis usage here: x = in-plane width, z = in-plane height,
+# y = out-of-plane thickness.
+# Nominal specimen size: 1.0 mm (x) x 1.0 mm (z) x 0.1 mm (y).
+SPECIMEN_WIDTH = 1.0 * MM
+SPECIMEN_HEIGHT = 1.0 * MM
+SPECIMEN_THICKNESS = 0.1 * MM
 
 
 # -------------------- Boundary-condition controls -------------------- #
-OUTER_DIM = 500.0 * MM
-INNER_STEP = 250.0 * MM
-LOAD_OFFSET_FROM_RIGHT = 30.0 * MM
-BOTTOM_FIX_DEPTH = 20.0 * MM
-LOAD_PATCH_WIDTH = 20.0 * MM
-LOAD_BAND_THICKNESS = 20.0 * MM
-LOAD_VELOCITY = np.array([0.0, 5.0, 0.0], dtype=float)
+BOTTOM_FIX_DEPTH = 0.10 * MM
+TOP_LOAD_DEPTH = 0.10 * MM
+LOAD_VELOCITY = np.array([5.0e-3, 0.0, 0.0], dtype=float)
 # Optional explicit voxel-ID sets from util.selection_tool.
 FIXED_VOXEL_IDS: tuple[int, ...] = ()
 LOAD_VOXEL_IDS: tuple[int, ...] = ()
-FIXED_VOXEL_IDS = [0, 17, 34, 59, 618, 643, 668, 709, 1620, 1645, 1670, 1711, 2622, 2647, 2672, 2713, 3624, 3649, 3674, 3715]
-LOAD_VOXEL_IDS = [5760, 5801, 5842, 5883, 6138, 6179, 6220, 6261, 6516, 6557, 6598, 6639, 6894, 6935, 6976, 7017]
+# FIXED_VOXEL_IDS = [ ... ]
+# LOAD_VOXEL_IDS = [ ... ]
+
+FIXED_VOXEL_IDS = [0, 730, 1460, 2190, 2920, 3650, 4380, 5110, 5840, 6570]
+LOAD_VOXEL_IDS = [657, 1387, 2117, 2847, 3577, 4307, 5037, 5767, 6497, 7227]
+
+
 # -------------------- Material / solver -------------------- #
-DENSITY = 1150.0
-PENALTY_GAIN = 1.0e6
-E_MODULUS = 2.0e9
+DENSITY = 7800.0
+PENALTY_GAIN = 1.0e7
+E_MODULUS = 210000.0e6
 NU = 0.30
-TENSILE_STRENGTH = 8.0e7
-FRACTURE_TOUGHNESS = 5.0e4
+# Bond-model calibration values chosen to approximate a brittle Miehe-style
+# shear benchmark in this cohesive-bond voxel framework, not literal phase-field parameters.
+GC_TARGET = 2.7e3
+TENSILE_STRENGTH = 3.0e8
+FRACTURE_TOUGHNESS = np.sqrt(E_MODULUS * GC_TARGET / (1.0 - NU ** 2))
+# TODO: Calibrate TENSILE_STRENGTH and FRACTURE_TOUGHNESS against crack onset
+# and force-displacement response for the final benchmark target.
 REFINE_STRESS_THRESHOLD = 0.05 * TENSILE_STRENGTH
 
 DT_RENDER = 1 / 60
-ITER = 80
+ITER = 120
 GRAV = 0.0
 FRICTION = 0.0
-STEPS = 8000
+STEPS = 10000
 MAX_REF_LEVEL = 2
 TIME_STEP_POLICY = "load"
 TIME_STEP_USE_REFINED_SIZE = False
@@ -63,6 +78,7 @@ PYTHON_SOLVER_PARAMS = {
     "criteria_refine_stress_threshold": REFINE_STRESS_THRESHOLD,
     "criteria_refine_stress_exclude_kinematic": True,
 }
+
 
 def _select_bodies_by_center_box(
     assembly: VoxelAssembly,
@@ -163,12 +179,12 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
         fracture_toughness=FRACTURE_TOUGHNESS,
     )
 
-    lbar = VoxelAssembly(boxes, bonds)
-    for idx, body in enumerate(lbar.bodies):
+    shear = VoxelAssembly(boxes, bonds)
+    for idx, body in enumerate(shear.bodies):
         body.body_id = idx
 
     valid_mask = np.asarray(
-        amr_dict.get("valid_mask", np.ones(len(lbar.bodies), dtype=bool)),
+        amr_dict.get("valid_mask", np.ones(len(shear.bodies), dtype=bool)),
         dtype=bool,
     )
 
@@ -181,26 +197,22 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
             f"{' ...' if len(overlap_ids) > 20 else ''}"
         )
 
-    bounds = lbar.bounds()
+    bounds = shear.bounds()
 
-    x_min, _, z_min = bounds.mins
-    x_max, _, z_max = bounds.maxs
+    x_min, y_min, z_min = bounds.mins
+    x_max, y_max, z_max = bounds.maxs
     x_span = x_max - x_min
+    y_span = y_max - y_min
     z_span = z_max - z_min
 
-    if x_span <= 0.0 or z_span <= 0.0:
-        raise ValueError("Invalid L-bar bounds from voxelized STL.")
+    if x_span <= 0.0 or y_span <= 0.0 or z_span <= 0.0:
+        raise ValueError("Invalid shear-specimen bounds from voxelized STL.")
 
-    # Drawn geometry ratios from 500/250/30 mm sketch.
-    scale_x = x_span / OUTER_DIM
-    scale_z = z_span / OUTER_DIM
-
-    x_corner = x_min + INNER_STEP * scale_x
-    z_inner = z_min + INNER_STEP * scale_z
+    scale_z = z_span / SPECIMEN_HEIGHT
 
     if explicit_fixed_ids:
         fixed_targets = _select_bodies_by_ids(
-            lbar,
+            shear,
             explicit_fixed_ids,
             valid_mask=valid_mask,
             label="fixed",
@@ -208,31 +220,27 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
     else:
         fix_depth = max(BOTTOM_FIX_DEPTH * scale_z, 1.5 * raw_h)
         fixed_targets = _select_bodies_by_center_box(
-            lbar,
-            x=(x_min, x_corner + 0.5 * raw_h),
+            shear,
+            x=(x_min, x_max),
+            y=(y_min, y_max),
             z=(z_min, z_min + fix_depth),
         )
 
-    # Displacement patch at inner horizontal edge, 30 mm from right outer edge.
-    x_center = x_max - LOAD_OFFSET_FROM_RIGHT * scale_x
-    patch_width = max(LOAD_PATCH_WIDTH * scale_x, 2.0 * raw_h)
-    x_half = 0.5 * patch_width
-    x_lo = max(x_corner + 0.5 * raw_h, x_center - x_half)
-    x_hi = min(x_max - 0.5 * raw_h, x_center + x_half)
-    z_hi = min(z_max, z_inner + max(LOAD_BAND_THICKNESS * scale_z, 1.5 * raw_h))
-
     if explicit_load_ids:
         load_targets = _select_bodies_by_ids(
-            lbar,
+            shear,
             explicit_load_ids,
             valid_mask=valid_mask,
             label="load",
         )
     else:
+        load_depth = max(TOP_LOAD_DEPTH * scale_z, 1.5 * raw_h)
+        z_lo = max(z_min, z_max - load_depth)
         load_targets = _select_bodies_by_center_box(
-            lbar,
-            x=(x_lo, x_hi),
-            z=(z_inner, z_hi),
+            shear,
+            x=(x_min, x_max),
+            y=(y_min, y_max),
+            z=(z_lo, z_max),
         )
 
     if not fixed_targets:
@@ -242,7 +250,7 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
     if not load_targets:
         if explicit_load_ids:
             raise ValueError("No load voxels selected from explicit LOAD_VOXEL_IDS.")
-        raise ValueError("No load-patch voxels selected. Adjust LOAD_OFFSET_FROM_RIGHT / LOAD_PATCH_WIDTH / VOX_RESOLUTION.")
+        raise ValueError("No top-band load voxels selected. Adjust TOP_LOAD_DEPTH or increase VOX_RESOLUTION.")
 
     _set_targets_fixed(fixed_targets)
     _set_targets_kinematic_velocity(load_targets, LOAD_VELOCITY)
@@ -264,8 +272,8 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
     dt_physics = time_step.recommended_dt
     steps_per_export = max(1, int(DT_RENDER / dt_physics))
 
-    print(f"L-bar voxels: {len(lbar.bodies)}")
-    print(f"L-bar bonds: {len(bonds)}")
+    print(f"Miehe shear voxels: {len(shear.bodies)}")
+    print(f"Miehe shear bonds: {len(bonds)}")
     if explicit_fixed_ids:
         print(f"Fixed voxels: {len(fixed_targets)} (explicit FIXED_VOXEL_IDS)")
     else:
@@ -275,7 +283,7 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
     else:
         print(
             f"Load voxels: {len(load_targets)} "
-            f"(x=[{x_lo:.4f}, {x_hi:.4f}], z=[{z_inner:.4f}, {z_hi:.4f}])"
+            f"(z=[{z_lo:.4f}, {z_max:.4f}], vx={LOAD_VELOCITY[0]:.4f})"
         )
     print(
         f"Time step: {dt_physics:.6e} s "
@@ -284,7 +292,7 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
     )
 
     return SimulationSetup(
-        bodies=lbar.bodies,
+        bodies=shear.bodies,
         constraints=bonds,
         dt=dt_physics,
         iterations=ITER,
@@ -298,12 +306,14 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
             "vox_resolution": VOX_RESOLUTION,
             "h_base": raw_h,
             "max_ref_level": MAX_REF_LEVEL,
-            "outer_dim": OUTER_DIM,
-            "inner_step": INNER_STEP,
-            "load_offset_from_right": LOAD_OFFSET_FROM_RIGHT,
-            "load_patch_width": LOAD_PATCH_WIDTH,
-            "load_band_thickness": LOAD_BAND_THICKNESS,
+            "specimen_width": SPECIMEN_WIDTH,
+            "specimen_height": SPECIMEN_HEIGHT,
+            "specimen_thickness": SPECIMEN_THICKNESS,
             "bottom_fix_depth": BOTTOM_FIX_DEPTH,
+            "top_load_depth": TOP_LOAD_DEPTH,
+            "support_band_thickness": BOTTOM_FIX_DEPTH,
+            "load_band_thickness": TOP_LOAD_DEPTH,
+            "loading_velocity": LOAD_VELOCITY.tolist(),
             "refine_stress_threshold": REFINE_STRESS_THRESHOLD,
             "fixed_voxel_ids": list(explicit_fixed_ids),
             "load_voxel_ids": list(explicit_load_ids),
