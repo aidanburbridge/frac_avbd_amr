@@ -95,6 +95,11 @@ mutable struct SimulationState
 
     criteria::Criteria.CriteriaConfig
 
+    step_count::Int
+    last_iters_used::Int
+    last_max_violation::Float64
+    last_contact_count::Int
+
     function SimulationState(bodies, dt; grav=-9.81, iters=10, mu=0.6, b=10.0, g=0.99, al=0.95, stabil=true)
         # Initialize constraint vectors
         bond_cons = Vector{BondConstraint}()
@@ -146,13 +151,19 @@ mutable struct SimulationState
         # Refine and fracture criteria
         default_cfg = Criteria.default_criteria_config()
 
+        step_count = 0
+        last_iters_used = 0
+        last_max_violation = 0.0
+        last_contact_count = 0
+
         new(bodies, manifolds, bond_cons, contact_cons, bond_map, contact_map, bond_map_all, e_log,
             dt, grav, mu, iters, Float64(b), Float64(g), Float64(al), stabil,
             active_body_ids, active_bond_ids, bond_mark, bond_mark_epoch,
             seed_neighbor_ids, seed_lambda_sums, seed_counts,
             active_pos, refine_mark, refine_mark_epoch, refine_blocked, refine_queue, refine_out,
             active, valid_mask, can_refine, level, parent_list, children_start, children_count,
-            neighbor_map, max_level, max_level_per_body, default_cfg)
+            neighbor_map, max_level, max_level_per_body, default_cfg,
+            step_count, last_iters_used, last_max_violation, last_contact_count)
 
     end
 end
@@ -804,8 +815,10 @@ function step_simulation!(sim::SimulationState)
 
     curr_max_violation = Inf
     refine_list = Int[]
+    iters_used = 0
 
     for in_it in 1:inner_passes
+        iters_used = in_it
 
         alpha_eff = sim.stabilize ? 1.0 : sim.alpha
 
@@ -872,6 +885,11 @@ function step_simulation!(sim::SimulationState)
 
     log_step!(sim.energy_log, sim.bodies, sim.bond_constraints, sim.contact_constraints, alpha_log,
         sim.active_body_ids, sim.active_bond_ids)
+
+    sim.step_count += 1
+    sim.last_iters_used = iters_used
+    sim.last_max_violation = isfinite(curr_max_violation) ? curr_max_violation : 0.0
+    sim.last_contact_count = length(sim.contact_constraints)
 
 end
 

@@ -15,7 +15,7 @@ using .AVBDCore
 using .Maths
 
 const FRAME_MAGIC = "AVB2"
-const BOND_META_MAGIC = "ABM1"
+const BOND_META_MAGIC = "ABM2"
 
 # --- Interface Functions ---
 
@@ -91,18 +91,12 @@ function get_positions(sim::AVBDCore.SimulationState)
 end
 
 function write_frame(sim::AVBDCore.SimulationState, filename::String)
+    active_body_indices = sim.active_body_ids
+    stress_data, bond_data = get_visualization_data(sim)
+    n_bodies = length(active_body_indices)
+    n_bonds = size(bond_data, 1)
 
     open(filename, "w") do io
-
-        # Active bodies are sourced from sim.active_body_ids (precomputed in solver)
-        active_body_indices = sim.active_body_ids
-
-        # Visualization data (active-only, indices already remapped)
-        stress_data, bond_data = get_visualization_data(sim)
-
-        # Number of bodies and bonds (active only)
-        n_bodies = length(active_body_indices)
-        n_bonds = size(bond_data, 1)
 
         write(io, codeunits(FRAME_MAGIC))
         write(io, Int32(n_bodies))
@@ -165,6 +159,7 @@ function write_frame(sim::AVBDCore.SimulationState, filename::String)
             write(io, UInt16(0))
         end
     end
+    return (n_bodies, n_bonds)
 end
 
 function write_energy_csv(sim::AVBDCore.SimulationState, filename::String, frame_idx::Int)
@@ -202,8 +197,25 @@ function write_bond_metadata(sim::AVBDCore.SimulationState, filename::String)
             write(io, Int32(bond.bodyA.id))
             write(io, Int32(bond.bodyB.id))
             write(io, Float32(bond.area))
+            write(io, Float32(bond.f_min[1]))
+            write(io, Float32(bond.f_min[2]))
+            write(io, Float32(bond.f_min[3]))
+            write(io, Float32(bond.f_max[1]))
+            write(io, Float32(bond.f_max[2]))
+            write(io, Float32(bond.f_max[3]))
         end
     end
+end
+
+function get_last_step_metrics(sim::AVBDCore.SimulationState)
+    return (
+        sim.step_count,
+        sim.last_iters_used,
+        sim.last_max_violation,
+        length(sim.active_body_ids),
+        length(sim.active_bond_ids),
+        sim.last_contact_count,
+    )
 end
 
 function get_visualization_data(sim::AVBDCore.SimulationState)
@@ -235,6 +247,9 @@ function get_visualization_data(sim::AVBDCore.SimulationState)
         b_idx = bond.bodyB.id + 1
         if !(sim.active[a_idx] && sim.active[b_idx])
             continue
+        end
+        if !bond.rest_initialized
+            AVBDConstraints.initialize!(bond)
         end
         bond_out_idx += 1
         bA = bond.bodyA

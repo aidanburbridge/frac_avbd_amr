@@ -37,6 +37,7 @@ from types import SimpleNamespace
 import numpy as np
 import pyvista as pv
 import vtk
+from util.export_metrics import append_step_metrics_row, normalize_frame_counts, normalize_step_metrics
 
 from geometry.primitives import rect_2D, box_3D
 from geometry.bond_data import BondData, facebondpoint_from_bonddata
@@ -878,9 +879,25 @@ def run_solver_headless(
         if hasattr(solver, "write_bond_metadata"):
             solver.write_bond_metadata(str(export_path / "bond_meta.bin"))
 
-        solver.write_frame(str(export_path / "frame_0000.bin"))
+        frame_counts = normalize_frame_counts(solver.write_frame(str(export_path / "frame_0000.bin")))
         if hasattr(solver, "write_energy_csv"):
             solver.write_energy_csv(str(export_path / "energy_0000.csv"), 0)
+        step_metrics = normalize_step_metrics(
+            solver.get_last_step_metrics() if hasattr(solver, "get_last_step_metrics") else None
+        )
+        append_step_metrics_row(
+            export_path / "step_metrics.csv",
+            frame=0,
+            step=0,
+            time=0.0,
+            iters_used=step_metrics[1],
+            max_violation=step_metrics[2],
+            active_body_count=step_metrics[3] or frame_counts[0],
+            active_bond_count=step_metrics[4] or frame_counts[1],
+            exported_body_count=frame_counts[0],
+            exported_bond_count=frame_counts[1],
+            contact_count=step_metrics[5],
+        )
 
     record_legacy = (save_path is not False) and (not use_binary)
 
@@ -955,9 +972,26 @@ def run_solver_headless(
             if use_binary:
                 frame_idx = loop_idx + 1
                 filename = export_path / f"frame_{frame_idx:04d}.bin"
-                solver.write_frame(str(filename))
+                frame_counts = normalize_frame_counts(solver.write_frame(str(filename)))
                 if hasattr(solver, "write_energy_csv"):
                     solver.write_energy_csv(str(export_path / f"energy_{frame_idx:04d}.csv"), frame_idx)
+                step_metrics = normalize_step_metrics(
+                    solver.get_last_step_metrics() if hasattr(solver, "get_last_step_metrics") else None
+                )
+                step_value = step_metrics[0] or steps_done
+                append_step_metrics_row(
+                    export_path / "step_metrics.csv",
+                    frame=frame_idx,
+                    step=step_value,
+                    time=step_value * float(getattr(solver, "dt", 0.0)),
+                    iters_used=step_metrics[1],
+                    max_violation=step_metrics[2],
+                    active_body_count=step_metrics[3] or frame_counts[0],
+                    active_bond_count=step_metrics[4] or frame_counts[1],
+                    exported_body_count=frame_counts[0],
+                    exported_bond_count=frame_counts[1],
+                    contact_count=step_metrics[5],
+                )
 
             if record_legacy:
                 frames.append([b.position.copy() for b in bodies_list])

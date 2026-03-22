@@ -10,6 +10,7 @@ import time
 import sys
 from pathlib import Path
 from tqdm import tqdm
+from util.export_metrics import append_step_metrics_row, normalize_frame_counts, normalize_step_metrics
 
 # --- 1. Simulation Configuration ---
 
@@ -123,9 +124,27 @@ def run_headless(
         solver.write_bond_metadata(str(export_path / "bond_meta.bin"))
 
     # Write initial state (Frame 0)
-    solver.write_frame(str(export_path / "frame_0000.bin"))
+    frame_counts = normalize_frame_counts(solver.write_frame(str(export_path / "frame_0000.bin")))
     if hasattr(solver, "write_energy_csv"):
         solver.write_energy_csv(str(export_path / "energy_0000.csv"), 0)
+    step_metrics = normalize_step_metrics(
+        solver.get_last_step_metrics() if hasattr(solver, "get_last_step_metrics") else None
+    )
+    active_body_count = step_metrics[3] or frame_counts[0]
+    active_bond_count = step_metrics[4] or frame_counts[1]
+    append_step_metrics_row(
+        export_path / "step_metrics.csv",
+        frame=0,
+        step=0,
+        time=0.0,
+        iters_used=step_metrics[1],
+        max_violation=step_metrics[2],
+        active_body_count=active_body_count,
+        active_bond_count=active_bond_count,
+        exported_body_count=frame_counts[0],
+        exported_bond_count=frame_counts[1],
+        contact_count=step_metrics[5],
+    )
 
     # Setup Loop
     progress_bar = tqdm(total=num_steps, desc="Simulating", unit="step") if show_progress else None
@@ -166,10 +185,29 @@ def run_headless(
         # Export Data
         frame_idx += 1
         filename = export_path / f"frame_{frame_idx:04d}.bin"
-        solver.write_frame(str(filename))
+        frame_counts = normalize_frame_counts(solver.write_frame(str(filename)))
         if hasattr(solver, "write_energy_csv"):
             energy_file = export_path / f"energy_{frame_idx:04d}.csv"
             solver.write_energy_csv(str(energy_file), frame_idx)
+        step_metrics = normalize_step_metrics(
+            solver.get_last_step_metrics() if hasattr(solver, "get_last_step_metrics") else None
+        )
+        step_value = step_metrics[0] or steps_done
+        active_body_count = step_metrics[3] or frame_counts[0]
+        active_bond_count = step_metrics[4] or frame_counts[1]
+        append_step_metrics_row(
+            export_path / "step_metrics.csv",
+            frame=frame_idx,
+            step=step_value,
+            time=step_value * float(getattr(solver, "dt", 0.0)),
+            iters_used=step_metrics[1],
+            max_violation=step_metrics[2],
+            active_body_count=active_body_count,
+            active_bond_count=active_bond_count,
+            exported_body_count=frame_counts[0],
+            exported_bond_count=frame_counts[1],
+            contact_count=step_metrics[5],
+        )
 
     if progress_bar:
         progress_bar.close()

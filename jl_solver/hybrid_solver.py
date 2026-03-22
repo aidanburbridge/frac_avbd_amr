@@ -173,11 +173,18 @@ class HybridSolver:
         # Minimal transfer: only pull positions/quaternions to Python.
         return np.array(self._bridge.get_positions(self._sim))
     
-    def write_frame(self, filename: str) -> None:
+    def write_frame(self, filename: str) -> tuple[int, int] | None:
         if self._sim is None:
             return
-        
-        self._bridge.write_frame(self._sim, str(filename))
+
+        result = self._bridge.write_frame(self._sim, str(filename))
+        if result is None:
+            return None
+        try:
+            n_bodies, n_bonds = result
+            return int(n_bodies), int(n_bonds)
+        except Exception:
+            return None
     
     def write_energy_csv(self, filename: str, frame_idx: int) -> None:
         if self._sim is None:
@@ -190,6 +197,24 @@ class HybridSolver:
             return
 
         self._bridge.write_bond_metadata(self._sim, str(filename))
+
+    def get_last_step_metrics(self):
+        if self._sim is None:
+            return None
+
+        result = self._bridge.get_last_step_metrics(self._sim)
+        try:
+            step_count, iters_used, max_violation, active_body_count, active_bond_count, contact_count = result
+            return (
+                int(step_count),
+                int(iters_used),
+                float(max_violation),
+                int(active_body_count),
+                int(active_bond_count),
+                int(contact_count),
+            )
+        except Exception:
+            return None
 
     def get_visualization_data(self) -> tuple[np.ndarray, np.ndarray]:
 
@@ -340,14 +365,17 @@ class HybridWorld:
     def get_state(self) -> np.ndarray:
         return self._solver.get_state()
     
-    def write_frame(self, filename:str) -> None:
-        self._solver.write_frame(filename)
+    def write_frame(self, filename:str) -> tuple[int, int] | None:
+        return self._solver.write_frame(filename)
     
     def write_energy_csv(self, filename: str, frame_idx: int) -> None:
         self._solver.write_energy_csv(filename, frame_idx)
 
     def write_bond_metadata(self, filename: str) -> None:
         self._solver.write_bond_metadata(filename)
+
+    def get_last_step_metrics(self):
+        return self._solver.get_last_step_metrics()
 
     def get_visualization_data(self) -> tuple[np.ndarray, np.ndarray]:
         return self._solver.get_visualization_data()

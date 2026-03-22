@@ -180,6 +180,9 @@ def convert_results(run_dir: Path):
     energy_files = sorted(list(raw_dir.glob("energy_*.csv")))
     for csv_path in energy_files:
         shutil.copy2(csv_path, vtk_dir / csv_path.name)
+    step_metrics_path = raw_dir / "step_metrics.csv"
+    if step_metrics_path.exists():
+        shutil.copy2(step_metrics_path, vtk_dir / step_metrics_path.name)
 
     bond_meta_path = raw_dir / "bond_meta.bin"
     if bond_meta_path.exists():

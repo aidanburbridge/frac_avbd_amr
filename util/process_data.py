@@ -231,6 +231,9 @@ def process_run(run_dir_str):
     # Preserve per-frame energy ledgers if they were written by the solver.
     for csv_path in sorted(raw_dir.glob("energy_*.csv")):
         shutil.copy2(csv_path, vtk_dir / csv_path.name)
+    step_metrics_path = raw_dir / "step_metrics.csv"
+    if step_metrics_path.exists():
+        shutil.copy2(step_metrics_path, vtk_dir / step_metrics_path.name)
     bond_meta_path = raw_dir / "bond_meta.bin"
     if bond_meta_path.exists():
         shutil.copy2(bond_meta_path, vtk_dir / bond_meta_path.name)
