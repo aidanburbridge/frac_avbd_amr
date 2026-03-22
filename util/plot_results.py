@@ -77,21 +77,29 @@ def main() -> None:
     _save_plot(fig, plots_dir / "broken_bonds_vs_time.png")
 
     fig, ax = plt.subplots(figsize=(7, 4))
+    crack_process_lines = 0
     if "crack_area_proxy" in data:
-        ax.plot(t, data["crack_area_proxy"], label="crack_area_proxy")
-    if "process_zone_area_proxy" in data and np.isfinite(data["process_zone_area_proxy"]).any():
-        ax.plot(t, data["process_zone_area_proxy"], label="process_zone_area_proxy")
+        ax.plot(t, data["crack_area_proxy"], label="crack area proxy")
+        crack_process_lines += 1
+    if (
+        "process_zone_area_proxy" in data
+        and np.isfinite(data["process_zone_area_proxy"]).any()
+        and np.any(data["process_zone_area_proxy"] > 0.0)
+    ):
+        ax.plot(t, data["process_zone_area_proxy"], label="process-zone area proxy")
+        crack_process_lines += 1
     ax.set_xlabel("Time")
     ax.set_ylabel("Area proxy")
-    ax.set_title("Crack / Process Zone Area vs Time")
-    ax.legend()
+    ax.set_title("Crack / Process Zone Area vs Time" if crack_process_lines > 1 else "Crack Area Proxy vs Time")
+    if crack_process_lines:
+        ax.legend()
     ax.grid(True, alpha=0.3)
     _save_plot(fig, plots_dir / "crack_area_vs_time.png")
 
     fig, ax = plt.subplots(figsize=(7, 4))
     ax.plot(t, data.get("peak_stress_proxy", np.full_like(t, math.nan)))
     ax.set_xlabel("Time")
-    ax.set_ylabel("Peak stress proxy")
+    ax.set_ylabel("Max principal tensile stress proxy")
     ax.set_title("Peak Stress Proxy vs Time")
     ax.grid(True, alpha=0.3)
     _save_plot(fig, plots_dir / "peak_stress_proxy_vs_time.png")
@@ -114,8 +122,12 @@ def main() -> None:
         fig, ax = plt.subplots(figsize=(7, 4))
         ax.plot(t, data[load_key])
         ax.set_xlabel("Time")
-        ax.set_ylabel(load_key)
-        ax.set_title("Load Displacement vs Time")
+        if load_key == "load_displacement_along_loading_axis":
+            ax.set_ylabel("Prescribed displacement along loading axis")
+            ax.set_title("Prescribed Displacement Along Loading Axis vs Time")
+        else:
+            ax.set_ylabel("Prescribed displacement magnitude")
+            ax.set_title("Prescribed Displacement Magnitude vs Time")
         ax.grid(True, alpha=0.3)
         _save_plot(fig, plots_dir / "load_displacement_vs_time.png")
 

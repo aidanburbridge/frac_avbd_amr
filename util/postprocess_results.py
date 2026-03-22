@@ -301,8 +301,20 @@ def _max_principal_proxy(stress6: np.ndarray) -> np.ndarray:
     return np.linalg.eigvalsh(_sym6_to_mats(stress6))[:, -1]
 
 
-def _load_direction(metadata: dict[str, Any]) -> np.ndarray | None:
-    for key in ("loading_velocity", "impact_velocity_vector_m_per_s"):
+def _normalized_benchmark_token(value: Any) -> str:
+    return "".join(ch for ch in str(value).lower() if ch.isalnum())
+
+
+def _is_l_panel_benchmark(benchmark_name: str | None, metadata: dict[str, Any]) -> bool:
+    for value in (benchmark_name, metadata.get("test_name"), metadata.get("stl_path")):
+        token = _normalized_benchmark_token(value)
+        if "lbar" in token or "lpanel" in token:
+            return True
+    return False
+
+
+def _load_direction(metadata: dict[str, Any], benchmark_name: str | None = None) -> np.ndarray | None:
+    for key in ("loading_velocity", "load_velocity", "impact_velocity_vector_m_per_s"):
         value = metadata.get(key)
         if value is None:
             continue
@@ -312,6 +324,9 @@ def _load_direction(metadata: dict[str, Any]) -> np.ndarray | None:
         norm = np.linalg.norm(arr)
         if norm > 0.0:
             return arr / norm
+    if _is_l_panel_benchmark(benchmark_name, metadata):
+        # The L-panel fixture uses a prescribed upward loading patch.
+        return np.asarray([0.0, 1.0, 0.0], dtype=float)
     return None
 
 
@@ -449,6 +464,7 @@ def _write_thesis_guide(
     *,
     load_displacement_available: bool,
     exact_force_caps_available: bool,
+    bond_strain_length_note: str | None,
 ) -> None:
     lines = [
         "# Thesis Quantity Guide",
@@ -456,13 +472,15 @@ def _write_thesis_guide(
         "| Quantity | Meaning | Units | Allowed wording | Forbidden wording |",
         "| --- | --- | --- | --- | --- |",
         "| `peak_stress_proxy` | Maximum principal tensile stress proxy from exported `Stress_Tensor` | stress units of the solver setup | `max principal tensile stress proxy`, `tensile localization indicator` | `true Cauchy stress`, `physical tensile stress in the specimen` |",
-        "| `eps_n` | Bond-normal separation normalized by `L0` | dimensionless | `cohesive-bond normal separation ratio`, `bond-normal strain-like quantity` | `continuum normal strain field` |",
-        "| `gamma_t1`, `gamma_t2`, `gamma_eq` | Bond-tangential separation ratios | dimensionless | `cohesive-bond shear separation`, `bond-local tangential deformation` | `continuum shear strain field` |",
+        "| `eps_n` | Bond-normal separation normalized by a per-bond characteristic length | dimensionless | `cohesive-bond normal separation ratio`, `bond-normal strain-like quantity` | `continuum normal strain field` |",
+        "| `gamma_t1`, `gamma_t2`, `gamma_eq` | Bond-tangential separation ratios normalized by a per-bond characteristic length | dimensionless | `cohesive-bond shear separation`, `bond-local tangential deformation` | `continuum shear strain field` |",
         "| `sigma_n`, `tau_t1`, `tau_t2`, `tau_eq` | Cohesive-bond tractions from capped row forces divided by exported bond area | traction units of the solver setup | `cohesive-bond traction`, `interface traction` | `continuum stress` |",
         "| `crack_area_proxy` | Sum of areas of broken bonds | area | `crack area proxy`, `fractured interface area proxy` | `exact crack surface area` |",
         "| `process_zone_area_proxy` | Sum of areas of damaged but unbroken bonds | area | `process-zone area proxy` | `exact damage-zone area` |",
+        "| `damage_positive_bond_count` | Number of bonds with positive exported damage, including broken bonds | count | `damage-positive bond count` | `damaged-but-unbroken bond count`, `process-zone bond count` |",
         "| `broken_bond_count` | Number of broken bonds in the saved frame | count | `broken bond count` | `number of cracks` |",
         "| `damaged_bond_count` | Number of damaged but not yet broken bonds in the saved frame | count | `damaged cohesive-bond count` | `crack count` |",
+        "| `load_displacement_along_loading_axis`, `load_displacement_magnitude` | Reconstructed prescribed/loading-point displacement from tracked load-group body motion | displacement in exported coordinate units | `prescribed displacement`, `loading-point displacement`, `kinematic displacement history` | `force-displacement response`, `structural load-displacement curve` |",
         "",
         "## Unsupported or Conditionally Supported Quantities",
         "",
@@ -481,6 +499,9 @@ def _write_thesis_guide(
         lines.append("- Load displacement was reconstructed only as a body-motion kinematic quantity, not as a load-force response.")
     else:
         lines.append("- Load displacement was not reconstructed because the required boundary-group tracking data was not stable across saved frames.")
+
+    if bond_strain_length_note:
+        lines.append(f"- {bond_strain_length_note}")
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -509,6 +530,8 @@ def analyze_run(
         or manifest.get("test")
         or run_dir.parent.name
     )
+    l_panel_mode = _is_l_panel_benchmark(benchmark_name, metadata)
+    bond_strain_length_note: str | None = None
 
     if stress_threshold is None:
         stress_threshold = _safe_float(metadata.get("refine_stress_threshold"))
@@ -517,7 +540,7 @@ def analyze_run(
 
     load_ids = metadata.get("load_voxel_ids") or []
     load_ids = [int(v) for v in load_ids]
-    load_dir = _load_direction(metadata)
+    load_dir = _load_direction(metadata, benchmark_name)
     initial_load_positions: dict[int, np.ndarray] | None = None
     load_displacement_available = bool(load_ids)
 
@@ -587,8 +610,8 @@ def analyze_run(
         exact_force_caps_available = exact_force_caps_available and frame_caps_available
 
         broken_mask = is_broken
-        damaged_mask = (damage > damage_threshold) & (~broken_mask)
         damage_positive_mask = damage > damage_threshold
+        damaged_unbroken_mask = damage_positive_mask & (~broken_mask)
 
         if first_cohesive_frame is None and np.any(is_cohesive):
             first_cohesive_frame = frame
@@ -599,21 +622,42 @@ def analyze_run(
             first_broken_time = time_value
 
         crack_area_proxy = float(np.nansum(area[broken_mask])) if area.size else 0.0
-        process_zone_area_proxy = float(np.nansum(area[damaged_mask])) if area.size else 0.0
+        process_zone_area_proxy = float(np.nansum(area[damaged_unbroken_mask])) if area.size else 0.0
 
-        damaged_body_ids = set(np.asarray(np.concatenate((bodyA_ids[damaged_mask], bodyB_ids[damaged_mask])), dtype=int).tolist())
+        damaged_body_ids = set(
+            np.asarray(
+                np.concatenate((bodyA_ids[damaged_unbroken_mask], bodyB_ids[damaged_unbroken_mask])),
+                dtype=int,
+            ).tolist()
+        )
         broken_body_ids = set(np.asarray(np.concatenate((bodyA_ids[broken_mask], bodyB_ids[broken_mask])), dtype=int).tolist())
 
         peak_adjacent_to_damaged = int(peak_body in damaged_body_ids) if peak_body >= 0 else 0
         peak_adjacent_to_broken = int(peak_body in broken_body_ids) if peak_body >= 0 else 0
 
         L0 = np.linalg.norm(rest, axis=1) if rest.size else np.zeros((0,), dtype=float)
-        safe_L0 = np.where(L0 > np.finfo(float).eps, L0, np.nan)
-        normal_sign = np.where(np.abs(rest[:, 0]) > np.finfo(float).eps, np.sign(rest[:, 0]), 1.0) if rest.size else np.zeros((0,), dtype=float)
-        delta_n = normal_sign * C[:, 0] if C.size else np.zeros((0,), dtype=float)
-        eps_n = delta_n / safe_L0 if C.size else np.zeros((0,), dtype=float)
-        gamma_t1 = C[:, 1] / safe_L0 if C.size else np.zeros((0,), dtype=float)
-        gamma_t2 = C[:, 2] / safe_L0 if C.size else np.zeros((0,), dtype=float)
+        strain_length = L0
+        use_area_strain_length = bool(l_panel_mode and L0.size and not np.any(L0 > 1.0e-9) and area.size)
+        if use_area_strain_length:
+            strain_length = np.sqrt(np.clip(area, a_min=0.0, a_max=None))
+            if bond_strain_length_note is None and np.isfinite(strain_length).any():
+                bond_strain_length_note = (
+                    f"For `{benchmark_name}`, exported bond `rest` vectors are degenerate, "
+                    "so `eps_n` and `gamma_*` were normalized by `sqrt(area)` from bond metadata."
+                )
+        safe_strain_length = np.where(strain_length > np.finfo(float).eps, strain_length, np.nan)
+        if use_area_strain_length:
+            delta_n = C[:, 0] if C.size else np.zeros((0,), dtype=float)
+        else:
+            normal_sign = (
+                np.where(np.abs(rest[:, 0]) > np.finfo(float).eps, np.sign(rest[:, 0]), 1.0)
+                if rest.size
+                else np.zeros((0,), dtype=float)
+            )
+            delta_n = normal_sign * C[:, 0] if C.size else np.zeros((0,), dtype=float)
+        eps_n = delta_n / safe_strain_length if C.size else np.zeros((0,), dtype=float)
+        gamma_t1 = C[:, 1] / safe_strain_length if C.size else np.zeros((0,), dtype=float)
+        gamma_t2 = C[:, 2] / safe_strain_length if C.size else np.zeros((0,), dtype=float)
         gamma_eq = np.sqrt(np.square(gamma_t1) + np.square(gamma_t2)) if C.size else np.zeros((0,), dtype=float)
 
         if bond_ids.size and frame_caps_available:
@@ -681,7 +725,7 @@ def analyze_run(
             "mech_energy": _safe_float(energy_row.get("mech_energy")),
             "accounted_energy": _safe_float(energy_row.get("accounted_energy")),
             "broken_bond_count": int(np.count_nonzero(broken_mask)),
-            "damaged_bond_count": int(np.count_nonzero(damaged_mask)),
+            "damaged_bond_count": int(np.count_nonzero(damaged_unbroken_mask)),
             "damage_positive_bond_count": int(np.count_nonzero(damage_positive_mask)),
             "crack_area_proxy": float(crack_area_proxy),
             "process_zone_area_proxy": float(process_zone_area_proxy),
@@ -783,6 +827,7 @@ def analyze_run(
         analysis_dir / "thesis_quantity_guide.md",
         load_displacement_available=load_displacement_available,
         exact_force_caps_available=exact_force_caps_available,
+        bond_strain_length_note=bond_strain_length_note,
     )
 
     return {
