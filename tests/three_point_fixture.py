@@ -3,13 +3,7 @@ import geometry.octree as oct
 import numpy as np
 
 from geometry.bond_data import BondData
-from util.timestep import (
-    calc_damping,
-    calc_num_physics_steps_for_target_displacement,
-    calc_target_duration,
-    estimate_timestep,
-    print_timestep_schedule,
-)
+from util.timestep import calc_damping
 from util.voxel_assembly import VoxelAssembly
 from util.simulate import SimulationSetup
 
@@ -36,7 +30,9 @@ BEAM_VOXEL_RES = 140
 ROLLER_VOXEL_RES = 90
 
 # Shared solver params
+DT_PHYSICS = 1 / 4000
 DT_RENDER = 1 / 60
+STEPS_PER = max(1, int(DT_RENDER / DT_PHYSICS))
 ITER = 180
 GRAV = 0.0
 FRICTION = 0.2
@@ -47,7 +43,7 @@ TENSILE_STRENGTH = 80e5
 FRACTURE_TOUGHNESS = 5e4
 DENSITY = 1150.0
 PENALTY_GAIN = 1e6
-TARGET_INDENTER_DISPLACEMENT = TOP_GAP + (0.10 * BEAM_HEIGHT)
+STEPS = 1000
 ZETA_DAMP = 0.1
 
 # Per-body AMR caps
@@ -255,51 +251,13 @@ def build_setup() -> SimulationSetup:
     if n_bodies != len(amr_dict["level"]):
         raise ValueError("AMR/body count mismatch after block merge")
 
-    beam_time_step = estimate_timestep(
-        density=DENSITY,
-        young_modulus=E_MODULUS,
-        poisson=NU,
-        h_base=beam_h,
-        max_ref_level=BEAM_MAX_REF_LEVEL,
-        load_velocity=[0.0, 0.0, abs(PULL_RATE)],
-        tensile_strength=TENSILE_STRENGTH,
-    )
-    roller_time_step = estimate_timestep(
-        density=DENSITY,
-        young_modulus=E_MODULUS,
-        poisson=NU,
-        h_base=roller_h,
-        max_ref_level=ROLLER_MAX_REF_LEVEL,
-        load_velocity=None,
-        tensile_strength=TENSILE_STRENGTH,
-    )
-    dt_physics = beam_time_step.recommended_dt
-    steps_per = max(1, int(DT_RENDER / dt_physics))
-    target_duration = calc_target_duration(TARGET_INDENTER_DISPLACEMENT, PULL_RATE)
-    headless_steps = calc_num_physics_steps_for_target_displacement(
-        TARGET_INDENTER_DISPLACEMENT,
-        dt_physics,
-        PULL_RATE,
-    )
-
     print(f"Fixture bodies: beam={len(beam.bodies)} left={len(left_support.bodies)} right={len(right_support.bodies)} top={len(top_indenter.bodies)}")
     print(f"Fixture bonds: total={len(all_bonds)}")
-    print(
-        f"Beam time step: {dt_physics:.6e} s "
-        f"(wave={beam_time_step.dt_wave:.6e}, "
-        f"load={beam_time_step.dt_load if beam_time_step.dt_load is not None else float('nan'):.6e})"
-    )
-    print(
-        f"Roller time step: {roller_time_step.recommended_dt:.6e} s "
-        f"(wave={roller_time_step.dt_wave:.6e}, "
-        f"load={roller_time_step.dt_load if roller_time_step.dt_load is not None else float('nan'):.6e})"
-    )
-    print_timestep_schedule(dt_physics, steps_per, headless_steps)
 
     return SimulationSetup(
         bodies=all_bodies,
         constraints=all_bonds,
-        dt=dt_physics,
+        dt=DT_PHYSICS,
         iterations=ITER,
         gravity=GRAV,
         friction=FRICTION,
@@ -307,7 +265,7 @@ def build_setup() -> SimulationSetup:
         python_solver_params=PYTHON_SOLVER_PARAMS,
         amr_params=amr_dict,
         metadata={
-            "dt_physics": dt_physics,
+            "dt_physics": DT_PHYSICS,
             "dt_render": DT_RENDER,
             "beam_dims_m": [BEAM_LENGTH, BEAM_WIDTH, BEAM_HEIGHT],
             "roller_dims_m": [ROLLER_LENGTH, ROLLER_DIAMETER],
@@ -322,14 +280,12 @@ def build_setup() -> SimulationSetup:
             "zeta_damp": ZETA_DAMP,
             "beam_voxel_h": beam_h,
             "roller_voxel_h": roller_h,
-            "target_indenter_displacement_m": TARGET_INDENTER_DISPLACEMENT,
-            "target_duration_s": target_duration,
-            **{f"beam_{key}": value for key, value in beam_time_step.to_metadata().items()},
-            **{f"roller_{key}": value for key, value in roller_time_step.to_metadata().items()},
+            "steps": STEPS,
+            "steps_per_export": STEPS_PER,
         },
-        headless_steps=headless_steps,
+        headless_steps=STEPS,
         headless_kwargs={
-            "steps_per_export": steps_per,
+            "steps_per_export": STEPS_PER,
             "show_progress": True,
             "profile_timings": True,
         },

@@ -9,12 +9,6 @@ import numpy as np
 import geometry.octree as oct
 import geometry.voxelizer as vox
 from util.pyvista_visualizer import SimulationSetup
-from util.timestep import (
-    calc_num_physics_steps_for_target_displacement,
-    calc_target_duration,
-    estimate_timestep,
-    print_timestep_schedule,
-)
 from util.voxel_assembly import VoxelAssembly
 
 
@@ -46,11 +40,13 @@ TENSILE_STRENGTH = 8.0e7
 FRACTURE_TOUGHNESS = 5.0e4
 REFINE_STRESS_THRESHOLD = 0.05 * TENSILE_STRENGTH
 
+DT_PHYSICS = 1 / 4000
 DT_RENDER = 1 / 60
+STEPS_PER_EXPORT = max(1, int(DT_RENDER / DT_PHYSICS))
 ITER = 80
 GRAV = 0.0
 FRICTION = 0.0
-TARGET_LOAD_DISPLACEMENT = 1 * OUTER_DIM
+STEPS = 200
 MAX_REF_LEVEL = 2
 
 PYTHON_SOLVER_PARAMS = {
@@ -247,24 +243,6 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
     _set_targets_fixed(fixed_targets)
     _set_targets_kinematic_velocity(load_targets, LOAD_VELOCITY)
 
-    time_step = estimate_timestep(
-        density=DENSITY,
-        young_modulus=E_MODULUS,
-        poisson=NU,
-        h_base=raw_h,
-        max_ref_level=MAX_REF_LEVEL,
-        load_velocity=LOAD_VELOCITY,
-        tensile_strength=TENSILE_STRENGTH,
-    )
-    dt_physics = time_step.recommended_dt
-    steps_per_export = max(1, int(DT_RENDER / dt_physics))
-    target_duration = calc_target_duration(TARGET_LOAD_DISPLACEMENT, LOAD_VELOCITY)
-    headless_steps = calc_num_physics_steps_for_target_displacement(
-        TARGET_LOAD_DISPLACEMENT,
-        dt_physics,
-        LOAD_VELOCITY,
-    )
-
     print(f"L-bar voxels: {len(lbar.bodies)}")
     print(f"L-bar bonds: {len(bonds)}")
     if explicit_fixed_ids:
@@ -278,12 +256,11 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
             f"Load voxels: {len(load_targets)} "
             f"(x=[{x_lo:.4f}, {x_hi:.4f}], z=[{z_inner:.4f}, {z_hi:.4f}])"
         )
-    print_timestep_schedule(dt_physics, steps_per_export, headless_steps)
 
     return SimulationSetup(
         bodies=lbar.bodies,
         constraints=bonds,
-        dt=dt_physics,
+        dt=DT_PHYSICS,
         iterations=ITER,
         gravity=GRAV,
         friction=FRICTION,
@@ -304,15 +281,14 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
             "refine_stress_threshold": REFINE_STRESS_THRESHOLD,
             "fixed_voxel_ids": list(explicit_fixed_ids),
             "load_voxel_ids": list(explicit_load_ids),
-            "target_load_displacement": TARGET_LOAD_DISPLACEMENT,
-            "target_duration_s": target_duration,
-            "dt_physics": dt_physics,
+            "dt_physics": DT_PHYSICS,
             "dt_render": DT_RENDER,
-            **time_step.to_metadata(),
+            "steps": STEPS,
+            "steps_per_export": STEPS_PER_EXPORT,
         },
-        headless_steps=headless_steps,
+        headless_steps=STEPS,
         headless_kwargs={
-            "steps_per_export": steps_per_export,
+            "steps_per_export": STEPS_PER_EXPORT,
             "show_progress": True,
         },
     )

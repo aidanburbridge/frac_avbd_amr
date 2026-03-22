@@ -111,6 +111,7 @@ def run_headless(
     """
     export_path = Path(export_dir)
     export_path.mkdir(parents=True, exist_ok=True)
+    steps_per_export = max(1, int(steps_per_export))
     
     # Validate solver capability
     if not hasattr(solver, "write_frame"):
@@ -135,6 +136,11 @@ def run_headless(
     
     # Check for efficient stepping (Julia bridge batching)
     has_step_many = hasattr(solver, "step_many")
+    progress_update_steps = kwargs.get("progress_update_steps")
+    if progress_update_steps is None:
+        # Keep the progress bar responsive without forcing extra frame exports.
+        progress_update_steps = max(1, min(steps_per_export, num_steps // 100))
+    progress_update_steps = max(1, min(int(progress_update_steps), steps_per_export))
 
     while steps_done < num_steps:
         # Determine chunk size
@@ -142,13 +148,20 @@ def run_headless(
         chunk = min(steps_per_export, remaining)
         
         # Step Physics
-        if has_step_many:
-            solver.step_many(chunk)
-        else:
-            for _ in range(chunk):
-                solver.step()
-                
-        steps_done += chunk
+        chunk_done = 0
+        while chunk_done < chunk:
+            subchunk = min(progress_update_steps, chunk - chunk_done)
+            if has_step_many:
+                solver.step_many(subchunk)
+            else:
+                for _ in range(subchunk):
+                    solver.step()
+
+            steps_done += subchunk
+            chunk_done += subchunk
+
+            if progress_bar:
+                progress_bar.update(subchunk)
         
         # Export Data
         frame_idx += 1
@@ -157,9 +170,6 @@ def run_headless(
         if hasattr(solver, "write_energy_csv"):
             energy_file = export_path / f"energy_{frame_idx:04d}.csv"
             solver.write_energy_csv(str(energy_file), frame_idx)
-        
-        if progress_bar:
-            progress_bar.update(chunk)
 
     if progress_bar:
         progress_bar.close()

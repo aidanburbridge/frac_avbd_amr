@@ -7,13 +7,7 @@ import geometry.voxelizer as vox
 import geometry.octree as oct
 import numpy as np
 
-from util.timestep import (
-    calc_damping,
-    calc_num_physics_steps_for_target_displacement,
-    calc_target_duration,
-    estimate_timestep,
-    print_timestep_schedule,
-)
+from util.timestep import calc_damping
 from util.voxel_assembly import VoxelAssembly
 from util.simulate import SimulationSetup
 
@@ -25,7 +19,9 @@ VOXEL_RES = 100
 MAX_REF_LEVEL = 2
 
 # Shared solver params
+DT_PHYSICS = 1 / 4000
 DT_RENDER = 1 / 60
+STEPS_PER = max(1, int(DT_RENDER / DT_PHYSICS))
 ITER = 80
 GRAV = 0.0
 FRICTION = 0.0
@@ -39,7 +35,7 @@ TENSILE_STRENGTH = 80e5
 FRACTURE_TOUGHNESS = 5e4
 DENSITY = 1150.0
 PENALTY_GAIN = 1e6
-TARGET_PULL_DISPLACEMENT = 0.03 * LENGTH
+STEPS = 3500
 ZETA_DAMP = 0.1
 REFINE_STRESS_THRESHOLD = 0.05 * TENSILE_STRENGTH
 
@@ -67,23 +63,6 @@ def build_setup() -> SimulationSetup:
     phys_origin = raw_origin * scale_factor
 
     visco_val = calc_damping(DENSITY, phys_h, E_MODULUS, ZETA_DAMP)
-    time_step = estimate_timestep(
-        density=DENSITY,
-        young_modulus=E_MODULUS,
-        poisson=NU,
-        h_base=phys_h,
-        max_ref_level=MAX_REF_LEVEL,
-        load_velocity=[0.0, 0.0, PULL_RATE],
-        tensile_strength=TENSILE_STRENGTH,
-    )
-    dt_physics = time_step.recommended_dt
-    steps_per = max(1, int(DT_RENDER / dt_physics))
-    target_duration = calc_target_duration(TARGET_PULL_DISPLACEMENT, PULL_RATE)
-    headless_steps = calc_num_physics_steps_for_target_displacement(
-        TARGET_PULL_DISPLACEMENT,
-        dt_physics,
-        PULL_RATE,
-    )
 
     def _contains_fn(pts: np.ndarray) -> np.ndarray:
         return vox._contains_points_chunked(
@@ -115,7 +94,6 @@ def build_setup() -> SimulationSetup:
     print(f"DEBUG: Instantiated {len(boxes)} bodies")
     print(f"Number of beam bonds: {len(beam_bonds)}")
     print(f"The damping value used for this sim: {visco_val}")
-    print_timestep_schedule(dt_physics, steps_per, headless_steps)
 
     dog_bone = VoxelAssembly(boxes, beam_bonds)
 
@@ -138,7 +116,7 @@ def build_setup() -> SimulationSetup:
     return SimulationSetup(
         bodies=dog_bone.bodies,
         constraints=beam_bonds,
-        dt=dt_physics,
+        dt=DT_PHYSICS,
         iterations=ITER,
         gravity=GRAV,
         friction=FRICTION,
@@ -146,7 +124,7 @@ def build_setup() -> SimulationSetup:
         python_solver_params=PYTHON_SOLVER_PARAMS,
         amr_params=amr_dict,
         metadata={
-            "dt_physics": dt_physics,
+            "dt_physics": DT_PHYSICS,
             "dt_render": DT_RENDER,
             "E": E_MODULUS,
             "nu": NU,
@@ -157,13 +135,12 @@ def build_setup() -> SimulationSetup:
             "zeta_damp": ZETA_DAMP,
             "h_base": phys_h,
             "refine_stress_threshold": REFINE_STRESS_THRESHOLD,
-            "target_pull_displacement": TARGET_PULL_DISPLACEMENT,
-            "target_duration_s": target_duration,
-            **time_step.to_metadata(),
+            "steps": STEPS,
+            "steps_per_export": STEPS_PER,
         },
-        headless_steps=headless_steps,
+        headless_steps=STEPS,
         headless_kwargs={
-            "steps_per_export": steps_per,
+            "steps_per_export": STEPS_PER,
             "show_progress": True,
             "profile_timings": True,
         },
