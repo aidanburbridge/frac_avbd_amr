@@ -6,13 +6,16 @@ import shutil
 from tqdm import tqdm
 from util.vtk_exporter import VTKExporter
 
+FRAME_MAGIC = b"AVB2"
+
 # We need a dummy object to mimic the Body class for the exporter
 class DummyBody:
-    def __init__(self, pos, quat, size, assembly_id):
+    def __init__(self, pos, quat, size, assembly_id, body_id=None):
         self.pos = pos
         self.quat = quat
         self.size = size
         self.assembly_id = assembly_id
+        self.body_id = int(body_id) if body_id is not None else None
         
     @property
     def position(self):
@@ -44,9 +47,59 @@ class DummyBody:
 
 def process_frame(file_path, exporter):
     with open(file_path, "rb") as f:
+        prefix = f.read(4)
+        if prefix == FRAME_MAGIC:
+            n_bodies, n_bonds, dt = struct.unpack("iif", f.read(12))
+
+            dt_body = np.dtype([
+                ('pos', '3f4'),
+                ('quat', '4f4'),
+                ('size', '3f4'),
+                ('body_id', 'i4'),
+                ('assembly_id', 'i4'),
+                ('stress', '6f4'),
+            ])
+            raw_bodies = np.frombuffer(f.read(n_bodies * dt_body.itemsize), dtype=dt_body)
+
+            bodies = []
+            stress_tensor = np.zeros((n_bodies, 6), dtype=np.float32)
+            for idx, b in enumerate(raw_bodies):
+                bodies.append(DummyBody(b['pos'], b['quat'], b['size'], b['assembly_id'], body_id=b['body_id']))
+                stress_tensor[idx] = b['stress']
+
+            bond_export = []
+            if n_bonds > 0:
+                dt_bond = np.dtype([
+                    ('bond_id', 'i4'),
+                    ('bodyA_id', 'i4'),
+                    ('bodyB_id', 'i4'),
+                    ('C', '3f4'),
+                    ('rest', '3f4'),
+                    ('penalty_k', '3f4'),
+                    ('damage', 'f4'),
+                    ('is_broken', 'u1'),
+                    ('is_cohesive', 'u1'),
+                    ('_pad', 'u2'),
+                ])
+                raw_bonds = np.frombuffer(f.read(n_bonds * dt_bond.itemsize), dtype=dt_bond)
+                bond_export = np.column_stack((
+                    raw_bonds['bond_id'],
+                    raw_bonds['bodyA_id'],
+                    raw_bonds['bodyB_id'],
+                    raw_bonds['C'],
+                    raw_bonds['rest'],
+                    raw_bonds['penalty_k'],
+                    raw_bonds['damage'],
+                    raw_bonds['is_broken'],
+                    raw_bonds['is_cohesive'],
+                ))
+
+            exporter.export(bodies, stress_tensor, bond_export)
+            return
+
         # --- HEADER ---
         # 2 Int32 (N_bodies, N_bonds), 1 Float32 (dt)
-        header = f.read(12) 
+        header = prefix + f.read(8)
         if not header: return
         n_bodies, n_bonds, dt = struct.unpack("iif", header)
         
@@ -172,12 +225,15 @@ def process_run(run_dir_str):
     # Initialize exporter
     exporter = VTKExporter(str(vtk_dir))
     
-    files = sorted(list(raw_dir.glob("*.bin")))
+    files = sorted(list(raw_dir.glob("frame_*.bin")))
     print(f"Processing {len(files)} frames...")
 
     # Preserve per-frame energy ledgers if they were written by the solver.
     for csv_path in sorted(raw_dir.glob("energy_*.csv")):
         shutil.copy2(csv_path, vtk_dir / csv_path.name)
+    bond_meta_path = raw_dir / "bond_meta.bin"
+    if bond_meta_path.exists():
+        shutil.copy2(bond_meta_path, vtk_dir / bond_meta_path.name)
     
     for f in tqdm(files):
         process_frame(f, exporter)

@@ -118,6 +118,9 @@ def run_headless(
         # Create a dummy function to prevent crash
         solver.write_frame = lambda x: None
 
+    if hasattr(solver, "write_bond_metadata"):
+        solver.write_bond_metadata(str(export_path / "bond_meta.bin"))
+
     # Write initial state (Frame 0)
     solver.write_frame(str(export_path / "frame_0000.bin"))
     if hasattr(solver, "write_energy_csv"):

@@ -185,6 +185,12 @@ class HybridSolver:
 
         self._bridge.write_energy_csv(self._sim, str(filename), int(frame_idx))
 
+    def write_bond_metadata(self, filename: str) -> None:
+        if self._sim is None:
+            return
+
+        self._bridge.write_bond_metadata(self._sim, str(filename))
+
     def get_visualization_data(self) -> tuple[np.ndarray, np.ndarray]:
 
         if self._sim is None:
@@ -339,6 +345,9 @@ class HybridWorld:
     
     def write_energy_csv(self, filename: str, frame_idx: int) -> None:
         self._solver.write_energy_csv(filename, frame_idx)
+
+    def write_bond_metadata(self, filename: str) -> None:
+        self._solver.write_bond_metadata(filename)
 
     def get_visualization_data(self) -> tuple[np.ndarray, np.ndarray]:
         return self._solver.get_visualization_data()

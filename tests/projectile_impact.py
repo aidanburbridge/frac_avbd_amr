@@ -10,6 +10,7 @@ import geometry.octree as oct
 import geometry.voxelizer as vox
 from geometry.bond_data import BondData
 from util.pyvista_visualizer import SimulationSetup
+from util.timestep import estimate_timestep
 from util.voxel_assembly import VoxelAssembly
 
 
@@ -81,13 +82,17 @@ MAX_REF_LEVEL = 1
 PROJECTILE_MAX_REF_LEVEL = 0
 REFINE_STRESS_THRESHOLD = 0.15 * WALL_TENSILE_STRENGTH
 
-DT_PHYSICS = 5.0e-6
 DT_RENDER = 1 / 1000
-STEPS_PER_EXPORT = max(1, int(DT_RENDER / DT_PHYSICS))
 ITER = 120
 GRAV = 0.0
 FRICTION = 0.0
-STEPS = 4000
+STEPS = 200
+TARGET_SIM_DURATION = 5.0e-6 * STEPS
+TIME_STEP_POLICY = "min"
+TIME_STEP_USE_REFINED_SIZE = True
+TIME_STEP_WAVE_SPEED = "dilatational"
+TIME_STEP_CFL_SAFETY = 0.30
+TIME_STEP_LOAD_SAFETY = 0.25
 
 PYTHON_SOLVER_PARAMS = {
     "mu": 0.0,
@@ -498,6 +503,38 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
 
     _set_targets_dynamic_velocity(projectile.bodies, projectile_velocity)
 
+    wall_time_step = estimate_timestep(
+        density=WALL_DENSITY,
+        young_modulus=WALL_E,
+        poisson=WALL_NU,
+        h_base=float(wall_info["h_base"]),
+        max_ref_level=MAX_REF_LEVEL,
+        load_velocity=projectile_velocity,
+        tensile_strength=WALL_TENSILE_STRENGTH,
+        use_refined_size=TIME_STEP_USE_REFINED_SIZE,
+        policy=TIME_STEP_POLICY,
+        wave_speed=TIME_STEP_WAVE_SPEED,
+        cfl_safety=TIME_STEP_CFL_SAFETY,
+        load_safety=TIME_STEP_LOAD_SAFETY,
+    )
+    projectile_time_step = estimate_timestep(
+        density=PROJECTILE_DENSITY,
+        young_modulus=PROJECTILE_E,
+        poisson=PROJECTILE_NU,
+        h_base=float(projectile_info["h_base"]),
+        max_ref_level=PROJECTILE_MAX_REF_LEVEL,
+        load_velocity=projectile_velocity,
+        tensile_strength=PROJECTILE_TENSILE_STRENGTH,
+        use_refined_size=TIME_STEP_USE_REFINED_SIZE,
+        policy=TIME_STEP_POLICY,
+        wave_speed=TIME_STEP_WAVE_SPEED,
+        cfl_safety=TIME_STEP_CFL_SAFETY,
+        load_safety=TIME_STEP_LOAD_SAFETY,
+    )
+    dt_physics = min(wall_time_step.recommended_dt, projectile_time_step.recommended_dt)
+    steps_per_export = max(1, int(DT_RENDER / dt_physics))
+    headless_steps = max(1, int(np.ceil(TARGET_SIM_DURATION / dt_physics)))
+
     assemblies = [wall, projectile]
     all_bodies, all_bonds = _flatten_with_global_bond_indices(assemblies)
     for idx, body in enumerate(all_bodies):
@@ -532,11 +569,15 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
         f"Impact axis: {_axis_label(impact_axis)} "
         f"(face={impact_face}, v0={projectile_velocity.tolist()}, gap={initial_gap:.4f} m)"
     )
+    print(
+        f"Time step: {dt_physics:.6e} s "
+        f"(wall={wall_time_step.recommended_dt:.6e}, projectile={projectile_time_step.recommended_dt:.6e})"
+    )
 
     return SimulationSetup(
         bodies=all_bodies,
         constraints=all_bonds,
-        dt=DT_PHYSICS,
+        dt=dt_physics,
         iterations=ITER,
         gravity=GRAV,
         friction=FRICTION,
@@ -564,9 +605,10 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
             "projectile_scale": projectile_info["scale"],
             "wall_raw_extents": wall_info["raw_extents"],
             "projectile_raw_extents": projectile_info["raw_extents"],
-            "dt_physics": DT_PHYSICS,
+            "dt_physics": dt_physics,
             "dt_render": DT_RENDER,
             "iterations": ITER,
+            "target_sim_duration_s": TARGET_SIM_DURATION,
             "impact_velocity_m_per_s": float(IMPACT_VELOCITY),
             "impact_velocity_vector_m_per_s": projectile_velocity.tolist(),
             "impact_axis": _axis_label(impact_axis),
@@ -597,10 +639,12 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
             "projectile_tensile_strength": PROJECTILE_TENSILE_STRENGTH,
             "projectile_fracture_toughness": PROJECTILE_FRACTURE_TOUGHNESS,
             "wall_scale_candidates": wall_scale_candidates.tolist(),
+            **{f"wall_{key}": value for key, value in wall_time_step.to_metadata().items()},
+            **{f"projectile_{key}": value for key, value in projectile_time_step.to_metadata().items()},
         },
-        headless_steps=STEPS,
+        headless_steps=headless_steps,
         headless_kwargs={
-            "steps_per_export": STEPS_PER_EXPORT,
+            "steps_per_export": steps_per_export,
             "show_progress": True,
         },
     )

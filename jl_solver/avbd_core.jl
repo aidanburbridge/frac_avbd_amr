@@ -708,7 +708,7 @@ function init_simulation(
                 bond_break_steps = clamp(calc_steps, 3, 50)
             end
 
-            bond = BondConstraint(bA, bB, pA, pB, n_w, kn, kt, area, tensile, Gc, damp_val)
+            bond = BondConstraint(i - 1, bA, bB, pA, pB, n_w, kn, kt, area, tensile, Gc, damp_val)
             bond.max_break_steps = bond_break_steps
 
             # Kelvin-Voigt

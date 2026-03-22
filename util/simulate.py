@@ -21,6 +21,7 @@ from util.vtk_exporter import VTKExporter
 from util.engine import SimulationSetup, build_solver, run_headless
 
 DEFAULT_RNG_SEED = 12345
+FRAME_MAGIC = b"AVB2"
 
 # Path helper
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -142,11 +143,12 @@ def _save_metadata(
 
 class DummyBody:
     """Helper to structure raw data for the VTK exporter"""
-    def __init__(self, pos, quat, size, assembly_id):
+    def __init__(self, pos, quat, size, assembly_id, body_id=None):
         self.pos = pos
         self.quat = quat
         self.size = size
         self.assembly_id = assembly_id
+        self.body_id = int(body_id) if body_id is not None else None
         
     @property
     def position(self): return np.concatenate([self.pos, self.quat])
@@ -168,7 +170,7 @@ def convert_results(run_dir: Path):
     raw_dir = run_dir / "raw"
     vtk_dir = run_dir / "vtk"
     
-    files = sorted(list(raw_dir.glob("*.bin")))
+    files = sorted(list(raw_dir.glob("frame_*.bin")))
     if not files: return
 
     print(f"\n[Exporter] Converting {len(files)} frames to VTK...")
@@ -179,14 +181,60 @@ def convert_results(run_dir: Path):
     for csv_path in energy_files:
         shutil.copy2(csv_path, vtk_dir / csv_path.name)
 
+    bond_meta_path = raw_dir / "bond_meta.bin"
+    if bond_meta_path.exists():
+        shutil.copy2(bond_meta_path, vtk_dir / bond_meta_path.name)
+
     
     # Reuse buffers to reduce allocs
     dt_head = np.dtype('i4,i4,f4') # n_bodies, n_bonds, dt
     dt_body = np.dtype([('p','3f4'),('q','4f4'),('s','3f4'),('id','i4'),('str','6f4')])
+    dt_body_v2 = np.dtype([('p','3f4'),('q','4f4'),('s','3f4'),('body_id','i4'),('assembly_id','i4'),('str','6f4')])
+    dt_bond_v2 = np.dtype([
+        ('bond_id', 'i4'),
+        ('bodyA_id', 'i4'),
+        ('bodyB_id', 'i4'),
+        ('C', '3f4'),
+        ('rest', '3f4'),
+        ('penalty_k', '3f4'),
+        ('damage', 'f4'),
+        ('is_broken', 'u1'),
+        ('is_cohesive', 'u1'),
+        ('_pad', 'u2'),
+    ])
 
     for f_path in tqdm(files, unit="frame"):
         with open(f_path, "rb") as f:
-            head = np.frombuffer(f.read(12), dtype=dt_head, count=1)[0]
+            prefix = f.read(4)
+            if prefix == FRAME_MAGIC:
+                n_bod, n_bnd, _dt = struct.unpack("iif", f.read(12))
+                raw_b = np.frombuffer(f.read(n_bod * dt_body_v2.itemsize), dtype=dt_body_v2)
+                bodies = [
+                    DummyBody(b['p'], b['q'], b['s'], b['assembly_id'], body_id=b['body_id'])
+                    for b in raw_b
+                ]
+                stress = raw_b['str']
+
+                bonds = []
+                if n_bnd > 0:
+                    bond_bytes = f.read(n_bnd * dt_bond_v2.itemsize)
+                    raw_bd = np.frombuffer(bond_bytes, dtype=dt_bond_v2)
+                    bonds = np.column_stack((
+                        raw_bd['bond_id'],
+                        raw_bd['bodyA_id'],
+                        raw_bd['bodyB_id'],
+                        raw_bd['C'],
+                        raw_bd['rest'],
+                        raw_bd['penalty_k'],
+                        raw_bd['damage'],
+                        raw_bd['is_broken'],
+                        raw_bd['is_cohesive'],
+                    ))
+
+                exporter.export(bodies, stress, bonds)
+                continue
+
+            head = np.frombuffer(prefix + f.read(8), dtype=dt_head, count=1)[0]
             n_bod, n_bnd = head[0], head[1]
 
             # Read Bodies

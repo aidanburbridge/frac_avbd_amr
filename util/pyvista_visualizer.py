@@ -875,6 +875,9 @@ def run_solver_headless(
         export_path.mkdir(parents=True, exist_ok=True)
         print(f"[data export] Binary export enabled, set to: {export_path}")
 
+        if hasattr(solver, "write_bond_metadata"):
+            solver.write_bond_metadata(str(export_path / "bond_meta.bin"))
+
         solver.write_frame(str(export_path / "frame_0000.bin"))
         if hasattr(solver, "write_energy_csv"):
             solver.write_energy_csv(str(export_path / "energy_0000.csv"), 0)

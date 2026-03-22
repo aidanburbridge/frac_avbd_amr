@@ -151,6 +151,7 @@ const TARGET_DAMAGE_PER_FRAME = 0.25
 const MAX_DAMAGE_RATE = TARGET_DAMAGE_PER_FRAME / SIM_DT_ESTIMATE
 
 mutable struct BondConstraint
+    id::Int
     bodyA::Body
     bodyB::Body
 
@@ -187,6 +188,7 @@ mutable struct BondConstraint
     k_eff::Vec3
 
     # Material config/values
+    area::Float64
     stiffness::Vec3 # base material stiffness (E) will NOT be damaged, use for compression
     k_min::Vec3
     k_max::Vec3
@@ -206,7 +208,7 @@ mutable struct BondConstraint
     is_active::Bool
 
 
-    function BondConstraint(bA::Body, bB::Body, pA::Vec3, pB::Vec3, n_world::Vec3, kn::Float64, kt::Float64, area::Float64, tensile::Float64, Gc::Float64, damp_val::Float64=0.0)
+    function BondConstraint(bond_id::Int, bA::Body, bB::Body, pA::Vec3, pB::Vec3, n_world::Vec3, kn::Float64, kt::Float64, area::Float64, tensile::Float64, Gc::Float64, damp_val::Float64=0.0)
 
         d_n0 = (tensile * area) / kn
         d_s0 = (tensile * area) / kt
@@ -245,13 +247,13 @@ mutable struct BondConstraint
         # AMR
         active = true
 
-        new(bA, bB,
+        new(bond_id, bA, bB,
             pA, pB, n_loc, t1_loc, t2_loc,
             zeros_Vec3, zeros_J, zeros_J,
             lambda, penalty_k, fracture,
             zeros_Vec3, false, false, false, 0.0,
             0.0, 0.0, 0.0, stiff,
-            stiff, kmin, kmax, fmin, fmax, limits,
+            area, stiff, kmin, kmax, fmin, fmax, limits,
             break_counter, max_break_steps, viscosity, zeros_Vec3, active)
     end
 end

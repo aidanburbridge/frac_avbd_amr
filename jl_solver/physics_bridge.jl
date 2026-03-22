@@ -14,6 +14,9 @@ include("avbd_core.jl")
 using .AVBDCore
 using .Maths
 
+const FRAME_MAGIC = "AVB2"
+const BOND_META_MAGIC = "ABM1"
+
 # --- Interface Functions ---
 
 function init_system(
@@ -101,13 +104,14 @@ function write_frame(sim::AVBDCore.SimulationState, filename::String)
         n_bodies = length(active_body_indices)
         n_bonds = size(bond_data, 1)
 
+        write(io, codeunits(FRAME_MAGIC))
         write(io, Int32(n_bodies))
         write(io, Int32(n_bonds))
 
         # Time
         write(io, Float32(sim.dt))
 
-        # Body positional data + per-body stress (68 bytes per body)
+        # Body positional data + IDs + per-body stress (72 bytes per body)
         for (local_idx, body_idx) in enumerate(active_body_indices)
             b = sim.bodies[body_idx]
             # Position
@@ -126,6 +130,9 @@ function write_frame(sim::AVBDCore.SimulationState, filename::String)
             write(io, Float32(b.size[2]))
             write(io, Float32(b.size[3]))
 
+            # Persistent body ID
+            write(io, Int32(b.id))
+
             # ID
             write(io, Int32(b.assembly_id))
 
@@ -138,16 +145,24 @@ function write_frame(sim::AVBDCore.SimulationState, filename::String)
             write(io, Float32(stress_data[local_idx, 6]))
         end
 
-        # Bond data (strain/damage/stiffness)
+        # Raw bond state for post-processing
         for i in 1:n_bonds
             write(io, Int32(bond_data[i, 1]))
             write(io, Int32(bond_data[i, 2]))
+            write(io, Int32(bond_data[i, 3]))
             write(io, Float32(bond_data[i, 4]))
-            write(io, Float32(bond_data[i, 3]))
             write(io, Float32(bond_data[i, 5]))
             write(io, Float32(bond_data[i, 6]))
             write(io, Float32(bond_data[i, 7]))
             write(io, Float32(bond_data[i, 8]))
+            write(io, Float32(bond_data[i, 9]))
+            write(io, Float32(bond_data[i, 10]))
+            write(io, Float32(bond_data[i, 11]))
+            write(io, Float32(bond_data[i, 12]))
+            write(io, Float32(bond_data[i, 13]))
+            write(io, UInt8(bond_data[i, 14] != 0.0))
+            write(io, UInt8(bond_data[i, 15] != 0.0))
+            write(io, UInt16(0))
         end
     end
 end
@@ -178,13 +193,26 @@ function write_energy_csv(sim::AVBDCore.SimulationState, filename::String, frame
     end
 end
 
+function write_bond_metadata(sim::AVBDCore.SimulationState, filename::String)
+    open(filename, "w") do io
+        write(io, codeunits(BOND_META_MAGIC))
+        write(io, Int32(length(sim.bond_constraints)))
+        for bond in sim.bond_constraints
+            write(io, Int32(bond.id))
+            write(io, Int32(bond.bodyA.id))
+            write(io, Int32(bond.bodyB.id))
+            write(io, Float32(bond.area))
+        end
+    end
+end
+
 function get_visualization_data(sim::AVBDCore.SimulationState)
     # Active bodies are sourced from sim.active_body_ids (precomputed in solver)
     active_body_indices = sim.active_body_ids
 
     # Reuse the same solver-side stress accumulation that drives
     # stress-based AMR so the exported field matches the criterion input.
-    stress_data, id_to_local = AVBDCore.Criteria.compute_body_stress_data(sim)
+    stress_data, _ = AVBDCore.Criteria.compute_body_stress_data(sim)
 
     # Active bonds for metadata: include broken bonds so exported damage can reach 1.0.
     active_bond_count = 0
@@ -197,7 +225,7 @@ function get_visualization_data(sim::AVBDCore.SimulationState)
         end
     end
 
-    bond_data = zeros(FLOAT, active_bond_count, 8)
+    bond_data = zeros(FLOAT, active_bond_count, 15)
 
     # Reuse an active-bond pass to emit metadata (including broken bonds).
     bond_out_idx = 0
@@ -212,33 +240,22 @@ function get_visualization_data(sim::AVBDCore.SimulationState)
         bA = bond.bodyA
         bB = bond.bodyB
 
-        rest_len = sqrt(bond.rest[1]^2 + bond.rest[2]^2 + bond.rest[3]^2)
-        hA = minimum(bA.size)
-        hB = minimum(bB.size)
-        char_len = max(rest_len, 0.5 * (hA + hB), 1e-12)
-        eff_strain = if bond.is_broken
-            max(bond.max_eff_strain, 0.0)
-        else
-            strain_n = bond.C[1] / char_len
-            strain_t1 = bond.C[2] / char_len
-            strain_t2 = bond.C[3] / char_len
-            sqrt(strain_n^2 + strain_t1^2 + strain_t2^2)
-        end
-
-        damage_val = bond.is_broken ? 1.0 : clamp(bond.damage, 0.0, 1.0)
-        k_eff_n = bond.is_broken ? 0.0 : bond.k_eff[1]
-        k_eff_t1 = bond.is_broken ? 0.0 : bond.k_eff[2]
-        k_eff_t2 = bond.is_broken ? 0.0 : bond.k_eff[3]
-
-        # Bond metadata
-        bond_data[bond_out_idx, 1] = Float64(id_to_local[bA.id + 1] - 1)
-        bond_data[bond_out_idx, 2] = Float64(id_to_local[bB.id + 1] - 1)
-        bond_data[bond_out_idx, 3] = eff_strain
-        bond_data[bond_out_idx, 4] = max(bond.max_eff_strain, eff_strain)
-        bond_data[bond_out_idx, 5] = damage_val
-        bond_data[bond_out_idx, 6] = k_eff_n
-        bond_data[bond_out_idx, 7] = k_eff_t1
-        bond_data[bond_out_idx, 8] = k_eff_t2
+        # Raw bond state
+        bond_data[bond_out_idx, 1] = Float64(bond.id)
+        bond_data[bond_out_idx, 2] = Float64(bA.id)
+        bond_data[bond_out_idx, 3] = Float64(bB.id)
+        bond_data[bond_out_idx, 4] = bond.C[1]
+        bond_data[bond_out_idx, 5] = bond.C[2]
+        bond_data[bond_out_idx, 6] = bond.C[3]
+        bond_data[bond_out_idx, 7] = bond.rest[1]
+        bond_data[bond_out_idx, 8] = bond.rest[2]
+        bond_data[bond_out_idx, 9] = bond.rest[3]
+        bond_data[bond_out_idx, 10] = bond.penalty_k[1]
+        bond_data[bond_out_idx, 11] = bond.penalty_k[2]
+        bond_data[bond_out_idx, 12] = bond.penalty_k[3]
+        bond_data[bond_out_idx, 13] = clamp(bond.damage, 0.0, 1.0)
+        bond_data[bond_out_idx, 14] = bond.is_broken ? 1.0 : 0.0
+        bond_data[bond_out_idx, 15] = bond.is_cohesive ? 1.0 : 0.0
     end
     return stress_data, bond_data
 end
