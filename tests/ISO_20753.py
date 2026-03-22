@@ -7,7 +7,13 @@ import geometry.voxelizer as vox
 import geometry.octree as oct
 import numpy as np
 
-from util.timestep import calc_damping, estimate_timestep
+from util.timestep import (
+    calc_damping,
+    calc_num_physics_steps_for_target_displacement,
+    calc_target_duration,
+    estimate_timestep,
+    print_timestep_schedule,
+)
 from util.voxel_assembly import VoxelAssembly
 from util.simulate import SimulationSetup
 
@@ -33,14 +39,9 @@ TENSILE_STRENGTH = 80e5
 FRACTURE_TOUGHNESS = 5e4
 DENSITY = 1150.0
 PENALTY_GAIN = 1e6
-STEPS = 3500
+TARGET_PULL_DISPLACEMENT = 0.03 * LENGTH
 ZETA_DAMP = 0.1
 REFINE_STRESS_THRESHOLD = 0.05 * TENSILE_STRENGTH
-TIME_STEP_POLICY = "load"
-TIME_STEP_USE_REFINED_SIZE = False
-TIME_STEP_WAVE_SPEED = "dilatational"
-TIME_STEP_CFL_SAFETY = 0.30
-TIME_STEP_LOAD_SAFETY = 0.25
 
 PYTHON_SOLVER_PARAMS = {
     "mu": 0.2,
@@ -74,14 +75,15 @@ def build_setup() -> SimulationSetup:
         max_ref_level=MAX_REF_LEVEL,
         load_velocity=[0.0, 0.0, PULL_RATE],
         tensile_strength=TENSILE_STRENGTH,
-        use_refined_size=TIME_STEP_USE_REFINED_SIZE,
-        policy=TIME_STEP_POLICY,
-        wave_speed=TIME_STEP_WAVE_SPEED,
-        cfl_safety=TIME_STEP_CFL_SAFETY,
-        load_safety=TIME_STEP_LOAD_SAFETY,
     )
     dt_physics = time_step.recommended_dt
     steps_per = max(1, int(DT_RENDER / dt_physics))
+    target_duration = calc_target_duration(TARGET_PULL_DISPLACEMENT, PULL_RATE)
+    headless_steps = calc_num_physics_steps_for_target_displacement(
+        TARGET_PULL_DISPLACEMENT,
+        dt_physics,
+        PULL_RATE,
+    )
 
     def _contains_fn(pts: np.ndarray) -> np.ndarray:
         return vox._contains_points_chunked(
@@ -113,11 +115,7 @@ def build_setup() -> SimulationSetup:
     print(f"DEBUG: Instantiated {len(boxes)} bodies")
     print(f"Number of beam bonds: {len(beam_bonds)}")
     print(f"The damping value used for this sim: {visco_val}")
-    print(
-        f"Time step: {dt_physics:.6e} s "
-        f"({time_step.chosen_limit}; wave={time_step.dt_wave:.6e}, "
-        f"load={time_step.dt_load if time_step.dt_load is not None else float('nan'):.6e})"
-    )
+    print_timestep_schedule(dt_physics, steps_per, headless_steps)
 
     dog_bone = VoxelAssembly(boxes, beam_bonds)
 
@@ -159,9 +157,11 @@ def build_setup() -> SimulationSetup:
             "zeta_damp": ZETA_DAMP,
             "h_base": phys_h,
             "refine_stress_threshold": REFINE_STRESS_THRESHOLD,
+            "target_pull_displacement": TARGET_PULL_DISPLACEMENT,
+            "target_duration_s": target_duration,
             **time_step.to_metadata(),
         },
-        headless_steps=STEPS,
+        headless_steps=headless_steps,
         headless_kwargs={
             "steps_per_export": steps_per,
             "show_progress": True,

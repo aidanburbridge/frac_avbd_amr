@@ -10,7 +10,7 @@ import geometry.octree as oct
 import geometry.voxelizer as vox
 from geometry.bond_data import BondData
 from util.pyvista_visualizer import SimulationSetup
-from util.timestep import estimate_timestep
+from util.timestep import estimate_timestep, print_timestep_schedule
 from util.voxel_assembly import VoxelAssembly
 
 
@@ -82,17 +82,11 @@ MAX_REF_LEVEL = 1
 PROJECTILE_MAX_REF_LEVEL = 0
 REFINE_STRESS_THRESHOLD = 0.15 * WALL_TENSILE_STRENGTH
 
-DT_RENDER = 1 / 1000
-ITER = 120
+DT_RENDER = 1 / 100
+ITER = 50
 GRAV = 0.0
 FRICTION = 0.0
-STEPS = 200
-TARGET_SIM_DURATION = 5.0e-6 * STEPS
-TIME_STEP_POLICY = "min"
-TIME_STEP_USE_REFINED_SIZE = True
-TIME_STEP_WAVE_SPEED = "dilatational"
-TIME_STEP_CFL_SAFETY = 0.30
-TIME_STEP_LOAD_SAFETY = 0.25
+TARGET_SIM_DURATION = 1.0e-4
 
 PYTHON_SOLVER_PARAMS = {
     "mu": 0.0,
@@ -511,11 +505,6 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
         max_ref_level=MAX_REF_LEVEL,
         load_velocity=projectile_velocity,
         tensile_strength=WALL_TENSILE_STRENGTH,
-        use_refined_size=TIME_STEP_USE_REFINED_SIZE,
-        policy=TIME_STEP_POLICY,
-        wave_speed=TIME_STEP_WAVE_SPEED,
-        cfl_safety=TIME_STEP_CFL_SAFETY,
-        load_safety=TIME_STEP_LOAD_SAFETY,
     )
     projectile_time_step = estimate_timestep(
         density=PROJECTILE_DENSITY,
@@ -525,11 +514,6 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
         max_ref_level=PROJECTILE_MAX_REF_LEVEL,
         load_velocity=projectile_velocity,
         tensile_strength=PROJECTILE_TENSILE_STRENGTH,
-        use_refined_size=TIME_STEP_USE_REFINED_SIZE,
-        policy=TIME_STEP_POLICY,
-        wave_speed=TIME_STEP_WAVE_SPEED,
-        cfl_safety=TIME_STEP_CFL_SAFETY,
-        load_safety=TIME_STEP_LOAD_SAFETY,
     )
     dt_physics = min(wall_time_step.recommended_dt, projectile_time_step.recommended_dt)
     steps_per_export = max(1, int(DT_RENDER / dt_physics))
@@ -569,10 +553,7 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
         f"Impact axis: {_axis_label(impact_axis)} "
         f"(face={impact_face}, v0={projectile_velocity.tolist()}, gap={initial_gap:.4f} m)"
     )
-    print(
-        f"Time step: {dt_physics:.6e} s "
-        f"(wall={wall_time_step.recommended_dt:.6e}, projectile={projectile_time_step.recommended_dt:.6e})"
-    )
+    print_timestep_schedule(dt_physics, steps_per_export, headless_steps)
 
     return SimulationSetup(
         bodies=all_bodies,

@@ -3,7 +3,13 @@ import geometry.octree as oct
 import numpy as np
 
 from geometry.bond_data import BondData
-from util.timestep import calc_damping, estimate_timestep
+from util.timestep import (
+    calc_damping,
+    calc_num_physics_steps_for_target_displacement,
+    calc_target_duration,
+    estimate_timestep,
+    print_timestep_schedule,
+)
 from util.voxel_assembly import VoxelAssembly
 from util.simulate import SimulationSetup
 
@@ -41,17 +47,12 @@ TENSILE_STRENGTH = 80e5
 FRACTURE_TOUGHNESS = 5e4
 DENSITY = 1150.0
 PENALTY_GAIN = 1e6
-STEPS = 1000
+TARGET_INDENTER_DISPLACEMENT = TOP_GAP + (0.10 * BEAM_HEIGHT)
 ZETA_DAMP = 0.1
 
 # Per-body AMR caps
 BEAM_MAX_REF_LEVEL = 2
 ROLLER_MAX_REF_LEVEL = 0
-TIME_STEP_POLICY = "load"
-TIME_STEP_USE_REFINED_SIZE = False
-TIME_STEP_WAVE_SPEED = "dilatational"
-TIME_STEP_CFL_SAFETY = 0.30
-TIME_STEP_LOAD_SAFETY = 0.25
 
 PYTHON_SOLVER_PARAMS = {
     "mu": 0.3,
@@ -262,11 +263,6 @@ def build_setup() -> SimulationSetup:
         max_ref_level=BEAM_MAX_REF_LEVEL,
         load_velocity=[0.0, 0.0, abs(PULL_RATE)],
         tensile_strength=TENSILE_STRENGTH,
-        use_refined_size=TIME_STEP_USE_REFINED_SIZE,
-        policy=TIME_STEP_POLICY,
-        wave_speed=TIME_STEP_WAVE_SPEED,
-        cfl_safety=TIME_STEP_CFL_SAFETY,
-        load_safety=TIME_STEP_LOAD_SAFETY,
     )
     roller_time_step = estimate_timestep(
         density=DENSITY,
@@ -276,23 +272,29 @@ def build_setup() -> SimulationSetup:
         max_ref_level=ROLLER_MAX_REF_LEVEL,
         load_velocity=None,
         tensile_strength=TENSILE_STRENGTH,
-        use_refined_size=TIME_STEP_USE_REFINED_SIZE,
-        policy="wave",
-        wave_speed=TIME_STEP_WAVE_SPEED,
-        cfl_safety=TIME_STEP_CFL_SAFETY,
-        load_safety=TIME_STEP_LOAD_SAFETY,
     )
     dt_physics = beam_time_step.recommended_dt
     steps_per = max(1, int(DT_RENDER / dt_physics))
+    target_duration = calc_target_duration(TARGET_INDENTER_DISPLACEMENT, PULL_RATE)
+    headless_steps = calc_num_physics_steps_for_target_displacement(
+        TARGET_INDENTER_DISPLACEMENT,
+        dt_physics,
+        PULL_RATE,
+    )
 
     print(f"Fixture bodies: beam={len(beam.bodies)} left={len(left_support.bodies)} right={len(right_support.bodies)} top={len(top_indenter.bodies)}")
     print(f"Fixture bonds: total={len(all_bonds)}")
     print(
         f"Beam time step: {dt_physics:.6e} s "
-        f"({beam_time_step.chosen_limit}; wave={beam_time_step.dt_wave:.6e}, "
+        f"(wave={beam_time_step.dt_wave:.6e}, "
         f"load={beam_time_step.dt_load if beam_time_step.dt_load is not None else float('nan'):.6e})"
     )
-    print(f"Roller wave limit: {roller_time_step.dt_wave:.6e} s")
+    print(
+        f"Roller time step: {roller_time_step.recommended_dt:.6e} s "
+        f"(wave={roller_time_step.dt_wave:.6e}, "
+        f"load={roller_time_step.dt_load if roller_time_step.dt_load is not None else float('nan'):.6e})"
+    )
+    print_timestep_schedule(dt_physics, steps_per, headless_steps)
 
     return SimulationSetup(
         bodies=all_bodies,
@@ -320,10 +322,12 @@ def build_setup() -> SimulationSetup:
             "zeta_damp": ZETA_DAMP,
             "beam_voxel_h": beam_h,
             "roller_voxel_h": roller_h,
+            "target_indenter_displacement_m": TARGET_INDENTER_DISPLACEMENT,
+            "target_duration_s": target_duration,
             **{f"beam_{key}": value for key, value in beam_time_step.to_metadata().items()},
             **{f"roller_{key}": value for key, value in roller_time_step.to_metadata().items()},
         },
-        headless_steps=STEPS,
+        headless_steps=headless_steps,
         headless_kwargs={
             "steps_per_export": steps_per,
             "show_progress": True,

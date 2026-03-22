@@ -9,7 +9,12 @@ import numpy as np
 import geometry.octree as oct
 import geometry.voxelizer as vox
 from util.pyvista_visualizer import SimulationSetup
-from util.timestep import estimate_timestep
+from util.timestep import (
+    calc_num_physics_steps_for_target_displacement,
+    calc_target_duration,
+    estimate_timestep,
+    print_timestep_schedule,
+)
 from util.voxel_assembly import VoxelAssembly
 
 
@@ -45,13 +50,8 @@ DT_RENDER = 1 / 60
 ITER = 80
 GRAV = 0.0
 FRICTION = 0.0
-STEPS = 200
+TARGET_LOAD_DISPLACEMENT = 1 * OUTER_DIM
 MAX_REF_LEVEL = 2
-TIME_STEP_POLICY = "load"
-TIME_STEP_USE_REFINED_SIZE = False
-TIME_STEP_WAVE_SPEED = "dilatational"
-TIME_STEP_CFL_SAFETY = 0.30
-TIME_STEP_LOAD_SAFETY = 0.25
 
 PYTHON_SOLVER_PARAMS = {
     "mu": 0.2,
@@ -255,14 +255,15 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
         max_ref_level=MAX_REF_LEVEL,
         load_velocity=LOAD_VELOCITY,
         tensile_strength=TENSILE_STRENGTH,
-        use_refined_size=TIME_STEP_USE_REFINED_SIZE,
-        policy=TIME_STEP_POLICY,
-        wave_speed=TIME_STEP_WAVE_SPEED,
-        cfl_safety=TIME_STEP_CFL_SAFETY,
-        load_safety=TIME_STEP_LOAD_SAFETY,
     )
     dt_physics = time_step.recommended_dt
     steps_per_export = max(1, int(DT_RENDER / dt_physics))
+    target_duration = calc_target_duration(TARGET_LOAD_DISPLACEMENT, LOAD_VELOCITY)
+    headless_steps = calc_num_physics_steps_for_target_displacement(
+        TARGET_LOAD_DISPLACEMENT,
+        dt_physics,
+        LOAD_VELOCITY,
+    )
 
     print(f"L-bar voxels: {len(lbar.bodies)}")
     print(f"L-bar bonds: {len(bonds)}")
@@ -277,11 +278,7 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
             f"Load voxels: {len(load_targets)} "
             f"(x=[{x_lo:.4f}, {x_hi:.4f}], z=[{z_inner:.4f}, {z_hi:.4f}])"
         )
-    print(
-        f"Time step: {dt_physics:.6e} s "
-        f"({time_step.chosen_limit}; wave={time_step.dt_wave:.6e}, "
-        f"load={time_step.dt_load if time_step.dt_load is not None else float('nan'):.6e})"
-    )
+    print_timestep_schedule(dt_physics, steps_per_export, headless_steps)
 
     return SimulationSetup(
         bodies=lbar.bodies,
@@ -307,11 +304,13 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
             "refine_stress_threshold": REFINE_STRESS_THRESHOLD,
             "fixed_voxel_ids": list(explicit_fixed_ids),
             "load_voxel_ids": list(explicit_load_ids),
+            "target_load_displacement": TARGET_LOAD_DISPLACEMENT,
+            "target_duration_s": target_duration,
             "dt_physics": dt_physics,
             "dt_render": DT_RENDER,
             **time_step.to_metadata(),
         },
-        headless_steps=STEPS,
+        headless_steps=headless_steps,
         headless_kwargs={
             "steps_per_export": steps_per_export,
             "show_progress": True,
