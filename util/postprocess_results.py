@@ -405,6 +405,12 @@ def _finite_max(values: np.ndarray) -> float:
     return float(np.max(finite))
 
 
+def _drop_row_keys(rows: list[dict[str, Any]], keys: tuple[str, ...]) -> None:
+    for row in rows:
+        for key in keys:
+            row.pop(key, None)
+
+
 def _bond_dump_rows(
     *,
     frame: int,
@@ -464,6 +470,8 @@ def _write_thesis_guide(
     *,
     load_displacement_available: bool,
     exact_force_caps_available: bool,
+    include_bond_strain_quantities: bool,
+    include_damage_process_zone_quantities: bool,
     bond_strain_length_note: str | None,
 ) -> None:
     lines = [
@@ -472,14 +480,9 @@ def _write_thesis_guide(
         "| Quantity | Meaning | Units | Allowed wording | Forbidden wording |",
         "| --- | --- | --- | --- | --- |",
         "| `peak_stress_proxy` | Maximum principal tensile stress proxy from exported `Stress_Tensor` | stress units of the solver setup | `max principal tensile stress proxy`, `tensile localization indicator` | `true Cauchy stress`, `physical tensile stress in the specimen` |",
-        "| `eps_n` | Bond-normal separation normalized by a per-bond characteristic length | dimensionless | `cohesive-bond normal separation ratio`, `bond-normal strain-like quantity` | `continuum normal strain field` |",
-        "| `gamma_t1`, `gamma_t2`, `gamma_eq` | Bond-tangential separation ratios normalized by a per-bond characteristic length | dimensionless | `cohesive-bond shear separation`, `bond-local tangential deformation` | `continuum shear strain field` |",
         "| `sigma_n`, `tau_t1`, `tau_t2`, `tau_eq` | Cohesive-bond tractions from capped row forces divided by exported bond area | traction units of the solver setup | `cohesive-bond traction`, `interface traction` | `continuum stress` |",
         "| `crack_area_proxy` | Sum of areas of broken bonds | area | `crack area proxy`, `fractured interface area proxy` | `exact crack surface area` |",
-        "| `process_zone_area_proxy` | Sum of areas of damaged but unbroken bonds | area | `process-zone area proxy` | `exact damage-zone area` |",
-        "| `damage_positive_bond_count` | Number of bonds with positive exported damage, including broken bonds | count | `damage-positive bond count` | `damaged-but-unbroken bond count`, `process-zone bond count` |",
         "| `broken_bond_count` | Number of broken bonds in the saved frame | count | `broken bond count` | `number of cracks` |",
-        "| `damaged_bond_count` | Number of damaged but not yet broken bonds in the saved frame | count | `damaged cohesive-bond count` | `crack count` |",
         "| `load_displacement_along_loading_axis`, `load_displacement_magnitude` | Reconstructed prescribed/loading-point displacement from tracked load-group body motion | displacement in exported coordinate units | `prescribed displacement`, `loading-point displacement`, `kinematic displacement history` | `force-displacement response`, `structural load-displacement curve` |",
         "",
         "## Unsupported or Conditionally Supported Quantities",
@@ -489,6 +492,31 @@ def _write_thesis_guide(
         "- A true continuum stress field is not available; the exported tensor must be treated as a stress proxy only.",
         "- Contact stress is not reconstructable from the current exports.",
     ]
+
+    if include_bond_strain_quantities:
+        lines.insert(
+            5,
+            "| `eps_n` | Bond-normal separation normalized by a per-bond characteristic length | dimensionless | `cohesive-bond normal separation ratio`, `bond-normal strain-like quantity` | `continuum normal strain field` |",
+        )
+        lines.insert(
+            6,
+            "| `gamma_t1`, `gamma_t2`, `gamma_eq` | Bond-tangential separation ratios normalized by a per-bond characteristic length | dimensionless | `cohesive-bond shear separation`, `bond-local tangential deformation` | `continuum shear strain field` |",
+        )
+
+    if include_damage_process_zone_quantities:
+        insert_at = 8 if include_bond_strain_quantities else 6
+        lines.insert(
+            insert_at,
+            "| `process_zone_area_proxy` | Sum of areas of damaged but unbroken bonds | area | `process-zone area proxy` | `exact damage-zone area` |",
+        )
+        lines.insert(
+            insert_at + 1,
+            "| `damage_positive_bond_count` | Number of bonds with positive exported damage, including broken bonds | count | `damage-positive bond count` | `damaged-but-unbroken bond count`, `process-zone bond count` |",
+        )
+        lines.insert(
+            insert_at + 3,
+            "| `damaged_bond_count` | Number of damaged but not yet broken bonds in the saved frame | count | `damaged cohesive-bond count` | `crack count` |",
+        )
 
     if exact_force_caps_available:
         lines.append("- Exact capped cohesive-bond row forces are reconstructable for this run from the exported static bond metadata.")
@@ -500,7 +528,7 @@ def _write_thesis_guide(
     else:
         lines.append("- Load displacement was not reconstructed because the required boundary-group tracking data was not stable across saved frames.")
 
-    if bond_strain_length_note:
+    if include_bond_strain_quantities and bond_strain_length_note:
         lines.append(f"- {bond_strain_length_note}")
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -531,6 +559,8 @@ def analyze_run(
         or run_dir.parent.name
     )
     l_panel_mode = _is_l_panel_benchmark(benchmark_name, metadata)
+    include_bond_strain_quantities = not l_panel_mode
+    include_damage_process_zone_quantities = not l_panel_mode
     bond_strain_length_note: str | None = None
 
     if stress_threshold is None:
@@ -783,6 +813,26 @@ def analyze_run(
     analysis_dir = run_dir / "analysis"
     analysis_dir.mkdir(parents=True, exist_ok=True)
 
+    if not include_bond_strain_quantities:
+        _drop_row_keys(
+            bond_summary_rows,
+            ("max_eps_n", "p95_eps_n", "max_gamma_eq", "p95_gamma_eq"),
+        )
+        _drop_row_keys(
+            final_bond_dump_rows,
+            ("eps_n", "gamma_t1", "gamma_t2", "gamma_eq"),
+        )
+        _drop_row_keys(
+            all_bond_dump_rows,
+            ("eps_n", "gamma_t1", "gamma_t2", "gamma_eq"),
+        )
+
+    if not include_damage_process_zone_quantities:
+        _drop_row_keys(
+            time_history_rows,
+            ("damage_positive_bond_count", "damaged_bond_count", "process_zone_area_proxy"),
+        )
+
     _write_csv(analysis_dir / "time_history.csv", time_history_rows)
     _write_csv(analysis_dir / "bond_summary.csv", bond_summary_rows)
     if bond_dump_mode == "final":
@@ -827,6 +877,8 @@ def analyze_run(
         analysis_dir / "thesis_quantity_guide.md",
         load_displacement_available=load_displacement_available,
         exact_force_caps_available=exact_force_caps_available,
+        include_bond_strain_quantities=include_bond_strain_quantities,
+        include_damage_process_zone_quantities=include_damage_process_zone_quantities,
         bond_strain_length_note=bond_strain_length_note,
     )
 

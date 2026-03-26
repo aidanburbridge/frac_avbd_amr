@@ -30,7 +30,6 @@ SPECIMEN_THICKNESS = 0.1 * MM
 # -------------------- Boundary-condition controls -------------------- #
 BOTTOM_FIX_DEPTH = 0.10 * MM
 TOP_LOAD_DEPTH = 0.10 * MM
-LOAD_VELOCITY = np.array([5.0e-3, 0.0, 0.0], dtype=float)
 # Optional explicit voxel-ID sets from util.selection_tool.
 FIXED_VOXEL_IDS: tuple[int, ...] = ()
 LOAD_VOXEL_IDS: tuple[int, ...] = ()
@@ -55,13 +54,16 @@ FRACTURE_TOUGHNESS = np.sqrt(E_MODULUS * GC_TARGET / (1.0 - NU ** 2))
 # and force-displacement response for the final benchmark target.
 REFINE_STRESS_THRESHOLD = 0.05 * TENSILE_STRENGTH
 
-DT_PHYSICS = 1 / 4000
-DT_RENDER = 1 / 60
+
+LOAD_VELOCITY = np.array([5.0e-4, 0.0, 0.0], dtype=float)
+DT_PHYSICS = 1.2229e-5
+DT_RENDER  = 2.5069e-3
+STEPS      = 40888
+
 STEPS_PER_EXPORT = max(1, int(DT_RENDER / DT_PHYSICS))
-ITER = 120
+ITER = 80
 GRAV = 0.0
 FRICTION = 0.0
-STEPS = 200
 MAX_REF_LEVEL = 2
 
 PYTHON_SOLVER_PARAMS = {

@@ -36,7 +36,7 @@ REPAIR_MESH = True
 # the smallest wall extent is treated as the thickness axis and therefore the
 # impact normal. The remaining two axes span the wall plane.
 IMPACT_FROM_NEGATIVE_THICKNESS_SIDE = True
-INITIAL_PROJECTILE_GAP = 25.0 * MM
+INITIAL_PROJECTILE_GAP = 15.0 * MM
 
 # Keep the wall mostly free; only a narrow rear perimeter frame is fixed to
 # suppress rigid-body drift while leaving the impact face and most of the wall
@@ -78,15 +78,15 @@ PROJECTILE_FRACTURE_TOUGHNESS = 5.0e7
 # first run, then increase resolution and refinement once the setup is stable.
 MAX_REF_LEVEL = 2
 PROJECTILE_MAX_REF_LEVEL = 0
-REFINE_STRESS_THRESHOLD = 0.15 * WALL_TENSILE_STRENGTH
+REFINE_STRESS_THRESHOLD = 0.05 * WALL_TENSILE_STRENGTH
 
-DT_PHYSICS = 5.0e-5
-DT_RENDER = 1 / 200
+DT_PHYSICS = 5.81e-7
+DT_RENDER  = 1.0e-4
 STEPS_PER_EXPORT = max(1, int(DT_RENDER / DT_PHYSICS))
 ITER = 50
 GRAV = 0.0
 FRICTION = 0.0
-STEPS = 20000
+STEPS = 40000
 
 PYTHON_SOLVER_PARAMS = {
     "mu": 0.0,

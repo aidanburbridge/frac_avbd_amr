@@ -22,28 +22,30 @@ ROLLER_DIAMETER = 5.0 * MM
 SUPPORT_SPAN = 30.0 * MM
 
 # Initial clearances
-SUPPORT_GAP = 0.2 * MM
-TOP_GAP = 0.2 * MM
+SUPPORT_GAP = 0.7 * MM
+TOP_GAP = 0.7 * MM
 
 # Voxelization settings (separate per part)
 BEAM_VOXEL_RES = 140
 ROLLER_VOXEL_RES = 90
 
-# Shared solver params
-DT_PHYSICS = 1 / 4000
-DT_RENDER = 1 / 60
+# Solver params
+PULL_RATE  = 2.0e-3
+DT_PHYSICS = 1.5e-4
+DT_RENDER  = 1e-2
+STEPS      = 8000
+
 STEPS_PER = max(1, int(DT_RENDER / DT_PHYSICS))
 ITER = 180
 GRAV = 0.0
 FRICTION = 0.2
-PULL_RATE = 0.002
 E_MODULUS = 2e9
 NU = 0.3
 TENSILE_STRENGTH = 80e5
 FRACTURE_TOUGHNESS = 5e4
+REFINE_STRESS_THRESHOLD = 0.05 * TENSILE_STRENGTH
 DENSITY = 1150.0
 PENALTY_GAIN = 1e6
-STEPS = 1000
 ZETA_DAMP = 0.1
 
 # Per-body AMR caps
@@ -57,8 +59,9 @@ PYTHON_SOLVER_PARAMS = {
     "alpha": 0.95,
     "gamma": 1.0,
     "debug_contacts": False,
+    "criteria_refine_stress_threshold": REFINE_STRESS_THRESHOLD,
+    "criteria_refine_stress_exclude_kinematic": True,
 }
-
 
 def _build_voxel_assembly(
     stl_path: str,
@@ -280,6 +283,7 @@ def build_setup() -> SimulationSetup:
             "zeta_damp": ZETA_DAMP,
             "beam_voxel_h": beam_h,
             "roller_voxel_h": roller_h,
+            "refine_stress_threshold": REFINE_STRESS_THRESHOLD,
             "steps": STEPS,
             "steps_per_export": STEPS_PER,
         },
