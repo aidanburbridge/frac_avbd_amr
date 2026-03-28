@@ -175,7 +175,7 @@ def convert_results(run_dir: Path):
 
     print(f"\n[Exporter] Converting {len(files)} frames to VTK...")
     vtk_dir.mkdir(parents=True, exist_ok=True)
-    exporter = VTKExporter(str(vtk_dir))
+    exporter = VTKExporter(str(vtk_dir), bond_meta_path=raw_dir / "bond_meta.bin")
 
     energy_files = sorted(list(raw_dir.glob("energy_*.csv")))
     for csv_path in energy_files:

@@ -223,7 +223,7 @@ def process_run(run_dir_str):
     vtk_dir.mkdir(parents=True, exist_ok=True)
     
     # Initialize exporter
-    exporter = VTKExporter(str(vtk_dir))
+    exporter = VTKExporter(str(vtk_dir), bond_meta_path=raw_dir / "bond_meta.bin")
     
     files = sorted(list(raw_dir.glob("frame_*.bin")))
     print(f"Processing {len(files)} frames...")

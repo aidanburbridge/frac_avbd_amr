@@ -58,7 +58,15 @@ def main() -> None:
     plots_dir = analysis_dir / "plots"
 
     fig, ax = plt.subplots(figsize=(7, 4))
-    for key in ("kinetic", "bond_potential", "contact_potential", "fracture_work", "mech_energy"):
+    for key in (
+        "kinetic",
+        "bond_potential",
+        "contact_potential",
+        "fracture_work",
+        "viscous_work",
+        "mech_energy",
+        "accounted_energy",
+    ):
         if key in data and np.isfinite(data[key]).any():
             ax.plot(t, data[key], label=key)
     ax.set_xlabel("Time")
@@ -77,24 +85,21 @@ def main() -> None:
     _save_plot(fig, plots_dir / "broken_bonds_vs_time.png")
 
     fig, ax = plt.subplots(figsize=(7, 4))
-    crack_process_lines = 0
-    if "crack_area_proxy" in data:
-        ax.plot(t, data["crack_area_proxy"], label="crack area proxy")
-        crack_process_lines += 1
-    if (
-        "process_zone_area_proxy" in data
-        and np.isfinite(data["process_zone_area_proxy"]).any()
-        and np.any(data["process_zone_area_proxy"] > 0.0)
-    ):
-        ax.plot(t, data["process_zone_area_proxy"], label="process-zone area proxy")
-        crack_process_lines += 1
+    ax.plot(t, data.get("crack_area_proxy", np.zeros_like(t)))
     ax.set_xlabel("Time")
-    ax.set_ylabel("Area proxy")
-    ax.set_title("Crack / Process Zone Area vs Time" if crack_process_lines > 1 else "Crack Area Proxy vs Time")
-    if crack_process_lines:
-        ax.legend()
+    ax.set_ylabel("Crack area proxy")
+    ax.set_title("Crack Area vs Time")
     ax.grid(True, alpha=0.3)
     _save_plot(fig, plots_dir / "crack_area_vs_time.png")
+
+    if "process_zone_area_proxy" in data and np.isfinite(data["process_zone_area_proxy"]).any():
+        fig, ax = plt.subplots(figsize=(7, 4))
+        ax.plot(t, data["process_zone_area_proxy"])
+        ax.set_xlabel("Time")
+        ax.set_ylabel("Process-zone area proxy")
+        ax.set_title("Process Zone Area vs Time")
+        ax.grid(True, alpha=0.3)
+        _save_plot(fig, plots_dir / "process_zone_area_vs_time.png")
 
     fig, ax = plt.subplots(figsize=(7, 4))
     ax.plot(t, data.get("peak_stress_proxy", np.full_like(t, math.nan)))

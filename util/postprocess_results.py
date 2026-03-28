@@ -301,6 +301,33 @@ def _max_principal_proxy(stress6: np.ndarray) -> np.ndarray:
     return np.linalg.eigvalsh(_sym6_to_mats(stress6))[:, -1]
 
 
+def _stress_proxy_components(stress6: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    if stress6.size == 0:
+        empty = np.zeros((0,), dtype=float)
+        return empty.copy(), empty.copy(), empty.copy(), empty.copy()
+
+    principal = np.linalg.eigvalsh(_sym6_to_mats(stress6))[:, -1]
+    xx = stress6[:, 0]
+    yy = stress6[:, 1]
+    zz = stress6[:, 2]
+    xy = stress6[:, 3]
+    yz = stress6[:, 4]
+    zx = stress6[:, 5]
+
+    hydrostatic = (xx + yy + zz) / 3.0
+    sxx = xx - hydrostatic
+    syy = yy - hydrostatic
+    szz = zz - hydrostatic
+    deviatoric_norm = np.sqrt(
+        np.square(sxx)
+        + np.square(syy)
+        + np.square(szz)
+        + 2.0 * (np.square(xy) + np.square(yz) + np.square(zx))
+    )
+    von_mises = np.sqrt(1.5) * deviatoric_norm
+    return principal, von_mises, hydrostatic, deviatoric_norm
+
+
 def _normalized_benchmark_token(value: Any) -> str:
     return "".join(ch for ch in str(value).lower() if ch.isalnum())
 
@@ -405,6 +432,109 @@ def _finite_max(values: np.ndarray) -> float:
     return float(np.max(finite))
 
 
+def _finite_min(values: np.ndarray) -> float:
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return math.nan
+    return float(np.min(finite))
+
+
+def _bond_response_quantities(
+    *,
+    C: np.ndarray,
+    rest: np.ndarray,
+    penalty_k: np.ndarray,
+    area: np.ndarray,
+    f_min: np.ndarray,
+    f_max: np.ndarray,
+    use_area_strain_length: bool,
+) -> dict[str, np.ndarray]:
+    n = int(C.shape[0]) if C.ndim == 2 else 0
+    if n == 0:
+        empty_vec = np.zeros((0,), dtype=float)
+        return {
+            "L0": empty_vec.copy(),
+            "eps_n": empty_vec.copy(),
+            "gamma_t1": empty_vec.copy(),
+            "gamma_t2": empty_vec.copy(),
+            "gamma_eq": empty_vec.copy(),
+            "row_force": np.zeros((0, 3), dtype=float),
+            "sigma_n": empty_vec.copy(),
+            "tau_t1": empty_vec.copy(),
+            "tau_t2": empty_vec.copy(),
+            "tau_eq": empty_vec.copy(),
+            "normal_traction_utilization": empty_vec.copy(),
+            "shear_traction_utilization": empty_vec.copy(),
+            "mixed_mode_traction_utilization": empty_vec.copy(),
+            "caps_mask": np.zeros((0,), dtype=bool),
+        }
+
+    eps = np.finfo(float).eps
+    L0 = np.linalg.norm(rest, axis=1)
+    strain_length = L0
+    if use_area_strain_length:
+        strain_length = np.sqrt(np.clip(area, a_min=0.0, a_max=None))
+    safe_strain_length = np.where(strain_length > eps, strain_length, np.nan)
+
+    normal_sign = np.where(np.abs(rest[:, 0]) > eps, np.sign(rest[:, 0]), 1.0)
+    delta_n = C[:, 0] if use_area_strain_length else normal_sign * C[:, 0]
+    eps_n = delta_n / safe_strain_length
+    gamma_t1 = C[:, 1] / safe_strain_length
+    gamma_t2 = C[:, 2] / safe_strain_length
+    gamma_eq = np.sqrt(np.square(gamma_t1) + np.square(gamma_t2))
+
+    safe_area = np.where(area > eps, area, np.nan)
+    caps_mask = np.isfinite(safe_area) & np.all(np.isfinite(f_min), axis=1) & np.all(np.isfinite(f_max), axis=1)
+
+    row_force = np.full((n, 3), math.nan, dtype=float)
+    sigma_n = np.full((n,), math.nan, dtype=float)
+    tau_t1 = np.full((n,), math.nan, dtype=float)
+    tau_t2 = np.full((n,), math.nan, dtype=float)
+    tau_eq = np.full((n,), math.nan, dtype=float)
+    normal_util = np.full((n,), math.nan, dtype=float)
+    shear_util = np.full((n,), math.nan, dtype=float)
+    mixed_util = np.full((n,), math.nan, dtype=float)
+
+    if np.any(caps_mask):
+        row_force[caps_mask] = np.clip(penalty_k[caps_mask] * C[caps_mask], f_min[caps_mask], f_max[caps_mask])
+        sigma_n[caps_mask] = row_force[caps_mask, 0] / safe_area[caps_mask]
+        tau_t1[caps_mask] = row_force[caps_mask, 1] / safe_area[caps_mask]
+        tau_t2[caps_mask] = row_force[caps_mask, 2] / safe_area[caps_mask]
+        tau_eq[caps_mask] = np.sqrt(np.square(tau_t1[caps_mask]) + np.square(tau_t2[caps_mask]))
+
+        normal_cap = np.where(
+            normal_sign[caps_mask] >= 0.0,
+            np.maximum(f_max[caps_mask, 0], eps),
+            np.maximum(-f_min[caps_mask, 0], eps),
+        )
+        shear_cap_t1 = np.maximum(np.maximum(np.abs(f_min[caps_mask, 1]), np.abs(f_max[caps_mask, 1])), eps)
+        shear_cap_t2 = np.maximum(np.maximum(np.abs(f_min[caps_mask, 2]), np.abs(f_max[caps_mask, 2])), eps)
+        fn_open = np.maximum(0.0, normal_sign[caps_mask] * row_force[caps_mask, 0])
+        ft1 = np.abs(row_force[caps_mask, 1])
+        ft2 = np.abs(row_force[caps_mask, 2])
+
+        normal_util[caps_mask] = fn_open / normal_cap
+        shear_util[caps_mask] = np.sqrt(np.square(ft1 / shear_cap_t1) + np.square(ft2 / shear_cap_t2))
+        mixed_util[caps_mask] = np.sqrt(np.square(normal_util[caps_mask]) + np.square(shear_util[caps_mask]))
+
+    return {
+        "L0": L0,
+        "eps_n": eps_n,
+        "gamma_t1": gamma_t1,
+        "gamma_t2": gamma_t2,
+        "gamma_eq": gamma_eq,
+        "row_force": row_force,
+        "sigma_n": sigma_n,
+        "tau_t1": tau_t1,
+        "tau_t2": tau_t2,
+        "tau_eq": tau_eq,
+        "normal_traction_utilization": normal_util,
+        "shear_traction_utilization": shear_util,
+        "mixed_mode_traction_utilization": mixed_util,
+        "caps_mask": caps_mask,
+    }
+
+
 def _drop_row_keys(rows: list[dict[str, Any]], keys: tuple[str, ...]) -> None:
     for row in rows:
         for key in keys:
@@ -433,6 +563,9 @@ def _bond_dump_rows(
     tau_t1: np.ndarray,
     tau_t2: np.ndarray,
     tau_eq: np.ndarray,
+    normal_traction_utilization: np.ndarray,
+    shear_traction_utilization: np.ndarray,
+    mixed_mode_traction_utilization: np.ndarray,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for i in range(int(bond_ids.shape[0])):
@@ -460,6 +593,9 @@ def _bond_dump_rows(
                 "tau_t1": float(tau_t1[i]),
                 "tau_t2": float(tau_t2[i]),
                 "tau_eq": float(tau_eq[i]),
+                "normal_traction_utilization": float(normal_traction_utilization[i]),
+                "shear_traction_utilization": float(shear_traction_utilization[i]),
+                "mixed_mode_traction_utilization": float(mixed_mode_traction_utilization[i]),
             }
         )
     return rows
@@ -474,16 +610,51 @@ def _write_thesis_guide(
     include_damage_process_zone_quantities: bool,
     bond_strain_length_note: str | None,
 ) -> None:
+    table_rows = [
+        "| `peak_stress_proxy` | Maximum principal tensile stress proxy from exported `Stress_Tensor` | stress units of the solver setup | `max principal tensile stress proxy`, `tensile localization indicator` | `true Cauchy stress`, `physical tensile stress in the specimen` |",
+        "| `peak_von_mises_stress_proxy`, `Von_Mises_Stress_Proxy` | Deviatoric-magnitude stress proxy derived from exported `Stress_Tensor` | stress units of the solver setup | `Von Mises stress proxy`, `deviatoric stress proxy` | `physical Von Mises stress`, `yield stress field` |",
+        "| `hydrostatic_stress_proxy_max`, `hydrostatic_stress_proxy_min`, `Hydrostatic_Stress_Proxy` | Mean normal stress proxy derived from exported `Stress_Tensor` | stress units of the solver setup | `hydrostatic stress proxy`, `mean stress proxy` | `physical pressure field`, `true hydrostatic stress` |",
+        "| `peak_deviatoric_stress_norm_proxy`, `Deviatoric_Stress_Norm_Proxy` | Deviatoric tensor norm derived from exported `Stress_Tensor` | stress units of the solver setup | `deviatoric stress norm proxy` | `physical J2 invariant` |",
+    ]
+
+    if include_bond_strain_quantities:
+        table_rows.extend(
+            [
+                "| `eps_n` | Bond-normal separation normalized by a per-bond characteristic length | dimensionless | `cohesive-bond normal separation ratio`, `bond-normal strain-like quantity` | `continuum normal strain field` |",
+                "| `gamma_t1`, `gamma_t2`, `gamma_eq` | Bond-tangential separation ratios normalized by a per-bond characteristic length | dimensionless | `cohesive-bond shear separation`, `bond-local tangential deformation` | `continuum shear strain field` |",
+            ]
+        )
+
+    table_rows.extend(
+        [
+            "| `sigma_n`, `tau_t1`, `tau_t2`, `tau_eq` | Cohesive-bond tractions from capped row forces divided by exported bond area | traction units of the solver setup | `cohesive-bond traction`, `interface traction` | `continuum stress` |",
+            "| `normal_traction_utilization`, `shear_traction_utilization`, `mixed_mode_traction_utilization` | Dimensionless summaries of capped cohesive-bond traction usage based on exported force bounds | dimensionless | `traction utilization summary`, `mixed-mode traction utilization` | `failure index`, `continuum equivalent stress` |",
+        ]
+    )
+
+    if include_damage_process_zone_quantities:
+        table_rows.extend(
+            [
+                "| `process_zone_area_proxy` | Sum of areas of damaged but unbroken bonds | area | `process-zone area proxy` | `exact damage-zone area` |",
+                "| `damage_positive_bond_count` | Number of bonds with positive exported damage, including broken bonds | count | `damage-positive bond count` | `damaged-but-unbroken bond count`, `process-zone bond count` |",
+                "| `damaged_bond_count` | Number of damaged but not yet broken bonds in the saved frame | count | `damaged cohesive-bond count` | `crack count` |",
+            ]
+        )
+
+    table_rows.extend(
+        [
+            "| `crack_area_proxy` | Sum of areas of broken bonds | area | `crack area proxy`, `fractured interface area proxy` | `exact crack surface area` |",
+            "| `broken_bond_count` | Number of broken bonds in the saved frame | count | `broken bond count` | `number of cracks` |",
+            "| `load_displacement_along_loading_axis`, `load_displacement_magnitude` | Reconstructed prescribed/loading-point displacement from tracked load-group body motion | displacement in exported coordinate units | `prescribed displacement`, `loading-point displacement`, `kinematic displacement history` | `force-displacement response`, `structural load-displacement curve` |",
+        ]
+    )
+
     lines = [
         "# Thesis Quantity Guide",
         "",
         "| Quantity | Meaning | Units | Allowed wording | Forbidden wording |",
         "| --- | --- | --- | --- | --- |",
-        "| `peak_stress_proxy` | Maximum principal tensile stress proxy from exported `Stress_Tensor` | stress units of the solver setup | `max principal tensile stress proxy`, `tensile localization indicator` | `true Cauchy stress`, `physical tensile stress in the specimen` |",
-        "| `sigma_n`, `tau_t1`, `tau_t2`, `tau_eq` | Cohesive-bond tractions from capped row forces divided by exported bond area | traction units of the solver setup | `cohesive-bond traction`, `interface traction` | `continuum stress` |",
-        "| `crack_area_proxy` | Sum of areas of broken bonds | area | `crack area proxy`, `fractured interface area proxy` | `exact crack surface area` |",
-        "| `broken_bond_count` | Number of broken bonds in the saved frame | count | `broken bond count` | `number of cracks` |",
-        "| `load_displacement_along_loading_axis`, `load_displacement_magnitude` | Reconstructed prescribed/loading-point displacement from tracked load-group body motion | displacement in exported coordinate units | `prescribed displacement`, `loading-point displacement`, `kinematic displacement history` | `force-displacement response`, `structural load-displacement curve` |",
+        *table_rows,
         "",
         "## Unsupported or Conditionally Supported Quantities",
         "",
@@ -493,33 +664,9 @@ def _write_thesis_guide(
         "- Contact stress is not reconstructable from the current exports.",
     ]
 
-    if include_bond_strain_quantities:
-        lines.insert(
-            5,
-            "| `eps_n` | Bond-normal separation normalized by a per-bond characteristic length | dimensionless | `cohesive-bond normal separation ratio`, `bond-normal strain-like quantity` | `continuum normal strain field` |",
-        )
-        lines.insert(
-            6,
-            "| `gamma_t1`, `gamma_t2`, `gamma_eq` | Bond-tangential separation ratios normalized by a per-bond characteristic length | dimensionless | `cohesive-bond shear separation`, `bond-local tangential deformation` | `continuum shear strain field` |",
-        )
-
-    if include_damage_process_zone_quantities:
-        insert_at = 8 if include_bond_strain_quantities else 6
-        lines.insert(
-            insert_at,
-            "| `process_zone_area_proxy` | Sum of areas of damaged but unbroken bonds | area | `process-zone area proxy` | `exact damage-zone area` |",
-        )
-        lines.insert(
-            insert_at + 1,
-            "| `damage_positive_bond_count` | Number of bonds with positive exported damage, including broken bonds | count | `damage-positive bond count` | `damaged-but-unbroken bond count`, `process-zone bond count` |",
-        )
-        lines.insert(
-            insert_at + 3,
-            "| `damaged_bond_count` | Number of damaged but not yet broken bonds in the saved frame | count | `damaged cohesive-bond count` | `crack count` |",
-        )
-
     if exact_force_caps_available:
         lines.append("- Exact capped cohesive-bond row forces are reconstructable for this run from the exported static bond metadata.")
+        lines.append("- Traction-utilization summaries are computed directly from those exported cohesive force bounds and should be treated as bond-level utilization measures only.")
     else:
         lines.append("- Exact capped cohesive-bond row forces are not reconstructable for this run because bond force bounds were not exported.")
 
@@ -615,7 +762,7 @@ def analyze_run(
         is_broken = frame_data["is_broken"].astype(bool)
         is_cohesive = frame_data["is_cohesive"].astype(bool)
 
-        principal = _max_principal_proxy(stress6)
+        principal, von_mises_proxy, hydrostatic_proxy, deviatoric_norm_proxy = _stress_proxy_components(stress6)
         peak_frame_proxy = float(np.max(principal)) if principal.size else math.nan
         peak_body_idx = int(np.argmax(principal)) if principal.size else -1
         peak_body = int(body_ids[peak_body_idx]) if peak_body_idx >= 0 else -1
@@ -666,7 +813,6 @@ def analyze_run(
         peak_adjacent_to_broken = int(peak_body in broken_body_ids) if peak_body >= 0 else 0
 
         L0 = np.linalg.norm(rest, axis=1) if rest.size else np.zeros((0,), dtype=float)
-        strain_length = L0
         use_area_strain_length = bool(l_panel_mode and L0.size and not np.any(L0 > 1.0e-9) and area.size)
         if use_area_strain_length:
             strain_length = np.sqrt(np.clip(area, a_min=0.0, a_max=None))
@@ -675,33 +821,27 @@ def analyze_run(
                     f"For `{benchmark_name}`, exported bond `rest` vectors are degenerate, "
                     "so `eps_n` and `gamma_*` were normalized by `sqrt(area)` from bond metadata."
                 )
-        safe_strain_length = np.where(strain_length > np.finfo(float).eps, strain_length, np.nan)
-        if use_area_strain_length:
-            delta_n = C[:, 0] if C.size else np.zeros((0,), dtype=float)
-        else:
-            normal_sign = (
-                np.where(np.abs(rest[:, 0]) > np.finfo(float).eps, np.sign(rest[:, 0]), 1.0)
-                if rest.size
-                else np.zeros((0,), dtype=float)
-            )
-            delta_n = normal_sign * C[:, 0] if C.size else np.zeros((0,), dtype=float)
-        eps_n = delta_n / safe_strain_length if C.size else np.zeros((0,), dtype=float)
-        gamma_t1 = C[:, 1] / safe_strain_length if C.size else np.zeros((0,), dtype=float)
-        gamma_t2 = C[:, 2] / safe_strain_length if C.size else np.zeros((0,), dtype=float)
-        gamma_eq = np.sqrt(np.square(gamma_t1) + np.square(gamma_t2)) if C.size else np.zeros((0,), dtype=float)
-
-        if bond_ids.size and frame_caps_available:
-            row_force = np.clip(penalty_k * C, f_min, f_max)
-            sigma_n = row_force[:, 0] / area
-            tau_t1 = row_force[:, 1] / area
-            tau_t2 = row_force[:, 2] / area
-            tau_eq = np.sqrt(np.square(tau_t1) + np.square(tau_t2))
-        else:
-            row_force = np.full((bond_ids.shape[0], 3), math.nan, dtype=float)
-            sigma_n = np.full((bond_ids.shape[0],), math.nan, dtype=float)
-            tau_t1 = np.full((bond_ids.shape[0],), math.nan, dtype=float)
-            tau_t2 = np.full((bond_ids.shape[0],), math.nan, dtype=float)
-            tau_eq = np.full((bond_ids.shape[0],), math.nan, dtype=float)
+        bond_response = _bond_response_quantities(
+            C=C,
+            rest=rest,
+            penalty_k=penalty_k,
+            area=area,
+            f_min=f_min,
+            f_max=f_max,
+            use_area_strain_length=use_area_strain_length,
+        )
+        eps_n = bond_response["eps_n"]
+        gamma_t1 = bond_response["gamma_t1"]
+        gamma_t2 = bond_response["gamma_t2"]
+        gamma_eq = bond_response["gamma_eq"]
+        row_force = bond_response["row_force"]
+        sigma_n = bond_response["sigma_n"]
+        tau_t1 = bond_response["tau_t1"]
+        tau_t2 = bond_response["tau_t2"]
+        tau_eq = bond_response["tau_eq"]
+        normal_traction_utilization = bond_response["normal_traction_utilization"]
+        shear_traction_utilization = bond_response["shear_traction_utilization"]
+        mixed_mode_traction_utilization = bond_response["mixed_mode_traction_utilization"]
 
         bond_summary_rows.append(
             {
@@ -718,6 +858,12 @@ def analyze_run(
                 "p95_sigma_n": _finite_percentile(sigma_n, 95.0),
                 "max_tau_eq": _finite_max(tau_eq),
                 "p95_tau_eq": _finite_percentile(tau_eq, 95.0),
+                "max_normal_traction_utilization": _finite_max(normal_traction_utilization),
+                "p95_normal_traction_utilization": _finite_percentile(normal_traction_utilization, 95.0),
+                "max_shear_traction_utilization": _finite_max(shear_traction_utilization),
+                "p95_shear_traction_utilization": _finite_percentile(shear_traction_utilization, 95.0),
+                "max_mixed_mode_traction_utilization": _finite_max(mixed_mode_traction_utilization),
+                "p95_mixed_mode_traction_utilization": _finite_percentile(mixed_mode_traction_utilization, 95.0),
                 "high_damage_bond_count": int(np.count_nonzero(damage >= 0.9)),
             }
         )
@@ -760,6 +906,10 @@ def analyze_run(
             "crack_area_proxy": float(crack_area_proxy),
             "process_zone_area_proxy": float(process_zone_area_proxy),
             "peak_stress_proxy": float(peak_frame_proxy),
+            "peak_von_mises_stress_proxy": _finite_max(von_mises_proxy),
+            "peak_deviatoric_stress_norm_proxy": _finite_max(deviatoric_norm_proxy),
+            "hydrostatic_stress_proxy_max": _finite_max(hydrostatic_proxy),
+            "hydrostatic_stress_proxy_min": _finite_min(hydrostatic_proxy),
             "peak_stress_proxy_body_id": int(peak_body),
             "peak_stress_proxy_x": float(peak_body_position[0]),
             "peak_stress_proxy_y": float(peak_body_position[1]),
@@ -805,6 +955,9 @@ def analyze_run(
             tau_t1=tau_t1,
             tau_t2=tau_t2,
             tau_eq=tau_eq,
+            normal_traction_utilization=normal_traction_utilization,
+            shear_traction_utilization=shear_traction_utilization,
+            mixed_mode_traction_utilization=mixed_mode_traction_utilization,
         )
         final_bond_dump_rows = current_bond_dump_rows
         if bond_dump_mode == "all":
@@ -854,6 +1007,13 @@ def analyze_run(
         "first_broken_bond_time": first_broken_time if first_broken_time is not None else "",
         "final_broken_bond_count": final_row.get("broken_bond_count", ""),
         "final_crack_area_proxy": final_row.get("crack_area_proxy", ""),
+        "final_process_zone_area_proxy": final_row.get("process_zone_area_proxy", ""),
+        "final_peak_stress_proxy": final_row.get("peak_stress_proxy", ""),
+        "final_peak_von_mises_stress_proxy": final_row.get("peak_von_mises_stress_proxy", ""),
+        "final_peak_deviatoric_stress_norm_proxy": final_row.get("peak_deviatoric_stress_norm_proxy", ""),
+        "final_hydrostatic_stress_proxy_max": final_row.get("hydrostatic_stress_proxy_max", ""),
+        "final_hydrostatic_stress_proxy_min": final_row.get("hydrostatic_stress_proxy_min", ""),
+        "final_stress_exceedance_fraction": final_row.get("stress_exceedance_fraction", ""),
         "peak_stress_proxy": peak_stress_proxy if math.isfinite(peak_stress_proxy) else "",
         "peak_stress_proxy_frame": peak_stress_frame if peak_stress_frame is not None else "",
         "peak_stress_proxy_time": peak_stress_time if peak_stress_time is not None else "",
@@ -864,6 +1024,9 @@ def analyze_run(
         "final_fracture_work": final_row.get("fracture_work", ""),
         "final_bond_potential": final_row.get("bond_potential", ""),
         "final_kinetic_energy": final_row.get("kinetic", ""),
+        "final_contact_potential": final_row.get("contact_potential", ""),
+        "final_mech_energy": final_row.get("mech_energy", ""),
+        "final_accounted_energy": final_row.get("accounted_energy", ""),
         "load_displacement_reconstructable": int(load_displacement_available),
         "exact_bond_force_caps_available": int(exact_force_caps_available),
         "reaction_force_reconstructable": 0,
