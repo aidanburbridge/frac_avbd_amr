@@ -4,11 +4,12 @@ L-bar fracture fixture loaded from STL.
 
 from __future__ import annotations
 
+import math
 import numpy as np
 
 import geometry.octree as oct
 import geometry.voxelizer as vox
-from util.pyvista_visualizer import SimulationSetup
+from util.engine import SimulationSetup
 from util.voxel_assembly import VoxelAssembly
 
 
@@ -25,12 +26,13 @@ LOAD_OFFSET_FROM_RIGHT = 30.0 * MM
 BOTTOM_FIX_DEPTH = 20.0 * MM
 LOAD_PATCH_WIDTH = 20.0 * MM
 LOAD_BAND_THICKNESS = 20.0 * MM
-LOAD_VELOCITY = np.array([0.0, 5.0, 0.0], dtype=float)
+LOAD_VELOCITY = np.array([0.0, 30 * MM, 0.0], dtype=float)
 # Optional explicit voxel-ID sets from util.selection_tool.
-FIXED_VOXEL_IDS: tuple[int, ...] = ()
-LOAD_VOXEL_IDS: tuple[int, ...] = ()
-FIXED_VOXEL_IDS = [0, 17, 34, 59, 618, 643, 668, 709, 1620, 1645, 1670, 1711, 2622, 2647, 2672, 2713, 3624, 3649, 3674, 3715]
-LOAD_VOXEL_IDS = [5760, 5801, 5842, 5883, 6138, 6179, 6220, 6261, 6516, 6557, 6598, 6639, 6894, 6935, 6976, 7017]
+FIXED_VOXEL_IDS = [0, 17, 568, 593, 1488, 1513, 2408, 2433, 3328, 3353, 4248, 4273]
+#LOAD_VOXEL_IDS = [6548, 6589, 6630, 6671, 7008, 7049, 7090, 7131]
+
+LOAD_VOXEL_IDS = [7008, 7049]
+
 # -------------------- Material / solver -------------------- #
 DENSITY = 1150.0
 PENALTY_GAIN = 1.0e6
@@ -46,7 +48,7 @@ STEPS_PER_EXPORT = max(1, int(DT_RENDER / DT_PHYSICS))
 ITER = 80
 GRAV = 0.0
 FRICTION = 0.0
-STEPS = 7000
+STEPS = 10000
 MAX_REF_LEVEL = 2
 
 PYTHON_SOLVER_PARAMS = {
@@ -131,6 +133,15 @@ def _set_targets_kinematic_velocity(targets: list, velocity: np.ndarray) -> None
 def build_setup(sync_bodies: bool = True) -> SimulationSetup:
     stlvox = vox.STLVoxelizer(STL_PATH, flood_fill=False)
     occ, raw_origin, raw_h = stlvox.voxelize_to_resolution(VOX_RESOLUTION)
+    raw_extents = np.asarray(stlvox.mesh.extents, dtype=float)
+    raw_longest = float(np.max(raw_extents))
+    if raw_longest <= 0.0:
+        raise ValueError(f"Invalid STL extents for L-panel benchmark: {raw_extents}")
+    # Keep the current STL orientation and boundary-selection logic intact.
+    # Only enforce that the longest STL axis maps to the prescribed outer size.
+    panel_scale = OUTER_DIM / raw_longest
+    phys_origin = raw_origin * panel_scale
+    phys_h = raw_h * panel_scale
 
     # Keep hierarchy refinement clipped to the STL interior.
     def _contains_fn(pts: np.ndarray) -> np.ndarray:
@@ -147,8 +158,8 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
         hierarchy_h_base=raw_h,
         max_level=MAX_REF_LEVEL,
         contains_fn=_contains_fn,
-        body_origin=raw_origin,
-        body_h_base=raw_h,
+        body_origin=phys_origin,
+        body_h_base=phys_h,
         density=DENSITY,
         penalty_gain=PENALTY_GAIN,
         static=False,
@@ -187,12 +198,8 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
     if x_span <= 0.0 or z_span <= 0.0:
         raise ValueError("Invalid L-bar bounds from voxelized STL.")
 
-    # Drawn geometry ratios from 500/250/30 mm sketch.
-    scale_x = x_span / OUTER_DIM
-    scale_z = z_span / OUTER_DIM
-
-    x_corner = x_min + INNER_STEP * scale_x
-    z_inner = z_min + INNER_STEP * scale_z
+    x_corner = x_min + INNER_STEP
+    z_inner = z_min + INNER_STEP
 
     if explicit_fixed_ids:
         fixed_targets = _select_bodies_by_ids(
@@ -202,20 +209,20 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
             label="fixed",
         )
     else:
-        fix_depth = max(BOTTOM_FIX_DEPTH * scale_z, 1.5 * raw_h)
+        fix_depth = max(BOTTOM_FIX_DEPTH, 1.5 * phys_h)
         fixed_targets = _select_bodies_by_center_box(
             lbar,
-            x=(x_min, x_corner + 0.5 * raw_h),
+            x=(x_min, x_corner + 0.5 * phys_h),
             z=(z_min, z_min + fix_depth),
         )
 
     # Displacement patch at inner horizontal edge, 30 mm from right outer edge.
-    x_center = x_max - LOAD_OFFSET_FROM_RIGHT * scale_x
-    patch_width = max(LOAD_PATCH_WIDTH * scale_x, 2.0 * raw_h)
+    x_center = x_max - LOAD_OFFSET_FROM_RIGHT
+    patch_width = max(LOAD_PATCH_WIDTH, 2.0 * phys_h)
     x_half = 0.5 * patch_width
-    x_lo = max(x_corner + 0.5 * raw_h, x_center - x_half)
-    x_hi = min(x_max - 0.5 * raw_h, x_center + x_half)
-    z_hi = min(z_max, z_inner + max(LOAD_BAND_THICKNESS * scale_z, 1.5 * raw_h))
+    x_lo = max(x_corner + 0.5 * phys_h, x_center - x_half)
+    x_hi = min(x_max - 0.5 * phys_h, x_center + x_half)
+    z_hi = min(z_max, z_inner + max(LOAD_BAND_THICKNESS, 1.5 * phys_h))
 
     if explicit_load_ids:
         load_targets = _select_bodies_by_ids(
@@ -268,9 +275,18 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
         python_solver_params=PYTHON_SOLVER_PARAMS,
         amr_params=amr_dict,
         metadata={
+            "benchmark_name": "L-panel benchmark",
             "stl_path": STL_PATH,
             "vox_resolution": VOX_RESOLUTION,
-            "h_base": raw_h,
+            "raw_h_base": raw_h,
+            "h_base": phys_h,
+            "raw_length_scale_to_m": panel_scale,
+            "geometry_scaled_to_physical_units": True,
+            "length_unit_label": "m",
+            "displacement_unit_label": "m",
+            "area_unit_label": "m^2",
+            "stress_unit_label": "Pa",
+            "energy_unit_label": "J",
             "max_ref_level": MAX_REF_LEVEL,
             "outer_dim": OUTER_DIM,
             "inner_step": INNER_STEP,
@@ -278,6 +294,7 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
             "load_patch_width": LOAD_PATCH_WIDTH,
             "load_band_thickness": LOAD_BAND_THICKNESS,
             "bottom_fix_depth": BOTTOM_FIX_DEPTH,
+            "loading_velocity": LOAD_VELOCITY.tolist(),
             "refine_stress_threshold": REFINE_STRESS_THRESHOLD,
             "fixed_voxel_ids": list(explicit_fixed_ids),
             "load_voxel_ids": list(explicit_load_ids),

@@ -332,6 +332,63 @@ def _normalized_benchmark_token(value: Any) -> str:
     return "".join(ch for ch in str(value).lower() if ch.isalnum())
 
 
+def _humanize_benchmark_name(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "Benchmark"
+
+    normalized = text.replace("_", " ").replace("-", " ")
+    words: list[str] = []
+    for word in normalized.split():
+        upper = word.upper()
+        if upper in {"ISO", "AVBD"}:
+            words.append(upper)
+        elif word.isupper() and len(word) <= 4:
+            words.append(word)
+        else:
+            words.append(word.capitalize())
+
+    label = " ".join(words)
+    if label.lower().endswith((" benchmark", " test")):
+        return label
+    return f"{label} benchmark"
+
+
+def _canonical_benchmark_name(
+    benchmark_name: str | None,
+    metadata: dict[str, Any],
+    run_dir: Path | None = None,
+) -> str:
+    candidates: list[Any] = [
+        benchmark_name,
+        metadata.get("benchmark_name"),
+        metadata.get("test_name"),
+        metadata.get("stl_path"),
+    ]
+    if run_dir is not None:
+        candidates.extend((run_dir.parent.name, run_dir.name))
+
+    for value in candidates:
+        token = _normalized_benchmark_token(value)
+        if not token:
+            continue
+        if "lbar" in token or "lpanel" in token:
+            return "L-panel benchmark"
+        if "miehe" in token and "shear" in token:
+            return "Miehe shear test"
+        if "projectile" in token and "impact" in token:
+            return "Projectile impact benchmark"
+        if "iso20753" in token:
+            return "ISO 20753 test"
+        if "threepoint" in token and ("fixture" in token or "bend" in token or "bending" in token):
+            return "Three-point bending test"
+
+    fallback = benchmark_name or metadata.get("test_name")
+    if fallback is None and run_dir is not None:
+        fallback = run_dir.parent.name
+    return _humanize_benchmark_name(fallback)
+
+
 def _is_l_panel_benchmark(benchmark_name: str | None, metadata: dict[str, Any]) -> bool:
     for value in (benchmark_name, metadata.get("test_name"), metadata.get("stl_path")):
         token = _normalized_benchmark_token(value)
@@ -355,6 +412,30 @@ def _load_direction(metadata: dict[str, Any], benchmark_name: str | None = None)
         # The L-panel fixture uses a prescribed upward loading patch.
         return np.asarray([0.0, 1.0, 0.0], dtype=float)
     return None
+
+
+def _load_tracking_ids(metadata: dict[str, Any]) -> list[int]:
+    for key in ("load_voxel_ids", "load_body_ids"):
+        values = metadata.get(key)
+        if values:
+            return [int(v) for v in values]
+    return []
+
+
+def _reporting_unit_labels(metadata: dict[str, Any]) -> dict[str, str]:
+    geometry_scaled = bool(metadata.get("geometry_scaled_to_physical_units"))
+    length_default = "m" if geometry_scaled else "exported coordinate units"
+    displacement_default = "m" if geometry_scaled else length_default
+    area_default = "m^2" if geometry_scaled else "exported coordinate units^2"
+    stress_default = "Pa" if geometry_scaled else "stress units of the solver setup"
+    energy_default = "J" if geometry_scaled else "energy units of the solver setup"
+    return {
+        "length": str(metadata.get("length_unit_label") or length_default),
+        "displacement": str(metadata.get("displacement_unit_label") or metadata.get("length_unit_label") or displacement_default),
+        "area": str(metadata.get("area_unit_label") or area_default),
+        "stress": str(metadata.get("stress_unit_label") or stress_default),
+        "energy": str(metadata.get("energy_unit_label") or energy_default),
+    }
 
 
 def _extract_material_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -541,6 +622,89 @@ def _drop_row_keys(rows: list[dict[str, Any]], keys: tuple[str, ...]) -> None:
             row.pop(key, None)
 
 
+def _row_prescribed_displacement(row: dict[str, Any]) -> float:
+    axis_value = _safe_float(row.get("load_displacement_along_loading_axis"))
+    if math.isfinite(axis_value):
+        return axis_value
+    magnitude_value = _safe_float(row.get("load_displacement_magnitude"))
+    if math.isfinite(magnitude_value):
+        return magnitude_value
+    return math.nan
+
+
+def _finite_or_blank(value: float) -> float | str:
+    return value if math.isfinite(value) else ""
+
+
+def _first_matching_row(
+    rows: list[dict[str, Any]],
+    predicate,
+) -> dict[str, Any] | None:
+    for row in rows:
+        if predicate(row):
+            return row
+    return None
+
+
+def _peak_row(rows: list[dict[str, Any]], key: str) -> tuple[dict[str, Any] | None, float]:
+    best_row: dict[str, Any] | None = None
+    best_value = -math.inf
+    for row in rows:
+        value = _safe_float(row.get(key))
+        if math.isfinite(value) and (best_row is None or value > best_value):
+            best_row = row
+            best_value = value
+    if best_row is None:
+        return None, math.nan
+    return best_row, float(best_value)
+
+
+def _peak_crack_growth_stage(
+    rows: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, float]:
+    if len(rows) < 2:
+        return None, math.nan
+
+    previous_value = _safe_float(rows[0].get("crack_area_proxy"))
+    best_row: dict[str, Any] | None = None
+    best_increment = 0.0
+
+    for row in rows[1:]:
+        current_value = _safe_float(row.get("crack_area_proxy"))
+        if math.isfinite(previous_value) and math.isfinite(current_value):
+            increment = max(0.0, current_value - previous_value)
+        else:
+            increment = 0.0
+        if increment > best_increment:
+            best_row = row
+            best_increment = increment
+        previous_value = current_value
+
+    if best_row is None or best_increment <= 0.0:
+        return None, math.nan
+    return best_row, float(best_increment)
+
+
+def _final_plateau_row(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not rows:
+        return None
+
+    crack_area = np.asarray([_safe_float(row.get("crack_area_proxy")) for row in rows], dtype=float)
+    final_value = crack_area[-1]
+    if not math.isfinite(final_value):
+        return rows[-1]
+
+    scale = max(abs(final_value), 1.0)
+    close_to_final = np.isfinite(crack_area) & np.isclose(crack_area, final_value, rtol=1.0e-9, atol=1.0e-9 * scale)
+    if not np.any(~close_to_final):
+        return rows[-1]
+
+    idx = len(rows) - 1
+    while idx > 0 and close_to_final[idx - 1]:
+        idx -= 1
+    return rows[idx]
+
+
 def _bond_dump_rows(
     *,
     frame: int,
@@ -609,12 +773,19 @@ def _write_thesis_guide(
     include_bond_strain_quantities: bool,
     include_damage_process_zone_quantities: bool,
     bond_strain_length_note: str | None,
+    unit_labels: dict[str, str],
 ) -> None:
     table_rows = [
-        "| `peak_stress_proxy` | Maximum principal tensile stress proxy from exported `Stress_Tensor` | stress units of the solver setup | `max principal tensile stress proxy`, `tensile localization indicator` | `true Cauchy stress`, `physical tensile stress in the specimen` |",
-        "| `peak_von_mises_stress_proxy`, `Von_Mises_Stress_Proxy` | Deviatoric-magnitude stress proxy derived from exported `Stress_Tensor` | stress units of the solver setup | `Von Mises stress proxy`, `deviatoric stress proxy` | `physical Von Mises stress`, `yield stress field` |",
-        "| `hydrostatic_stress_proxy_max`, `hydrostatic_stress_proxy_min`, `Hydrostatic_Stress_Proxy` | Mean normal stress proxy derived from exported `Stress_Tensor` | stress units of the solver setup | `hydrostatic stress proxy`, `mean stress proxy` | `physical pressure field`, `true hydrostatic stress` |",
-        "| `peak_deviatoric_stress_norm_proxy`, `Deviatoric_Stress_Norm_Proxy` | Deviatoric tensor norm derived from exported `Stress_Tensor` | stress units of the solver setup | `deviatoric stress norm proxy` | `physical J2 invariant` |",
+        f"| `load_displacement_along_loading_axis`, `load_displacement_magnitude` | Reconstructed prescribed/loading-point displacement from tracked load-group body motion | {unit_labels['displacement']} | `prescribed displacement`, `loading-point displacement`, `kinematic displacement history` | `force-displacement response`, `structural load-displacement curve` |",
+        f"| `crack_area_proxy` | Sum of areas of broken bonds | {unit_labels['area']} | `crack area proxy`, `fractured interface area proxy` | `exact crack surface area` |",
+        "| `broken_bond_count` | Number of broken bonds in the saved frame | count | `broken bond count` | `number of cracks` |",
+        "| `peak_mixed_mode_traction_utilization`, `p95_mixed_mode_traction_utilization` | Compact bond-level utilization summaries from exported cohesive force bounds | dimensionless | `mixed-mode traction utilization`, `bond-level trigger-aligned metric` | `continuum equivalent stress`, `failure load` |",
+        f"| `sigma_n`, `tau_t1`, `tau_t2`, `tau_eq` | Cohesive-bond tractions from capped row forces divided by exported bond area | {unit_labels['stress']} | `cohesive-bond traction`, `interface traction` | `continuum stress` |",
+        "| `normal_traction_utilization`, `shear_traction_utilization`, `mixed_mode_traction_utilization` | Dimensionless summaries of capped cohesive-bond traction usage based on exported force bounds | dimensionless | `traction utilization summary`, `mixed-mode traction utilization` | `failure index`, `continuum equivalent stress` |",
+        f"| `peak_stress_proxy` | Maximum principal tensile stress proxy from exported `Stress_Tensor` | {unit_labels['stress']} | `max principal tensile stress proxy`, `tensile localization indicator` | `true Cauchy stress`, `physical tensile stress in the specimen` |",
+        f"| `peak_von_mises_stress_proxy`, `Von_Mises_Stress_Proxy` | Deviatoric-magnitude stress proxy derived from exported `Stress_Tensor` | {unit_labels['stress']} | `Von Mises stress proxy`, `deviatoric stress proxy` | `physical Von Mises stress`, `yield stress field` |",
+        f"| `hydrostatic_stress_proxy_max`, `hydrostatic_stress_proxy_min`, `Hydrostatic_Stress_Proxy` | Mean normal stress proxy derived from exported `Stress_Tensor` | {unit_labels['stress']} | `hydrostatic stress proxy`, `mean stress proxy` | `physical pressure field`, `true hydrostatic stress` |",
+        f"| `peak_deviatoric_stress_norm_proxy`, `Deviatoric_Stress_Norm_Proxy` | Deviatoric tensor norm derived from exported `Stress_Tensor` | {unit_labels['stress']} | `deviatoric stress norm proxy` | `physical J2 invariant` |",
     ]
 
     if include_bond_strain_quantities:
@@ -625,29 +796,14 @@ def _write_thesis_guide(
             ]
         )
 
-    table_rows.extend(
-        [
-            "| `sigma_n`, `tau_t1`, `tau_t2`, `tau_eq` | Cohesive-bond tractions from capped row forces divided by exported bond area | traction units of the solver setup | `cohesive-bond traction`, `interface traction` | `continuum stress` |",
-            "| `normal_traction_utilization`, `shear_traction_utilization`, `mixed_mode_traction_utilization` | Dimensionless summaries of capped cohesive-bond traction usage based on exported force bounds | dimensionless | `traction utilization summary`, `mixed-mode traction utilization` | `failure index`, `continuum equivalent stress` |",
-        ]
-    )
-
     if include_damage_process_zone_quantities:
         table_rows.extend(
             [
-                "| `process_zone_area_proxy` | Sum of areas of damaged but unbroken bonds | area | `process-zone area proxy` | `exact damage-zone area` |",
+                f"| `process_zone_area_proxy` | Sum of areas of damaged but unbroken bonds | {unit_labels['area']} | `process-zone area proxy` | `exact damage-zone area` |",
                 "| `damage_positive_bond_count` | Number of bonds with positive exported damage, including broken bonds | count | `damage-positive bond count` | `damaged-but-unbroken bond count`, `process-zone bond count` |",
                 "| `damaged_bond_count` | Number of damaged but not yet broken bonds in the saved frame | count | `damaged cohesive-bond count` | `crack count` |",
             ]
         )
-
-    table_rows.extend(
-        [
-            "| `crack_area_proxy` | Sum of areas of broken bonds | area | `crack area proxy`, `fractured interface area proxy` | `exact crack surface area` |",
-            "| `broken_bond_count` | Number of broken bonds in the saved frame | count | `broken bond count` | `number of cracks` |",
-            "| `load_displacement_along_loading_axis`, `load_displacement_magnitude` | Reconstructed prescribed/loading-point displacement from tracked load-group body motion | displacement in exported coordinate units | `prescribed displacement`, `loading-point displacement`, `kinematic displacement history` | `force-displacement response`, `structural load-displacement curve` |",
-        ]
-    )
 
     lines = [
         "# Thesis Quantity Guide",
@@ -705,6 +861,8 @@ def analyze_run(
         or manifest.get("test")
         or run_dir.parent.name
     )
+    benchmark_name = _canonical_benchmark_name(benchmark_name, metadata, run_dir)
+    unit_labels = _reporting_unit_labels(metadata)
     l_panel_mode = _is_l_panel_benchmark(benchmark_name, metadata)
     include_bond_strain_quantities = not l_panel_mode
     include_damage_process_zone_quantities = not l_panel_mode
@@ -715,8 +873,7 @@ def analyze_run(
         if not math.isfinite(stress_threshold):
             stress_threshold = None
 
-    load_ids = metadata.get("load_voxel_ids") or []
-    load_ids = [int(v) for v in load_ids]
+    load_ids = _load_tracking_ids(metadata)
     load_dir = _load_direction(metadata, benchmark_name)
     initial_load_positions: dict[int, np.ndarray] | None = None
     load_displacement_available = bool(load_ids)
@@ -725,11 +882,6 @@ def analyze_run(
     bond_summary_rows: list[dict[str, Any]] = []
     final_bond_dump_rows: list[dict[str, Any]] = []
     all_bond_dump_rows: list[dict[str, Any]] = []
-
-    first_cohesive_frame: int | None = None
-    first_cohesive_time: float | None = None
-    first_broken_frame: int | None = None
-    first_broken_time: float | None = None
 
     peak_stress_proxy = -math.inf
     peak_stress_frame: int | None = None
@@ -790,14 +942,6 @@ def analyze_run(
         damage_positive_mask = damage > damage_threshold
         damaged_unbroken_mask = damage_positive_mask & (~broken_mask)
 
-        if first_cohesive_frame is None and np.any(is_cohesive):
-            first_cohesive_frame = frame
-            first_cohesive_time = time_value
-
-        if first_broken_frame is None and np.any(broken_mask):
-            first_broken_frame = frame
-            first_broken_time = time_value
-
         crack_area_proxy = float(np.nansum(area[broken_mask])) if area.size else 0.0
         process_zone_area_proxy = float(np.nansum(area[damaged_unbroken_mask])) if area.size else 0.0
 
@@ -850,6 +994,8 @@ def analyze_run(
                 "time": float(time_value),
                 "bond_force_caps_available": int(frame_caps_available),
                 "num_exported_bonds": int(bond_ids.shape[0]),
+                "max_mixed_mode_traction_utilization": _finite_max(mixed_mode_traction_utilization),
+                "p95_mixed_mode_traction_utilization": _finite_percentile(mixed_mode_traction_utilization, 95.0),
                 "max_eps_n": _finite_max(eps_n),
                 "p95_eps_n": _finite_percentile(eps_n, 95.0),
                 "max_gamma_eq": _finite_max(gamma_eq),
@@ -862,8 +1008,6 @@ def analyze_run(
                 "p95_normal_traction_utilization": _finite_percentile(normal_traction_utilization, 95.0),
                 "max_shear_traction_utilization": _finite_max(shear_traction_utilization),
                 "p95_shear_traction_utilization": _finite_percentile(shear_traction_utilization, 95.0),
-                "max_mixed_mode_traction_utilization": _finite_max(mixed_mode_traction_utilization),
-                "p95_mixed_mode_traction_utilization": _finite_percentile(mixed_mode_traction_utilization, 95.0),
                 "high_damage_bond_count": int(np.count_nonzero(damage >= 0.9)),
             }
         )
@@ -893,6 +1037,15 @@ def analyze_run(
             "frame": int(frame),
             "step": int(step_value),
             "time": float(time_value),
+            "load_displacement_along_loading_axis": float(load_disp_axis),
+            "load_displacement_magnitude": float(load_disp_mag),
+            "crack_area_proxy": float(crack_area_proxy),
+            "broken_bond_count": int(np.count_nonzero(broken_mask)),
+            "peak_mixed_mode_traction_utilization": _finite_max(mixed_mode_traction_utilization),
+            "p95_mixed_mode_traction_utilization": _finite_percentile(mixed_mode_traction_utilization, 95.0),
+            "damaged_bond_count": int(np.count_nonzero(damaged_unbroken_mask)),
+            "damage_positive_bond_count": int(np.count_nonzero(damage_positive_mask)),
+            "process_zone_area_proxy": float(process_zone_area_proxy),
             "kinetic": _safe_float(energy_row.get("kinetic")),
             "bond_potential": _safe_float(energy_row.get("bond_potential")),
             "contact_potential": _safe_float(energy_row.get("contact_potential")),
@@ -900,11 +1053,6 @@ def analyze_run(
             "viscous_work": _safe_float(energy_row.get("viscous_work")),
             "mech_energy": _safe_float(energy_row.get("mech_energy")),
             "accounted_energy": _safe_float(energy_row.get("accounted_energy")),
-            "broken_bond_count": int(np.count_nonzero(broken_mask)),
-            "damaged_bond_count": int(np.count_nonzero(damaged_unbroken_mask)),
-            "damage_positive_bond_count": int(np.count_nonzero(damage_positive_mask)),
-            "crack_area_proxy": float(crack_area_proxy),
-            "process_zone_area_proxy": float(process_zone_area_proxy),
             "peak_stress_proxy": float(peak_frame_proxy),
             "peak_von_mises_stress_proxy": _finite_max(von_mises_proxy),
             "peak_deviatoric_stress_norm_proxy": _finite_max(deviatoric_norm_proxy),
@@ -929,8 +1077,6 @@ def analyze_run(
             "load_displacement_x": float(load_disp_x),
             "load_displacement_y": float(load_disp_y),
             "load_displacement_z": float(load_disp_z),
-            "load_displacement_magnitude": float(load_disp_mag),
-            "load_displacement_along_loading_axis": float(load_disp_axis),
         }
         time_history_rows.append(row)
 
@@ -962,6 +1108,18 @@ def analyze_run(
         final_bond_dump_rows = current_bond_dump_rows
         if bond_dump_mode == "all":
             all_bond_dump_rows.extend(current_bond_dump_rows)
+
+    damage_onset_row = _first_matching_row(
+        time_history_rows,
+        lambda row: _safe_int(row.get("damage_positive_bond_count")) > 0,
+    )
+    first_broken_row = _first_matching_row(
+        time_history_rows,
+        lambda row: _safe_int(row.get("broken_bond_count")) > 0,
+    )
+    peak_crack_growth_row, peak_crack_growth_increment = _peak_crack_growth_stage(time_history_rows)
+    final_plateau_row = _final_plateau_row(time_history_rows)
+    peak_mixed_mode_row, peak_mixed_mode_value = _peak_row(time_history_rows, "peak_mixed_mode_traction_utilization")
 
     analysis_dir = run_dir / "analysis"
     analysis_dir.mkdir(parents=True, exist_ok=True)
@@ -998,22 +1156,59 @@ def analyze_run(
     summary_row = {
         "run_id": run_dir.name,
         "benchmark_name": benchmark_name,
+        "length_unit_label": unit_labels["length"],
+        "displacement_unit_label": unit_labels["displacement"],
+        "area_unit_label": unit_labels["area"],
+        "stress_unit_label": unit_labels["stress"],
+        "energy_unit_label": unit_labels["energy"],
+        "geometry_scaled_to_physical_units": int(bool(metadata.get("geometry_scaled_to_physical_units"))),
         "dt": dt_value,
         "iterations": _safe_int(metadata.get("iterations"), _safe_int(manifest.get("iterations"))),
         "material_parameters_json": json.dumps(material_metadata, sort_keys=True),
-        "first_cohesive_onset_frame": first_cohesive_frame if first_cohesive_frame is not None else "",
-        "first_cohesive_onset_time": first_cohesive_time if first_cohesive_time is not None else "",
-        "first_broken_bond_frame": first_broken_frame if first_broken_frame is not None else "",
-        "first_broken_bond_time": first_broken_time if first_broken_time is not None else "",
+        "load_displacement_reconstructable": int(load_displacement_available),
+        "exact_bond_force_caps_available": int(exact_force_caps_available),
+        "first_damage_onset_frame": damage_onset_row.get("frame", "") if damage_onset_row is not None else "",
+        "first_damage_onset_time": damage_onset_row.get("time", "") if damage_onset_row is not None else "",
+        "first_damage_onset_displacement": (
+            _finite_or_blank(_row_prescribed_displacement(damage_onset_row)) if damage_onset_row is not None else ""
+        ),
+        "peak_mixed_mode_traction_utilization_at_damage_onset": (
+            damage_onset_row.get("peak_mixed_mode_traction_utilization", "") if damage_onset_row is not None else ""
+        ),
+        "first_broken_bond_frame": first_broken_row.get("frame", "") if first_broken_row is not None else "",
+        "first_broken_bond_time": first_broken_row.get("time", "") if first_broken_row is not None else "",
+        "first_broken_bond_displacement": (
+            _finite_or_blank(_row_prescribed_displacement(first_broken_row)) if first_broken_row is not None else ""
+        ),
+        "peak_crack_growth_stage_frame": peak_crack_growth_row.get("frame", "") if peak_crack_growth_row is not None else "",
+        "peak_crack_growth_stage_time": peak_crack_growth_row.get("time", "") if peak_crack_growth_row is not None else "",
+        "peak_crack_growth_stage_displacement": (
+            _finite_or_blank(_row_prescribed_displacement(peak_crack_growth_row)) if peak_crack_growth_row is not None else ""
+        ),
+        "peak_crack_growth_increment": _finite_or_blank(peak_crack_growth_increment),
+        "final_plateau_frame": final_plateau_row.get("frame", "") if final_plateau_row is not None else "",
+        "final_plateau_time": final_plateau_row.get("time", "") if final_plateau_row is not None else "",
+        "final_plateau_displacement": (
+            _finite_or_blank(_row_prescribed_displacement(final_plateau_row)) if final_plateau_row is not None else ""
+        ),
+        "final_plateau_crack_area_proxy": final_plateau_row.get("crack_area_proxy", "") if final_plateau_row is not None else "",
+        "peak_mixed_mode_traction_utilization": peak_mixed_mode_value if math.isfinite(peak_mixed_mode_value) else "",
+        "peak_mixed_mode_traction_utilization_frame": peak_mixed_mode_row.get("frame", "") if peak_mixed_mode_row is not None else "",
+        "peak_mixed_mode_traction_utilization_time": peak_mixed_mode_row.get("time", "") if peak_mixed_mode_row is not None else "",
+        "peak_mixed_mode_traction_utilization_displacement": (
+            _finite_or_blank(_row_prescribed_displacement(peak_mixed_mode_row)) if peak_mixed_mode_row is not None else ""
+        ),
         "final_broken_bond_count": final_row.get("broken_bond_count", ""),
         "final_crack_area_proxy": final_row.get("crack_area_proxy", ""),
         "final_process_zone_area_proxy": final_row.get("process_zone_area_proxy", ""),
-        "final_peak_stress_proxy": final_row.get("peak_stress_proxy", ""),
-        "final_peak_von_mises_stress_proxy": final_row.get("peak_von_mises_stress_proxy", ""),
-        "final_peak_deviatoric_stress_norm_proxy": final_row.get("peak_deviatoric_stress_norm_proxy", ""),
-        "final_hydrostatic_stress_proxy_max": final_row.get("hydrostatic_stress_proxy_max", ""),
-        "final_hydrostatic_stress_proxy_min": final_row.get("hydrostatic_stress_proxy_min", ""),
-        "final_stress_exceedance_fraction": final_row.get("stress_exceedance_fraction", ""),
+        "final_peak_mixed_mode_traction_utilization": final_row.get("peak_mixed_mode_traction_utilization", ""),
+        "final_p95_mixed_mode_traction_utilization": final_row.get("p95_mixed_mode_traction_utilization", ""),
+        "final_fracture_work": final_row.get("fracture_work", ""),
+        "final_bond_potential": final_row.get("bond_potential", ""),
+        "final_kinetic_energy": final_row.get("kinetic", ""),
+        "final_contact_potential": final_row.get("contact_potential", ""),
+        "final_mech_energy": final_row.get("mech_energy", ""),
+        "final_accounted_energy": final_row.get("accounted_energy", ""),
         "peak_stress_proxy": peak_stress_proxy if math.isfinite(peak_stress_proxy) else "",
         "peak_stress_proxy_frame": peak_stress_frame if peak_stress_frame is not None else "",
         "peak_stress_proxy_time": peak_stress_time if peak_stress_time is not None else "",
@@ -1021,14 +1216,12 @@ def analyze_run(
         "peak_stress_proxy_x": float(peak_stress_pos[0]) if np.isfinite(peak_stress_pos[0]) else "",
         "peak_stress_proxy_y": float(peak_stress_pos[1]) if np.isfinite(peak_stress_pos[1]) else "",
         "peak_stress_proxy_z": float(peak_stress_pos[2]) if np.isfinite(peak_stress_pos[2]) else "",
-        "final_fracture_work": final_row.get("fracture_work", ""),
-        "final_bond_potential": final_row.get("bond_potential", ""),
-        "final_kinetic_energy": final_row.get("kinetic", ""),
-        "final_contact_potential": final_row.get("contact_potential", ""),
-        "final_mech_energy": final_row.get("mech_energy", ""),
-        "final_accounted_energy": final_row.get("accounted_energy", ""),
-        "load_displacement_reconstructable": int(load_displacement_available),
-        "exact_bond_force_caps_available": int(exact_force_caps_available),
+        "final_peak_stress_proxy": final_row.get("peak_stress_proxy", ""),
+        "final_peak_von_mises_stress_proxy": final_row.get("peak_von_mises_stress_proxy", ""),
+        "final_peak_deviatoric_stress_norm_proxy": final_row.get("peak_deviatoric_stress_norm_proxy", ""),
+        "final_hydrostatic_stress_proxy_max": final_row.get("hydrostatic_stress_proxy_max", ""),
+        "final_hydrostatic_stress_proxy_min": final_row.get("hydrostatic_stress_proxy_min", ""),
+        "final_stress_exceedance_fraction": final_row.get("stress_exceedance_fraction", ""),
         "reaction_force_reconstructable": 0,
         "engineering_stress_reconstructable": 0,
         "continuum_stress_field_reconstructable": 0,
@@ -1043,6 +1236,7 @@ def analyze_run(
         include_bond_strain_quantities=include_bond_strain_quantities,
         include_damage_process_zone_quantities=include_damage_process_zone_quantities,
         bond_strain_length_note=bond_strain_length_note,
+        unit_labels=unit_labels,
     )
 
     return {

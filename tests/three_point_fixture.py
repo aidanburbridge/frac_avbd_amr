@@ -233,6 +233,8 @@ def build_setup() -> SimulationSetup:
 
     assemblies = [beam, left_support, right_support, top_indenter]
     all_bodies, all_bonds = _flatten_with_global_bond_indices(assemblies)
+    for idx, body in enumerate(all_bodies):
+        body.body_id = idx
     n_bodies = len(all_bodies)
 
     assembly_ids = np.array([int(getattr(b, "assembly_id", -1)) for b in all_bodies], dtype=np.int32)
@@ -254,6 +256,9 @@ def build_setup() -> SimulationSetup:
     if n_bodies != len(amr_dict["level"]):
         raise ValueError("AMR/body count mismatch after block merge")
 
+    load_body_ids = [int(body.body_id) for body in top_indenter.bodies]
+    fixed_body_ids = [int(body.body_id) for body in left_support.bodies + right_support.bodies]
+
     print(f"Fixture bodies: beam={len(beam.bodies)} left={len(left_support.bodies)} right={len(right_support.bodies)} top={len(top_indenter.bodies)}")
     print(f"Fixture bonds: total={len(all_bonds)}")
 
@@ -268,12 +273,14 @@ def build_setup() -> SimulationSetup:
         python_solver_params=PYTHON_SOLVER_PARAMS,
         amr_params=amr_dict,
         metadata={
+            "benchmark_name": "Three-point bending test",
             "dt_physics": DT_PHYSICS,
             "dt_render": DT_RENDER,
             "beam_dims_m": [BEAM_LENGTH, BEAM_WIDTH, BEAM_HEIGHT],
             "roller_dims_m": [ROLLER_LENGTH, ROLLER_DIAMETER],
             "support_span_m": SUPPORT_SPAN,
             "pull_rate_m_per_s": PULL_RATE,
+            "loading_velocity": [0.0, 0.0, -abs(PULL_RATE)],
             "E": E_MODULUS,
             "nu": NU,
             "tensile_strength": TENSILE_STRENGTH,
@@ -281,8 +288,16 @@ def build_setup() -> SimulationSetup:
             "density": DENSITY,
             "penalty_gain": PENALTY_GAIN,
             "zeta_damp": ZETA_DAMP,
+            "geometry_scaled_to_physical_units": True,
+            "length_unit_label": "m",
+            "displacement_unit_label": "m",
+            "area_unit_label": "m^2",
+            "stress_unit_label": "Pa",
+            "energy_unit_label": "J",
             "beam_voxel_h": beam_h,
             "roller_voxel_h": roller_h,
+            "load_body_ids": load_body_ids,
+            "fixed_body_ids": fixed_body_ids,
             "refine_stress_threshold": REFINE_STRESS_THRESHOLD,
             "steps": STEPS,
             "steps_per_export": STEPS_PER,

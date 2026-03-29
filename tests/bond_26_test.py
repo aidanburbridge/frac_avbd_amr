@@ -8,7 +8,7 @@ import geometry.octree as oct
 import numpy as np
 
 from util.voxel_assembly import VoxelAssembly
-from util.pyvista_visualizer import SimulationSetup
+from util.engine import SimulationSetup
 
 STL_PATH = r"C:\Users\aidan\Documents\TUM\Thesis\D3Q26 Test.stl"
 LENGTH = 0.170
@@ -44,7 +44,7 @@ def build_setup()-> SimulationSetup:
     phys_origin = raw_origin * scale_factor
 
     leaves, h_base = oct.octree_from_occ(occ, phys_h)
-    boxes, mapping = oct.instantiate_boxes_from_tree(
+    boxes, mapping, _ = oct.instantiate_boxes_from_tree(
         leaves,
         phys_origin,
         h_base,
@@ -67,6 +67,17 @@ def build_setup()-> SimulationSetup:
     dog_bone = VoxelAssembly(boxes, beam_bonds)
 
     dog_bone.align_longest_axis('z')
+    for idx, body in enumerate(dog_bone.bodies):
+        body.body_id = idx
+
+    fixed_targets = dog_bone.select_boundary(
+        ["bottom"],
+        distance=GRIP_DISTANCE,
+    )
+    load_targets = dog_bone.select_boundary(
+        ["top"],
+        distance=GRIP_DISTANCE,
+    )
 
     dog_bone.set_boundary_fixed(
         faces = ["bottom"],
@@ -90,6 +101,24 @@ def build_setup()-> SimulationSetup:
         friction=FRICTION,
         sync_bodies=True,
         python_solver_params=PYTHON_SOLVER_PARAMS,
+        metadata={
+            "benchmark_name": "Bond-26 tensile test",
+            "geometry_scaled_to_physical_units": True,
+            "length_unit_label": "m",
+            "displacement_unit_label": "m",
+            "area_unit_label": "m^2",
+            "stress_unit_label": "Pa",
+            "energy_unit_label": "J",
+            "raw_length_scale_to_m": scale_factor,
+            "h_base": phys_h,
+            "raw_h_base": raw_h,
+            "loading_velocity": [0.0, 0.0, PULL_RATE],
+            "fixed_body_ids": [int(body.body_id) for body in fixed_targets],
+            "load_body_ids": [int(body.body_id) for body in load_targets],
+            "dt_physics": DT_PHYSICS,
+            "dt_render": DT_RENDER,
+            "steps_per_export": STEPS_PER,
+        },
         headless_steps=20,
         headless_kwargs={
             "steps_per_export": STEPS_PER,

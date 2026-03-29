@@ -98,6 +98,17 @@ def build_setup() -> SimulationSetup:
     dog_bone = VoxelAssembly(boxes, beam_bonds)
 
     dog_bone.align_longest_axis("z")
+    for idx, body in enumerate(dog_bone.bodies):
+        body.body_id = idx
+
+    fixed_targets = dog_bone.select_boundary(
+        ["bottom"],
+        distance=GRIP_DISTANCE,
+    )
+    load_targets = dog_bone.select_boundary(
+        ["top"],
+        distance=GRIP_DISTANCE,
+    )
 
     dog_bone.set_boundary_fixed(
         faces=["bottom"],
@@ -124,6 +135,7 @@ def build_setup() -> SimulationSetup:
         python_solver_params=PYTHON_SOLVER_PARAMS,
         amr_params=amr_dict,
         metadata={
+            "benchmark_name": "ISO 20753 test",
             "dt_physics": DT_PHYSICS,
             "dt_render": DT_RENDER,
             "E": E_MODULUS,
@@ -133,7 +145,18 @@ def build_setup() -> SimulationSetup:
             "density": DENSITY,
             "penalty_gain": PENALTY_GAIN,
             "zeta_damp": ZETA_DAMP,
+            "geometry_scaled_to_physical_units": True,
+            "length_unit_label": "m",
+            "displacement_unit_label": "m",
+            "area_unit_label": "m^2",
+            "stress_unit_label": "Pa",
+            "energy_unit_label": "J",
+            "raw_length_scale_to_m": scale_factor,
             "h_base": phys_h,
+            "raw_h_base": raw_h,
+            "loading_velocity": [0.0, 0.0, PULL_RATE],
+            "fixed_body_ids": [int(body.body_id) for body in fixed_targets],
+            "load_body_ids": [int(body.body_id) for body in load_targets],
             "refine_stress_threshold": REFINE_STRESS_THRESHOLD,
             "steps": STEPS,
             "steps_per_export": STEPS_PER,

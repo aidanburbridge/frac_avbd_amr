@@ -4,11 +4,12 @@ Miehe-style shear fracture fixture loaded from STL.
 
 from __future__ import annotations
 
+import math
 import numpy as np
 
 import geometry.octree as oct
 import geometry.voxelizer as vox
-from util.pyvista_visualizer import SimulationSetup
+from util.engine import SimulationSetup
 from util.voxel_assembly import VoxelAssembly
 
 
@@ -149,6 +150,18 @@ def _set_targets_kinematic_velocity(targets: list, velocity: np.ndarray) -> None
 def build_setup(sync_bodies: bool = True) -> SimulationSetup:
     stlvox = vox.STLVoxelizer(STL_PATH, flood_fill=False)
     occ, raw_origin, raw_h = stlvox.voxelize_to_resolution(VOX_RESOLUTION)
+    raw_extents = np.asarray(stlvox.mesh.extents, dtype=float)
+    scale_candidates = np.asarray(
+        [
+            SPECIMEN_WIDTH / raw_extents[0] if raw_extents[0] > 0.0 else math.nan,
+            SPECIMEN_THICKNESS / raw_extents[1] if raw_extents[1] > 0.0 else math.nan,
+            SPECIMEN_HEIGHT / raw_extents[2] if raw_extents[2] > 0.0 else math.nan,
+        ],
+        dtype=float,
+    )
+    specimen_scale = float(np.nanmedian(scale_candidates))
+    phys_origin = raw_origin * specimen_scale
+    phys_h = raw_h * specimen_scale
 
     # Keep hierarchy refinement clipped to the STL interior.
     def _contains_fn(pts: np.ndarray) -> np.ndarray:
@@ -165,8 +178,8 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
         hierarchy_h_base=raw_h,
         max_level=MAX_REF_LEVEL,
         contains_fn=_contains_fn,
-        body_origin=raw_origin,
-        body_h_base=raw_h,
+        body_origin=phys_origin,
+        body_h_base=phys_h,
         density=DENSITY,
         penalty_gain=PENALTY_GAIN,
         static=False,
@@ -206,8 +219,6 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
     if x_span <= 0.0 or y_span <= 0.0 or z_span <= 0.0:
         raise ValueError("Invalid shear-specimen bounds from voxelized STL.")
 
-    scale_z = z_span / SPECIMEN_HEIGHT
-
     if explicit_fixed_ids:
         fixed_targets = _select_bodies_by_ids(
             shear,
@@ -216,7 +227,7 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
             label="fixed",
         )
     else:
-        fix_depth = max(BOTTOM_FIX_DEPTH * scale_z, 1.5 * raw_h)
+        fix_depth = max(BOTTOM_FIX_DEPTH, 1.5 * phys_h)
         fixed_targets = _select_bodies_by_center_box(
             shear,
             x=(x_min, x_max),
@@ -232,7 +243,7 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
             label="load",
         )
     else:
-        load_depth = max(TOP_LOAD_DEPTH * scale_z, 1.5 * raw_h)
+        load_depth = max(TOP_LOAD_DEPTH, 1.5 * phys_h)
         z_lo = max(z_min, z_max - load_depth)
         load_targets = _select_bodies_by_center_box(
             shear,
@@ -278,9 +289,18 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
         python_solver_params=PYTHON_SOLVER_PARAMS,
         amr_params=amr_dict,
         metadata={
+            "benchmark_name": "Miehe shear test",
             "stl_path": STL_PATH,
             "vox_resolution": VOX_RESOLUTION,
-            "h_base": raw_h,
+            "raw_h_base": raw_h,
+            "h_base": phys_h,
+            "raw_length_scale_to_m": specimen_scale,
+            "geometry_scaled_to_physical_units": True,
+            "length_unit_label": "m",
+            "displacement_unit_label": "m",
+            "area_unit_label": "m^2",
+            "stress_unit_label": "Pa",
+            "energy_unit_label": "J",
             "max_ref_level": MAX_REF_LEVEL,
             "specimen_width": SPECIMEN_WIDTH,
             "specimen_height": SPECIMEN_HEIGHT,

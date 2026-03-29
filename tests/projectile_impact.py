@@ -9,7 +9,7 @@ import numpy as np
 import geometry.octree as oct
 import geometry.voxelizer as vox
 from geometry.bond_data import BondData
-from util.pyvista_visualizer import SimulationSetup
+from util.engine import SimulationSetup
 from util.voxel_assembly import VoxelAssembly
 
 
@@ -543,8 +543,15 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
         python_solver_params=PYTHON_SOLVER_PARAMS,
         amr_params=amr_dict,
         metadata={
+            "benchmark_name": "Projectile impact benchmark",
             "wall_stl_path": WALL_STL_PATH,
             "projectile_stl_path": PROJECTILE_STL_PATH,
+            "geometry_scaled_to_physical_units": True,
+            "length_unit_label": "m",
+            "displacement_unit_label": "m",
+            "area_unit_label": "m^2",
+            "stress_unit_label": "Pa",
+            "energy_unit_label": "J",
             "wall_nominal_dimensions_m": [WALL_WIDTH, WALL_HEIGHT, WALL_THICKNESS],
             "projectile_nominal_diameter_m": PROJECTILE_DIAMETER,
             "wall_actual_dimensions_m": wall_extents.tolist(),
