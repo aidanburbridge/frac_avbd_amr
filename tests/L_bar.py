@@ -4,13 +4,14 @@ L-bar fracture fixture loaded from STL.
 
 from __future__ import annotations
 
+import copy
 import math
 import numpy as np
 
 import geometry.octree as oct
 import geometry.voxelizer as vox
 from util.engine import SimulationSetup
-from util.voxel_assembly import VoxelAssembly
+from util.voxel_assembly import Bounds, VoxelAssembly
 
 
 # -------------------- Geometry (meters) -------------------- #
@@ -26,6 +27,7 @@ LOAD_OFFSET_FROM_RIGHT = 30.0 * MM
 BOTTOM_FIX_DEPTH = 20.0 * MM
 LOAD_PATCH_WIDTH = 20.0 * MM
 LOAD_BAND_THICKNESS = 20.0 * MM
+LOAD_CONTACT_GAP_FACTOR = 0.05
 LOAD_VELOCITY = np.array([0.0, 30 * MM, 0.0], dtype=float)
 # Optional explicit voxel-ID sets from util.selection_tool.
 FIXED_VOXEL_IDS = [0, 17, 568, 593, 1488, 1513, 2408, 2433, 3328, 3353, 4248, 4273]
@@ -112,6 +114,65 @@ def _select_bodies_by_ids(
     return [assembly.bodies[idx] for idx in unique_ids]
 
 
+def _axis_label(axis: int) -> str:
+    return "xyz"[int(axis)]
+
+
+def _bounds_from_targets(targets: list) -> Bounds:
+    mins = np.array([np.inf, np.inf, np.inf], dtype=float)
+    maxs = -mins
+    for body in targets:
+        aabb = body.get_aabb()
+        mins[0] = min(mins[0], aabb.min_x)
+        maxs[0] = max(maxs[0], aabb.max_x)
+        mins[1] = min(mins[1], aabb.min_y)
+        maxs[1] = max(maxs[1], aabb.max_y)
+        mins[2] = min(mins[2], aabb.min_z)
+        maxs[2] = max(maxs[2], aabb.max_z)
+    return Bounds(mins=mins, maxs=maxs)
+
+
+def _compute_axis_gap(bounds_a: Bounds, bounds_b: Bounds, axis: int) -> float:
+    if bounds_a.maxs[axis] <= bounds_b.mins[axis]:
+        return float(bounds_b.mins[axis] - bounds_a.maxs[axis])
+    if bounds_b.maxs[axis] <= bounds_a.mins[axis]:
+        return float(bounds_a.mins[axis] - bounds_b.maxs[axis])
+    return -float(
+        min(
+            bounds_a.maxs[axis] - bounds_b.mins[axis],
+            bounds_b.maxs[axis] - bounds_a.mins[axis],
+        )
+    )
+
+
+def _select_loading_surface_targets(
+    targets: list,
+    velocity: np.ndarray,
+    voxel_size: float,
+) -> tuple[list, int]:
+    vel = np.asarray(velocity, dtype=float).reshape(-1)
+    if vel.shape != (3,):
+        raise ValueError(f"Expected a 3D loading velocity, got shape {vel.shape}.")
+
+    axis = int(np.argmax(np.abs(vel)))
+    axis_speed = float(vel[axis])
+    if abs(axis_speed) <= 0.0:
+        raise ValueError("LOAD_VELOCITY must prescribe motion along at least one axis.")
+
+    coords = np.asarray([body.get_center()[axis] for body in targets], dtype=float)
+    surface_coord = float(np.min(coords) if axis_speed > 0.0 else np.max(coords))
+    tol = max(0.55 * float(voxel_size), 1.0e-12)
+
+    if axis_speed > 0.0:
+        surface_targets = [body for body, coord in zip(targets, coords) if coord <= surface_coord + tol]
+    else:
+        surface_targets = [body for body, coord in zip(targets, coords) if coord >= surface_coord - tol]
+
+    if not surface_targets:
+        raise ValueError("Failed to extract a surface slice from the selected load voxels.")
+    return surface_targets, axis
+
+
 def _set_targets_fixed(targets: list) -> None:
     for body in targets:
         body.set_static()
@@ -128,6 +189,32 @@ def _set_targets_kinematic_velocity(targets: list, velocity: np.ndarray) -> None
         body.velocity[:3] = vel
         body.velocity[3:] = 0.0
         body.prev_vel = body.velocity.copy()
+
+
+def _build_loading_indenter(
+    load_targets: list,
+    velocity: np.ndarray,
+    voxel_size: float,
+    contact_gap: float,
+) -> tuple[VoxelAssembly, list, int, float]:
+    surface_targets, load_axis = _select_loading_surface_targets(load_targets, velocity, voxel_size)
+    axis_speed = float(np.asarray(velocity, dtype=float)[load_axis])
+
+    shift = np.zeros(3, dtype=float)
+    shift[load_axis] = -math.copysign(float(voxel_size) + float(contact_gap), axis_speed)
+
+    indenter = VoxelAssembly([copy.deepcopy(body) for body in surface_targets], constraints=[])
+    indenter.translate(shift)
+    _set_targets_kinematic_velocity(indenter.bodies, velocity)
+
+    initial_gap = _compute_axis_gap(_bounds_from_targets(surface_targets), indenter.bounds(), load_axis)
+    if initial_gap <= 0.0:
+        raise ValueError(
+            f"Loading indenter is initialized intersecting the specimen (gap={initial_gap:.6e} m). "
+            "Increase LOAD_CONTACT_GAP_FACTOR or adjust the loading patch."
+        )
+
+    return indenter, surface_targets, load_axis, initial_gap
 
 
 def build_setup(sync_bodies: bool = True) -> SimulationSetup:
@@ -216,7 +303,7 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
             z=(z_min, z_min + fix_depth),
         )
 
-    # Displacement patch at inner horizontal edge, 30 mm from right outer edge.
+    # Contact loading patch at the inner horizontal edge, 30 mm from the right outer edge.
     x_center = x_max - LOAD_OFFSET_FROM_RIGHT
     patch_width = max(LOAD_PATCH_WIDTH, 2.0 * phys_h)
     x_half = 0.5 * patch_width
@@ -248,7 +335,23 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
         raise ValueError("No load-patch voxels selected. Adjust LOAD_OFFSET_FROM_RIGHT / LOAD_PATCH_WIDTH / VOX_RESOLUTION.")
 
     _set_targets_fixed(fixed_targets)
-    _set_targets_kinematic_velocity(load_targets, LOAD_VELOCITY)
+
+    specimen_load_ids = sorted(int(body.body_id) for body in load_targets)
+    contact_gap = max(LOAD_CONTACT_GAP_FACTOR * phys_h, 1.0e-9)
+    load_indenter, load_surface_targets, load_axis, initial_load_gap = _build_loading_indenter(
+        load_targets,
+        LOAD_VELOCITY,
+        phys_h,
+        contact_gap,
+    )
+
+    all_bodies = list(lbar.bodies) + list(load_indenter.bodies)
+    all_bonds = list(bonds)
+    for idx, body in enumerate(all_bodies):
+        body.body_id = idx
+
+    load_body_ids = [int(body.body_id) for body in load_indenter.bodies]
+    amr_dict = oct.merge_amr_blocks([amr_dict, oct.make_flat_amr_block(len(load_indenter.bodies))])
 
     print(f"L-bar voxels: {len(lbar.bodies)}")
     print(f"L-bar bonds: {len(bonds)}")
@@ -263,10 +366,14 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
             f"Load voxels: {len(load_targets)} "
             f"(x=[{x_lo:.4f}, {x_hi:.4f}], z=[{z_inner:.4f}, {z_hi:.4f}])"
         )
+    print(
+        f"Load indenter voxels: {len(load_indenter.bodies)} "
+        f"(surface slice={len(load_surface_targets)}, axis={_axis_label(load_axis)}, gap={initial_load_gap:.6e} m)"
+    )
 
     return SimulationSetup(
-        bodies=lbar.bodies,
-        constraints=bonds,
+        bodies=all_bodies,
+        constraints=all_bonds,
         dt=DT_PHYSICS,
         iterations=ITER,
         gravity=GRAV,
@@ -293,11 +400,18 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
             "load_offset_from_right": LOAD_OFFSET_FROM_RIGHT,
             "load_patch_width": LOAD_PATCH_WIDTH,
             "load_band_thickness": LOAD_BAND_THICKNESS,
+            "load_contact_gap_factor": LOAD_CONTACT_GAP_FACTOR,
+            "load_contact_gap_m": initial_load_gap,
+            "load_contact_axis": _axis_label(load_axis),
             "bottom_fix_depth": BOTTOM_FIX_DEPTH,
             "loading_velocity": LOAD_VELOCITY.tolist(),
+            "loading_strategy": "contact_indenter",
             "refine_stress_threshold": REFINE_STRESS_THRESHOLD,
             "fixed_voxel_ids": list(explicit_fixed_ids),
-            "load_voxel_ids": list(explicit_load_ids),
+            "load_voxel_ids": specimen_load_ids,
+            "load_body_ids": load_body_ids,
+            "load_surface_voxel_ids": [int(body.body_id) for body in load_surface_targets],
+            "load_indenter_body_count": len(load_indenter.bodies),
             "dt_physics": DT_PHYSICS,
             "dt_render": DT_RENDER,
             "steps": STEPS,

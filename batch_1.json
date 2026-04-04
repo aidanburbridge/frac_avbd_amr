@@ -1,0 +1,93 @@
+{
+  "runs": [
+    {
+      "test": "ISO_20753",
+      "mode": "zip",
+      "vary": {
+        "dt_physics": [
+          0.00025,
+          0.000125
+        ],
+        "steps": [
+          3500,
+          7000
+        ]
+      },
+      "fixed": {
+        "load_velocity": 0.005,
+        "youngs_modulus": 2000000000.0
+      }
+    },
+    {
+      "test": "L_bar",
+      "mode": "zip",
+      "vary": {
+        "load_velocity": [
+          0.03,
+          0.03,
+          0.02
+        ],
+        "dt_physics": [
+          0.00025,
+          0.000125,
+          0.00025
+        ],
+        "steps": [
+          10000,
+          20000,
+          15000
+        ]
+      },
+      "fixed": {
+        "youngs_modulus": 2000000000.0
+      }
+    },
+    {
+      "test": "miehe_shear",
+      "mode": "zip",
+      "vary": {
+        "dt_physics": [
+          0.000012229,
+          0.000008
+        ],
+        "steps": [
+          40888,
+          62502
+        ]
+      },
+      "fixed": {
+        "load_velocity": 0.0005,
+        "youngs_modulus": 210000000000.0
+      }
+    },
+    {
+      "test": "three_point_bending",
+      "mode": "product",
+      "vary": {
+        "youngs_modulus": [
+          2000000000.0,
+          3000000000.0
+        ]
+      },
+      "fixed": {
+        "load_velocity": 0.002,
+        "dt_physics": 0.00015,
+        "steps": 8000
+      }
+    },
+    {
+      "test": "projectile_impact",
+      "mode": "product",
+      "vary": {
+        "impact_velocity": [
+          30.0,
+          35.0
+        ]
+      },
+      "fixed": {
+        "dt_physics": 0.000000581,
+        "steps": 40000
+      }
+    }
+  ]
+}

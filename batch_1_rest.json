@@ -1,0 +1,33 @@
+{
+  "runs": [
+    {
+      "test": "three_point_bending",
+      "mode": "product",
+      "vary": {
+        "youngs_modulus": [
+          2000000000.0,
+          3000000000.0
+        ]
+      },
+      "fixed": {
+        "load_velocity": 0.002,
+        "dt_physics": 0.00015,
+        "steps": 8000
+      }
+    },
+    {
+      "test": "projectile_impact",
+      "mode": "product",
+      "vary": {
+        "impact_velocity": [
+          30.0,
+          35.0
+        ]
+      },
+      "fixed": {
+        "dt_physics": 0.000000581,
+        "steps": 40000
+      }
+    }
+  ]
+}

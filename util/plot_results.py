@@ -278,14 +278,9 @@ def _clear_existing_plots(plots_dir: Path, benchmark_slug: str) -> None:
         path.unlink(missing_ok=True)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate lightweight result figures from analysis CSVs.")
-    parser.add_argument("run_dir", help="Run directory, e.g. output/projectile_impact/run_001")
-    parser.add_argument("--analysis-dir", default="analysis", help="Analysis subdirectory name.")
-    args = parser.parse_args()
-
-    run_dir = Path(args.run_dir).expanduser().resolve()
-    analysis_dir = run_dir / args.analysis_dir
+def generate_plots(run_dir: str | Path, analysis_dir_name: str = "analysis") -> Path:
+    run_dir = Path(run_dir).expanduser().resolve()
+    analysis_dir = run_dir / analysis_dir_name
     history_path = analysis_dir / "time_history.csv"
     if not history_path.exists():
         raise FileNotFoundError(f"Missing {history_path}. Run util/postprocess_results.py first.")
@@ -416,6 +411,16 @@ def main() -> None:
         _save_plot(fig, plots_dir / f"{benchmark_slug}_process_zone_area_proxy_vs_{axis_slug}.png")
 
     print(f"[plot] Wrote figures to {plots_dir}")
+    return plots_dir
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Generate lightweight result figures from analysis CSVs.")
+    parser.add_argument("run_dir", help="Run directory, e.g. output/projectile_impact/run_001")
+    parser.add_argument("--analysis-dir", default="analysis", help="Analysis subdirectory name.")
+    args = parser.parse_args()
+
+    generate_plots(args.run_dir, analysis_dir_name=args.analysis_dir)
 
 
 if __name__ == "__main__":

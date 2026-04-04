@@ -415,7 +415,7 @@ def _load_direction(metadata: dict[str, Any], benchmark_name: str | None = None)
 
 
 def _load_tracking_ids(metadata: dict[str, Any]) -> list[int]:
-    for key in ("load_voxel_ids", "load_body_ids"):
+    for key in ("load_body_ids", "load_voxel_ids"):
         values = metadata.get(key)
         if values:
             return [int(v) for v in values]
