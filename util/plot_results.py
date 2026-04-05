@@ -159,51 +159,120 @@ def _displacement_unit_label(summary: dict[str, str], metadata: dict[str, object
     return "exported coordinate units"
 
 
-def _has_trusted_displacement_metadata(summary: dict[str, str], metadata: dict[str, object]) -> bool:
-    return _geometry_scaled(summary, metadata)
+def _require_finite_column(data: dict[str, np.ndarray], key: str, *, context: str) -> np.ndarray:
+    values = data.get(key)
+    if values is None:
+        raise RuntimeError(f"{context}: '{key}' is missing from time_history.csv.")
+    if not np.isfinite(values).any():
+        raise RuntimeError(f"{context}: '{key}' in time_history.csv has no finite values.")
+    return values
+
+
+def _series_has_finite_values(values: np.ndarray | None) -> bool:
+    return values is not None and np.isfinite(values).any()
+
+
+def _series_has_positive_values(values: np.ndarray | None) -> bool:
+    if values is None:
+        return False
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return False
+    return float(np.max(finite)) > 0.0
+
+
+def _select_displacement_axis(data: dict[str, np.ndarray]) -> np.ndarray:
+    for key in ("load_displacement_along_loading_axis", "load_displacement_magnitude"):
+        values = data.get(key)
+        if _series_has_finite_values(values):
+            return values
+    raise RuntimeError(
+        "Requested x-axis 'displacement' but neither 'load_displacement_along_loading_axis' nor "
+        "'load_displacement_magnitude' has finite values in time_history.csv."
+    )
 
 
 def _select_progress_axis(
     data: dict[str, np.ndarray],
     *,
-    allow_displacement_axis: bool,
+    x_axis_mode: str,
     displacement_unit_label: str,
-) -> tuple[np.ndarray, str, str, str, str]:
-    if allow_displacement_axis:
-        for key in ("load_displacement_along_loading_axis", "load_displacement_magnitude"):
-            values = data.get(key)
-            if values is not None and np.isfinite(values).any():
-                return (
-                    values,
-                    key,
-                    f"Prescribed displacement [{displacement_unit_label}]",
-                    "Prescribed Displacement",
-                    "prescribed_displacement",
-                )
+) -> tuple[np.ndarray, str, str, str]:
+    if x_axis_mode == "frame":
+        frame_values = data.get("frame")
+        if frame_values is None:
+            return (
+                np.arange(len(next(iter(data.values()))), dtype=float),
+                "Frame",
+                "Frame",
+                "frame",
+            )
+        if not np.isfinite(frame_values).any():
+            raise RuntimeError("Requested x-axis 'frame' but 'frame' in time_history.csv has no finite values.")
+        return frame_values, "Frame", "Frame", "frame"
 
-    time_values = data.get("time", np.arange(len(next(iter(data.values()))), dtype=float))
-    return time_values, "time", "Time [s]", "Time", "time"
+    if x_axis_mode == "step":
+        return _require_finite_column(data, "step", context=f"Requested x-axis '{x_axis_mode}'"), "Solver step", "Solver Step", "step"
 
-
-def _event_markers(summary: dict[str, str], x_key: str) -> list[tuple[str, float]]:
-    if x_key == "time":
-        key_map = (
-            ("first break", "first_broken_bond_time"),
-            ("peak growth stage", "peak_crack_growth_stage_time"),
-            ("final plateau", "final_plateau_time"),
-            ("peak traction util", "peak_mixed_mode_traction_utilization_time"),
+    if x_axis_mode == "displacement":
+        return (
+            _select_displacement_axis(data),
+            f"Prescribed displacement [{displacement_unit_label}]",
+            "Prescribed Displacement",
+            "displacement",
         )
+
+    if x_axis_mode == "time":
+        return _require_finite_column(data, "time", context=f"Requested x-axis '{x_axis_mode}'"), "Time [s]", "Time", "time"
+
+    raise ValueError(f"Unsupported x-axis mode: {x_axis_mode}")
+
+
+def _event_markers(summary: dict[str, str], data: dict[str, np.ndarray], x_axis_mode: str) -> list[tuple[str, float]]:
+    key_map = (
+        ("first break", "first_broken_bond"),
+        ("peak growth stage", "peak_crack_growth_stage"),
+        ("final plateau", "final_plateau"),
+        ("peak traction-cap util", "peak_mixed_mode_traction_utilization"),
+    )
+
+    if x_axis_mode == "frame":
+        suffix = "frame"
+    elif x_axis_mode == "time":
+        suffix = "time"
+    elif x_axis_mode == "displacement":
+        suffix = "displacement"
+    elif x_axis_mode == "step":
+        frame_values = data.get("frame")
+        if frame_values is None:
+            raise RuntimeError(
+                "Requested x-axis 'step' but event markers require the 'frame' column in time_history.csv "
+                "because run_summary.csv stores these event locations by frame."
+            )
+        step_values = data.get("step")
+        if step_values is None:
+            raise RuntimeError("Requested x-axis 'step' but 'step' is missing from time_history.csv.")
+        finite_mask = np.isfinite(frame_values) & np.isfinite(step_values)
+        if not np.any(finite_mask):
+            raise RuntimeError(
+                "Requested x-axis 'step' but 'frame' and 'step' in time_history.csv do not contain "
+                "overlapping finite values for event mapping."
+            )
+        frame_finite = frame_values[finite_mask]
+        step_finite = step_values[finite_mask]
+        events: list[tuple[str, float]] = []
+        for label, base_key in key_map:
+            frame_value = _summary_float(summary, f"{base_key}_frame")
+            if math.isfinite(frame_value):
+                nearest_idx = int(np.argmin(np.abs(frame_finite - frame_value)))
+                events.append((label, float(step_finite[nearest_idx])))
+        return events
     else:
-        key_map = (
-            ("first break", "first_broken_bond_displacement"),
-            ("peak growth stage", "peak_crack_growth_stage_displacement"),
-            ("final plateau", "final_plateau_displacement"),
-            ("peak traction util", "peak_mixed_mode_traction_utilization_displacement"),
-        )
+        raise ValueError(f"Unsupported x-axis mode: {x_axis_mode}")
 
     events: list[tuple[str, float]] = []
-    for label, key in key_map:
-        value = _summary_float(summary, key)
+    for label, base_key in key_map:
+        value = _summary_float(summary, f"{base_key}_{suffix}")
         if math.isfinite(value):
             events.append((label, float(value)))
     return events
@@ -253,7 +322,7 @@ def _add_event_key(ax, events: list[tuple[str, float]]) -> None:
 
     ax.legend(
         handles=handles,
-        title="Event key",
+        title="Key events",
         loc="upper left",
         bbox_to_anchor=(1.02, 1.0),
         ncol=1,
@@ -265,10 +334,13 @@ def _add_event_key(ax, events: list[tuple[str, float]]) -> None:
 
 
 def _save_plot(fig, path: Path) -> None:
+    import matplotlib.pyplot as plt
+
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.tight_layout(pad=1.1)
     fig.savefig(path, dpi=160, bbox_inches="tight", pad_inches=0.12)
     fig.clf()
+    plt.close(fig)
 
 
 def _clear_existing_plots(plots_dir: Path, benchmark_slug: str) -> None:
@@ -278,7 +350,7 @@ def _clear_existing_plots(plots_dir: Path, benchmark_slug: str) -> None:
         path.unlink(missing_ok=True)
 
 
-def generate_plots(run_dir: str | Path, analysis_dir_name: str = "analysis") -> Path:
+def generate_plots(run_dir: str | Path, analysis_dir_name: str = "analysis", x_axis: str = "frame") -> Path:
     run_dir = Path(run_dir).expanduser().resolve()
     analysis_dir = run_dir / analysis_dir_name
     history_path = analysis_dir / "time_history.csv"
@@ -296,7 +368,6 @@ def generate_plots(run_dir: str | Path, analysis_dir_name: str = "analysis") -> 
 
     metadata = _read_metadata(run_dir / "meta_data.json")
     summary = _read_summary_row(analysis_dir / "run_summary.csv")
-    t = data.get("time", np.arange(len(next(iter(data.values()))), dtype=float))
     benchmark_name = _canonical_benchmark_name(summary.get("benchmark_name") or metadata.get("benchmark_name"), run_dir)
     benchmark_slug = _benchmark_slug(benchmark_name)
     displacement_unit_label = _displacement_unit_label(summary, metadata)
@@ -321,19 +392,25 @@ def generate_plots(run_dir: str | Path, analysis_dir_name: str = "analysis") -> 
         metadata_key="energy_unit_label",
         default="energy units of the solver setup",
     )
-    x, x_key, x_label, title_suffix, axis_slug = _select_progress_axis(
+    x, x_label, title_suffix, axis_slug = _select_progress_axis(
         data,
-        allow_displacement_axis=_has_trusted_displacement_metadata(summary, metadata),
+        x_axis_mode=x_axis,
         displacement_unit_label=displacement_unit_label,
     )
-    events = _event_markers(summary, x_key)
+    events = _event_markers(summary, data, x_axis)
     plots_dir = analysis_dir / "plots"
     _clear_existing_plots(plots_dir, benchmark_slug)
 
+    crack_area = _require_finite_column(data, "crack_area_proxy", context="Missing required plot series")
+    broken_bond_count = _require_finite_column(data, "broken_bond_count", context="Missing required plot series")
+    peak_stress_proxy = _require_finite_column(data, "peak_stress_proxy", context="Missing required plot series")
+    traction_cap_utilization = data.get("peak_mixed_mode_traction_utilization")
+    stress_exceedance_fraction = data.get("stress_exceedance_fraction")
+    process_zone_area_proxy = data.get("process_zone_area_proxy")
+
     fig, ax = plt.subplots(figsize=(7, 4))
-    for key in ("crack_area_proxy",):
-        ax.plot(x, data.get(key, np.zeros_like(x)), linewidth=2.0)
-    _annotate_events(ax, x, data.get("crack_area_proxy", np.zeros_like(x)), events)
+    ax.plot(x, crack_area, linewidth=2.0)
+    _annotate_events(ax, x, crack_area, events)
     _add_event_key(ax, events)
     ax.set_xlabel(x_label)
     ax.set_ylabel(f"Crack area proxy [{area_unit_label}]")
@@ -342,8 +419,8 @@ def generate_plots(run_dir: str | Path, analysis_dir_name: str = "analysis") -> 
     _save_plot(fig, plots_dir / f"{benchmark_slug}_crack_area_proxy_vs_{axis_slug}.png")
 
     fig, ax = plt.subplots(figsize=(7, 4))
-    ax.plot(x, data.get("broken_bond_count", np.zeros_like(x)), linewidth=1.8)
-    _annotate_events(ax, x, data.get("broken_bond_count", np.zeros_like(x)), events)
+    ax.plot(x, broken_bond_count, linewidth=1.8)
+    _annotate_events(ax, x, broken_bond_count, events)
     _add_event_key(ax, events)
     ax.set_xlabel(x_label)
     ax.set_ylabel("Broken bond count")
@@ -351,20 +428,24 @@ def generate_plots(run_dir: str | Path, analysis_dir_name: str = "analysis") -> 
     ax.grid(True, alpha=0.3)
     _save_plot(fig, plots_dir / f"{benchmark_slug}_broken_bond_count_vs_{axis_slug}.png")
 
-    if "peak_mixed_mode_traction_utilization" in data and np.isfinite(data["peak_mixed_mode_traction_utilization"]).any():
+    if _series_has_finite_values(traction_cap_utilization):
         fig, ax = plt.subplots(figsize=(7, 4))
-        ax.plot(x, data["peak_mixed_mode_traction_utilization"], linewidth=2.0)
-        _annotate_events(ax, x, data["peak_mixed_mode_traction_utilization"], events)
+        ax.plot(x, traction_cap_utilization, linewidth=2.0)
+        _annotate_events(ax, x, traction_cap_utilization, events)
         _add_event_key(ax, events)
         ax.set_xlabel(x_label)
-        ax.set_ylabel("Peak mixed-mode traction utilization")
-        ax.set_title(_format_plot_title(benchmark_name, "Mixed-Mode Traction Utilization", title_suffix), fontsize=13, pad=10)
+        ax.set_ylabel("Peak bond traction-cap utilization")
+        ax.set_title(
+            _format_plot_title(benchmark_name, "Peak Bond Traction-Cap Utilization (Diagnostic)", title_suffix),
+            fontsize=13,
+            pad=10,
+        )
         ax.grid(True, alpha=0.3)
         _save_plot(fig, plots_dir / f"{benchmark_slug}_mixed_mode_traction_utilization_vs_{axis_slug}.png")
 
     fig, ax = plt.subplots(figsize=(7, 4))
-    ax.plot(x, data.get("peak_stress_proxy", np.full_like(x, math.nan)))
-    _annotate_events(ax, x, data.get("peak_stress_proxy", np.full_like(x, math.nan)), events)
+    ax.plot(x, peak_stress_proxy)
+    _annotate_events(ax, x, peak_stress_proxy, events)
     _add_event_key(ax, events)
     ax.set_xlabel(x_label)
     ax.set_ylabel(f"Max principal tensile stress proxy [{stress_unit_label}]")
@@ -372,11 +453,11 @@ def generate_plots(run_dir: str | Path, analysis_dir_name: str = "analysis") -> 
     ax.grid(True, alpha=0.3)
     _save_plot(fig, plots_dir / f"{benchmark_slug}_peak_stress_proxy_vs_{axis_slug}.png")
 
-    if "stress_exceedance_fraction" in data and np.isfinite(data["stress_exceedance_fraction"]).any():
+    if _series_has_finite_values(stress_exceedance_fraction):
         fig, ax = plt.subplots(figsize=(7, 4))
-        ax.plot(x, data["stress_exceedance_fraction"])
+        ax.plot(x, stress_exceedance_fraction)
         ax.set_xlabel(x_label)
-        ax.set_ylabel("Stress-proxy threshold exceedance fraction")
+        ax.set_ylabel("Fraction above stress-proxy threshold")
         ax.set_title(_format_plot_title(benchmark_name, "Stress-Proxy Threshold Exceedance", title_suffix), fontsize=13, pad=10)
         ax.grid(True, alpha=0.3)
         _save_plot(fig, plots_dir / f"{benchmark_slug}_stress_proxy_threshold_exceedance_vs_{axis_slug}.png")
@@ -385,25 +466,26 @@ def generate_plots(run_dir: str | Path, analysis_dir_name: str = "analysis") -> 
     plotted_energy = False
     for key, label in (
         ("fracture_work", "Fracture work"),
-        ("bond_potential", "Bond potential energy"),
-        ("mech_energy", "Mechanical energy"),
-        ("accounted_energy", "Accounted energy"),
-        ("kinetic", "Kinetic energy"),
+        ("bond_potential", "Bond potential"),
+        ("kinetic", "Kinetic"),
+        ("contact_potential", "Contact potential"),
     ):
         if key in data and np.isfinite(data[key]).any():
             ax.plot(x, data[key], label=label)
             plotted_energy = True
-    ax.set_xlabel(x_label)
-    ax.set_ylabel(f"Energy [{energy_unit_label}]")
-    ax.set_title(_format_plot_title(benchmark_name, "Energy Diagnostics", title_suffix), fontsize=13, pad=10)
     if plotted_energy:
-        ax.legend()
-    ax.grid(True, alpha=0.3)
-    _save_plot(fig, plots_dir / f"{benchmark_slug}_energy_diagnostics_vs_{axis_slug}.png")
+        ax.set_xlabel(x_label)
+        ax.set_ylabel(f"Energy [{energy_unit_label}]")
+        ax.set_title(_format_plot_title(benchmark_name, "Energy Diagnostics", title_suffix), fontsize=13, pad=10)
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+        _save_plot(fig, plots_dir / f"{benchmark_slug}_energy_diagnostics_vs_{axis_slug}.png")
+    else:
+        plt.close(fig)
 
-    if "process_zone_area_proxy" in data and np.isfinite(data["process_zone_area_proxy"]).any():
+    if _series_has_positive_values(process_zone_area_proxy):
         fig, ax = plt.subplots(figsize=(7, 4))
-        ax.plot(x, data["process_zone_area_proxy"])
+        ax.plot(x, process_zone_area_proxy)
         ax.set_xlabel(x_label)
         ax.set_ylabel(f"Process-zone area proxy [{area_unit_label}]")
         ax.set_title(_format_plot_title(benchmark_name, "Process-Zone Area Proxy", title_suffix), fontsize=13, pad=10)
@@ -418,9 +500,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Generate lightweight result figures from analysis CSVs.")
     parser.add_argument("run_dir", help="Run directory, e.g. output/projectile_impact/run_001")
     parser.add_argument("--analysis-dir", default="analysis", help="Analysis subdirectory name.")
+    parser.add_argument(
+        "--x-axis",
+        default="frame",
+        choices=("frame", "step", "displacement", "time"),
+        help="X-axis for generated plots. Defaults to exported frame.",
+    )
     args = parser.parse_args()
 
-    generate_plots(args.run_dir, analysis_dir_name=args.analysis_dir)
+    generate_plots(args.run_dir, analysis_dir_name=args.analysis_dir, x_axis=args.x_axis)
 
 
 if __name__ == "__main__":

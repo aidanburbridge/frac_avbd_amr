@@ -1,0 +1,19 @@
+{
+  "runs": [
+    {
+      "test": "three_point_bending",
+      "mode": "product",
+      "vary": {
+        "dt_physics": [
+          0.00005,
+          0.00003
+        ]
+      },
+      "fixed": {
+        "load_velocity": 0.002,
+        "steps": 8000,
+        "youngs_modulus": 3000000000.0
+      }
+    }
+  ]
+}

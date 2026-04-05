@@ -844,6 +844,7 @@ def analyze_run(
     damage_threshold: float,
     stress_threshold: float | None,
     bond_dump_mode: str,
+    analysis_dir_name: str = "analysis",
 ) -> dict[str, Any]:
     data_dir, mode = _find_data_dir(run_dir)
     metadata = _maybe_json(run_dir / "meta_data.json")
@@ -1121,7 +1122,7 @@ def analyze_run(
     final_plateau_row = _final_plateau_row(time_history_rows)
     peak_mixed_mode_row, peak_mixed_mode_value = _peak_row(time_history_rows, "peak_mixed_mode_traction_utilization")
 
-    analysis_dir = run_dir / "analysis"
+    analysis_dir = run_dir / analysis_dir_name
     analysis_dir.mkdir(parents=True, exist_ok=True)
 
     if not include_bond_strain_quantities:

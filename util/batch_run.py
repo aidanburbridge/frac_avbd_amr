@@ -10,16 +10,19 @@ import time
 import traceback
 from contextlib import contextmanager
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from util.engine import SimulationSetup, build_solver, run_headless
 from util.simulate import _save_metadata, convert_results
 
-
-REPO_ROOT = Path(__file__).resolve().parent
 OUTPUT_ROOT = REPO_ROOT / "output" / "batches"
 
 
