@@ -7,15 +7,16 @@ import ...AVBDConstraints: BondConstraint, get_effective_stiffness
 import ...Maths: FLOAT, quat_to_rotmat, transform_point
 
 export CriteriaConfig, RefineSpec, FractureSpec, RefineKind, FractureKind, LogicOperation,
-    REFINE_LAMBDA, REFINE_ENERGY, REFINE_STRESS, FRAC_LAMBDA, FRAC_STRETCH, FRAC_ENERGY, ANY, ALL,
-    SimpleRefine, StressRefine, SimpleFracture, default_criteria_config, build_criteria_config,
+    REFINE_LAMBDA, REFINE_ENERGY, REFINE_STRESS, REFINE_DEVIATORIC_STRESS,
+    FRAC_LAMBDA, FRAC_STRETCH, FRAC_ENERGY, ANY, ALL,
+    SimpleRefine, StressRefine, DeviatoricStressRefine, SimpleFracture, default_criteria_config, build_criteria_config,
     compute_body_stress_data, collect_stress_refinement_candidates, should_refine, should_fracture
 
 # ---------- Enums and Logic Params ---------- #
 
 @enum LogicOperation ANY ALL
 
-@enum RefineKind REFINE_LAMBDA REFINE_ENERGY REFINE_STRESS
+@enum RefineKind REFINE_LAMBDA REFINE_ENERGY REFINE_STRESS REFINE_DEVIATORIC_STRESS
 @enum FractureKind FRAC_LAMBDA FRAC_STRETCH FRAC_ENERGY
 
 # ---------- Structs ---------- #
@@ -42,6 +43,10 @@ StressRefine(threshold::Real; exclude_kinematic::Bool=true) = RefineSpec(
     REFINE_STRESS,
     SVector(Float64(threshold), exclude_kinematic ? 1.0 : 0.0),
 )
+DeviatoricStressRefine(threshold::Real; exclude_kinematic::Bool=true) = RefineSpec(
+    REFINE_DEVIATORIC_STRESS,
+    SVector(Float64(threshold), exclude_kinematic ? 1.0 : 0.0),
+)
 SimpleFracture(threshold::Real=1.0) = FractureSpec(FRAC_LAMBDA, SVector(Float64(threshold), 0.0))
 
 function default_criteria_config()::CriteriaConfig
@@ -64,7 +69,7 @@ function build_criteria_config(;
         refine_specs = copy(cfg.refine_specs)
         push!(
             refine_specs,
-            StressRefine(
+            DeviatoricStressRefine(
                 refine_stress_threshold;
                 exclude_kinematic=refine_stress_exclude_kinematic,
             ),
@@ -80,7 +85,7 @@ end
 # -------------------------------------------------- #
 
 @inline function _check_refinement_criteria(spec::RefineSpec, con, lam_r, r)::Bool
-    spec.kind != REFINE_STRESS && _bond_touches_prescribed_body(con) && return false
+    spec.kind != REFINE_STRESS && spec.kind != REFINE_DEVIATORIC_STRESS && _bond_touches_prescribed_body(con) && return false
 
     # Simple lambda refinement check
     if spec.kind == REFINE_LAMBDA
@@ -102,7 +107,7 @@ end
         eta_hi = spec.params[2] > eta_lo ? spec.params[2] : 1.0
         return eta >= eta_lo && eta < eta_hi
 
-    elseif spec.kind == REFINE_STRESS
+    elseif spec.kind == REFINE_STRESS || spec.kind == REFINE_DEVIATORIC_STRESS
         # Stress-driven refinement is evaluated in a body pass after the
         # converged solve. Keep the bond path inactive for this criterion.
         return false
@@ -184,11 +189,15 @@ function compute_body_stress_data(sim)
 end
 
 function collect_stress_refinement_candidates(config::CriteriaConfig, sim)::Vector{Int}
-    stress_specs = RefineSpec[spec for spec in config.refine_specs if spec.kind == REFINE_STRESS]
+    stress_specs = RefineSpec[
+        spec for spec in config.refine_specs
+        if spec.kind == REFINE_STRESS || spec.kind == REFINE_DEVIATORIC_STRESS
+    ]
     isempty(stress_specs) && return Int[]
 
     stress_data, id_to_local = compute_body_stress_data(sim)
     principal_tension = zeros(Float64, length(sim.bodies))
+    deviatoric_norm = zeros(Float64, length(sim.bodies))
     onset_vals = zeros(Float64, length(sim.bodies))
     candidates = Int[]
     onset_threshold = _stress_refine_onset_threshold(config)
@@ -200,17 +209,19 @@ function collect_stress_refinement_candidates(config::CriteriaConfig, sim)::Vect
         local_idx == 0 && continue
 
         principal_tension[body_idx] = _stress_max_principal_tension(stress_data, local_idx)
+        deviatoric_norm[body_idx] = _stress_deviatoric_norm(stress_data, local_idx)
         onset_vals[body_idx] = _max_incident_bond_onset(sim, body_idx)
     end
 
     for body_idx in sim.active_body_ids
         body = sim.bodies[body_idx]
-        stress_val = principal_tension[body_idx]
         onset_val = onset_vals[body_idx]
-        neighbor_peak = _max_neighbor_stress(sim, body_idx, principal_tension)
 
         if config.refine_logic == ANY
             for spec in stress_specs
+                stress_vals = _stress_refinement_values(spec, principal_tension, deviatoric_norm)
+                stress_val = stress_vals[body_idx]
+                neighbor_peak = _max_neighbor_stress(sim, body_idx, stress_vals)
                 _check_stress_refinement_criteria(
                     spec,
                     sim,
@@ -227,6 +238,9 @@ function collect_stress_refinement_candidates(config::CriteriaConfig, sim)::Vect
         else
             allow = true
             for spec in stress_specs
+                stress_vals = _stress_refinement_values(spec, principal_tension, deviatoric_norm)
+                stress_val = stress_vals[body_idx]
+                neighbor_peak = _max_neighbor_stress(sim, body_idx, stress_vals)
                 _check_stress_refinement_criteria(
                     spec,
                     sim,
@@ -348,7 +362,7 @@ end
     neighbor_peak::Float64,
     local_peak_ratio::Float64,
 )::Bool
-    spec.kind == REFINE_STRESS || return false
+    (spec.kind == REFINE_STRESS || spec.kind == REFINE_DEVIATORIC_STRESS) || return false
 
     if _stress_refine_excludes_kinematic(spec) && _body_has_prescribed_bond(sim, body_idx)
         return false
@@ -392,6 +406,34 @@ end
         zx yz zz
     ]
     return max(eigmax(Symmetric(sigma)), 0.0)
+end
+
+@inline function _stress_deviatoric_norm(stress_data, idx)::Float64
+    xx = stress_data[idx, 1]
+    yy = stress_data[idx, 2]
+    zz = stress_data[idx, 3]
+    xy = stress_data[idx, 4]
+    yz = stress_data[idx, 5]
+    zx = stress_data[idx, 6]
+
+    hydro = (xx + yy + zz) / 3.0
+    sxx = xx - hydro
+    syy = yy - hydro
+    szz = zz - hydro
+
+    mag_sq = sxx^2 + syy^2 + szz^2 + 2.0 * (xy^2 + yz^2 + zx^2)
+    return sqrt(max(mag_sq, 0.0))
+end
+
+@inline function _stress_refinement_values(
+    spec::RefineSpec,
+    principal_tension::Vector{Float64},
+    deviatoric_norm::Vector{Float64},
+)::Vector{Float64}
+    if spec.kind == REFINE_DEVIATORIC_STRESS
+        return deviatoric_norm
+    end
+    return principal_tension
 end
 
 @inline function _body_has_prescribed_motion(body)::Bool

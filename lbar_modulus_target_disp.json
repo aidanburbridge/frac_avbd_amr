@@ -1,0 +1,23 @@
+{
+  "batch_name": "lbar_modulus_target_disp",
+  "runs": [
+    {
+      "test": "L_bar",
+      "mode": "product",
+      "vary": {
+        "youngs_modulus": [
+          1000000000.0,
+          1500000000.0,
+          2000000000.0,
+          2500000000.0,
+          3000000000.0
+        ]
+      },
+      "fixed": {
+        "load_velocity": 0.03,
+        "dt_physics": 0.00025,
+        "target_displacement": 0.05
+      }
+    }
+  ]
+}

@@ -6,6 +6,7 @@ import importlib
 import inspect
 import itertools
 import json
+import math
 import time
 import traceback
 from contextlib import contextmanager
@@ -225,11 +226,26 @@ def _validate_run_spec(run_spec: Any, index: int) -> dict[str, Any]:
     module = importlib.import_module(spec["module_name"])
     defaults = spec["defaults_fn"](module)
     allowed_keys = set(defaults)
+    supports_target_displacement = "load_velocity" in defaults
+    if supports_target_displacement:
+        allowed_keys.add("target_displacement")
 
     overlap = set(vary).intersection(fixed)
     if overlap:
         names = ", ".join(sorted(overlap))
         raise ManifestError(f"runs[{index}] has keys in both 'vary' and 'fixed': {names}")
+
+    if "target_displacement" in vary or "target_displacement" in fixed:
+        if not supports_target_displacement:
+            raise ManifestError(
+                f"runs[{index}] uses target_displacement, but test '{test_name}' does not support "
+                "displacement-controlled step resolution."
+            )
+        if "steps" in vary or "steps" in fixed:
+            raise ManifestError(
+                f"runs[{index}] specifies both 'steps' and 'target_displacement'. "
+                "Use exactly one of them."
+            )
 
     unknown_keys = (set(vary) | set(fixed)) - allowed_keys
     if unknown_keys:
@@ -256,6 +272,37 @@ def _validate_run_spec(run_spec: Any, index: int) -> dict[str, Any]:
         "spec": spec,
         "defaults": defaults,
     }
+
+
+def _resolve_derived_parameters(resolved: dict[str, Any], *, test_name: str, run_index: int) -> dict[str, Any]:
+    resolved_copy = dict(resolved)
+    target_displacement = resolved_copy.get("target_displacement")
+    if target_displacement is None:
+        return resolved_copy
+
+    try:
+        target_displacement = float(target_displacement)
+        load_velocity = float(resolved_copy["load_velocity"])
+        dt_physics = float(resolved_copy["dt_physics"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ManifestError(
+            f"runs[{run_index}] for '{test_name}' could not resolve target_displacement because "
+            "load_velocity or dt_physics is missing/invalid."
+        ) from exc
+
+    if not math.isfinite(target_displacement) or target_displacement <= 0.0:
+        raise ManifestError(f"runs[{run_index}].target_displacement must be a positive finite number.")
+    if not math.isfinite(load_velocity) or abs(load_velocity) <= 0.0:
+        raise ManifestError(f"runs[{run_index}] has invalid load_velocity for target_displacement resolution.")
+    if not math.isfinite(dt_physics) or dt_physics <= 0.0:
+        raise ManifestError(f"runs[{run_index}] has invalid dt_physics for target_displacement resolution.")
+
+    steps = max(1, int(math.ceil(target_displacement / (abs(load_velocity) * dt_physics))))
+    resolved_copy["target_displacement"] = target_displacement
+    resolved_copy["steps"] = steps
+    resolved_copy["resolved_total_displacement"] = abs(load_velocity) * dt_physics * steps
+    resolved_copy["steps_computed_from_target_displacement"] = True
+    return resolved_copy
 
 
 def _expand_parameter_sets(mode: str, vary: dict[str, list[Any]]) -> list[dict[str, Any]]:
@@ -297,6 +344,11 @@ def _expand_manifest(manifest: dict[str, Any]) -> tuple[list[dict[str, Any]], li
             resolved = dict(validated["defaults"])
             resolved.update(validated["fixed"])
             resolved.update(swept_values)
+            resolved = _resolve_derived_parameters(
+                resolved,
+                test_name=validated["test"],
+                run_index=index,
+            )
             expanded_runs.append(
                 {
                     "test": validated["test"],
@@ -418,6 +470,13 @@ def _run_single_case(
     try:
         with _temporary_overrides(module, overrides):
             setup = _build_setup(module)
+            setup.metadata = dict(getattr(setup, "metadata", None) or {})
+            if "target_displacement" in run_spec["resolved"]:
+                setup.metadata["target_displacement"] = float(run_spec["resolved"]["target_displacement"])
+                setup.metadata["resolved_total_displacement"] = float(run_spec["resolved"]["resolved_total_displacement"])
+                setup.metadata["steps_computed_from_target_displacement"] = bool(
+                    run_spec["resolved"].get("steps_computed_from_target_displacement", False)
+                )
             raw_dir = run_dir / "raw"
             steps = int(setup.headless_steps or 1000)
             headless_kwargs = dict(setup.headless_kwargs or {})

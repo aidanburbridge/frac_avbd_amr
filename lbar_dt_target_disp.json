@@ -1,0 +1,23 @@
+{
+  "batch_name": "lbar_dt_target_disp",
+  "runs": [
+    {
+      "test": "L_bar",
+      "mode": "product",
+      "vary": {
+        "dt_physics": [
+          0.0001,
+          0.00015,
+          0.0002,
+          0.00025,
+          0.0004
+        ]
+      },
+      "fixed": {
+        "load_velocity": 0.03,
+        "youngs_modulus": 2000000000.0,
+        "target_displacement": 0.05
+      }
+    }
+  ]
+}
