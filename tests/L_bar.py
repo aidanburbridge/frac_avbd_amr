@@ -60,7 +60,7 @@ PYTHON_SOLVER_PARAMS = {
     "alpha": 0.95,
     "gamma": 0.99,
     "debug_contacts": False,
-    "criteria_refine_stress_threshold": REFINE_STRESS_THRESHOLD,
+    "criteria_refine_stress_threshold": 0.0,
     "criteria_refine_stress_exclude_kinematic": True,
 }
 

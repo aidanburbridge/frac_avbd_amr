@@ -54,7 +54,7 @@ function default_criteria_config()::CriteriaConfig
         RefineSpec(REFINE_ENERGY, SVector(0.50, 1.0)),
     ]
     frac_specs = [
-        FractureSpec(FRAC_ENERGY, SVector(1.00, 0.0)),
+        FractureSpec(FRAC_STRETCH, SVector(1.00, 0.0)),
     ]
     return CriteriaConfig(ref_specs, ANY, frac_specs, ANY)
 end
@@ -69,7 +69,7 @@ function build_criteria_config(;
         refine_specs = copy(cfg.refine_specs)
         push!(
             refine_specs,
-            DeviatoricStressRefine(
+            StressRefine(
                 refine_stress_threshold;
                 exclude_kinematic=refine_stress_exclude_kinematic,
             ),
@@ -97,12 +97,12 @@ end
         return _bond_traction_drive(con) >= thresh_mul
 
     elseif spec.kind == REFINE_ENERGY
-        # Refine on a bond-normalized initiation energy scale.
-        # eta = 1 corresponds to cohesive onset for this specific bond,
-        # so the thresholds remain tied to the current model/discretization.
+        # Refine on a mixed-mode cohesive onset measure using the existing
+        # normal/shear onset separations stored on the bond. Compression does
+        # not contribute; this is an opening-only refinement window.
         r == 1 || return false
 
-        eta = _bond_onset_measure(con)
+        eta = _refine_onset_measure(con)
         eta_lo = spec.params[1]
         eta_hi = spec.params[2] > eta_lo ? spec.params[2] : 1.0
         return eta >= eta_lo && eta < eta_hi
@@ -278,27 +278,20 @@ end
         return _bond_traction_drive(con) >= thresh_mul
 
     elseif spec.kind == FRAC_STRETCH
-        # Fracture if stretch is 
+        # Fracture on a mixed-mode final separation measure using the existing
+        # critical normal/shear separations stored on the bond. Compression
+        # does not contribute.
         r == 1 || return false
-        _bond_in_tension(con) || return false
-
-        # Rest length w/ safety
-        len_0 = max(abs(con.rest[1]), eps(Float64))
-        s = _opening_disp(con) / len_0
-
-        # Critical stretch derived from existing force cap + stiffness
-        cap = max(con.fracture[1], eps(Float64))
-        k_n = max(con.stiffness[1], eps(Float64))
-        s_cap = cap / (k_n * len_0)
 
         thresh_mul = spec.params[1]
-        return s >= thresh_mul * s_cap
+        return _bond_final_measure(con) >= thresh_mul
 
     elseif spec.kind == FRAC_ENERGY
         r == 1 || return false
         # Energy-based fracture trigger uses the same bond-normalized
         # initiation measure. Once onset is reached, capped bonds enter the
         # cohesive damage law in commit_cohesive_damage!; uncapped bonds refine.
+        # Only tensile opening can activate this criterion.
         return _bond_onset_measure(con) >= spec.params[1]
     end
 
@@ -369,7 +362,9 @@ end
     end
 
     stress_val >= spec.params[1] || return false
-    onset_val >= onset_threshold || return false
+    if spec.kind == REFINE_DEVIATORIC_STRESS
+        onset_val >= onset_threshold || return false
+    end
     return stress_val >= local_peak_ratio * neighbor_peak
 end
 
@@ -441,6 +436,8 @@ end
 end
 
 @inline function _bond_touches_prescribed_body(con)::Bool
+    # TODO: excluding a wider grip-adjacent halo would require extra boundary
+    # metadata beyond the direct prescribed-body information available here.
     return _body_has_prescribed_motion(con.bodyA) || _body_has_prescribed_motion(con.bodyB)
 end
 
@@ -493,12 +490,38 @@ end
     return abs(rest_n) <= eps(Float64) ? 1.0 : sign(rest_n)
 end
 
-@inline function _opening_disp(con)::Float64
+@inline function _normal_opening_disp(con)::Float64
     return max(0.0, _normal_sign(con) * con.C[1])
+end
+
+@inline function _opening_disp(con)::Float64
+    return _normal_opening_disp(con)
 end
 
 @inline function _shear_disp(con)::Float64
     return sqrt(con.C[2]^2 + con.C[3]^2)
+end
+
+@inline function _mixed_mode_onset_measure(con, shear_weight::Float64)::Float64
+    dn = _normal_opening_disp(con)
+    dn > 0.0 || return 0.0
+    ds = _shear_disp(con)
+    dn0 = max(con.limits[1], eps(Float64))
+    ds0 = max(con.limits[2], eps(Float64))
+    return (dn / dn0)^2 + shear_weight * (ds / ds0)^2
+end
+
+@inline function _mixed_mode_final_measure(con, shear_weight::Float64)::Float64
+    dn = _normal_opening_disp(con)
+    dn > 0.0 || return 0.0
+    ds = _shear_disp(con)
+    dnc = max(con.limits[3], eps(Float64))
+    dsc = max(con.limits[4], eps(Float64))
+    return (dn / dnc)^2 + shear_weight * (ds / dsc)^2
+end
+
+@inline function _refine_onset_measure(con)::Float64
+    return _mixed_mode_onset_measure(con, 0.25)
 end
 
 @inline function _bond_energy_components(con)::Tuple{Float64,Float64}
@@ -513,7 +536,7 @@ end
     sigma_t1 = clamp(con.penalty_k[2] * con.C[2], con.f_min[2], con.f_max[2])
     sigma_t2 = clamp(con.penalty_k[3] * con.C[3], con.f_min[3], con.f_max[3])
 
-    fn_open = max(0.0, _normal_sign(con) * sigma_n)
+    fn_open = _normal_opening_disp(con) > 0.0 ? max(0.0, _normal_sign(con) * sigma_n) : 0.0
     ft1 = abs(sigma_t1)
     ft2 = abs(sigma_t2)
     return fn_open, ft1, ft2
@@ -537,23 +560,15 @@ end
 end
 
 @inline function _bond_onset_measure(con)::Float64
-    dn = _opening_disp(con)
-    ds = _shear_disp(con)
-    dn0 = max(con.limits[1], eps(Float64))
-    ds0 = max(con.limits[2], eps(Float64))
-    return (dn / dn0)^2 + (ds / ds0)^2
+    return _mixed_mode_onset_measure(con, 1.0)
 end
 
 @inline function _bond_final_measure(con)::Float64
-    dn = _opening_disp(con)
-    ds = _shear_disp(con)
-    dnc = max(con.limits[3], eps(Float64))
-    dsc = max(con.limits[4], eps(Float64))
-    return (dn / dnc)^2 + (ds / dsc)^2
+    return _mixed_mode_final_measure(con, 1.0)
 end
 
 @inline function _bond_in_tension(con)::Bool
-    return _opening_disp(con) > 0.0
+    return _normal_opening_disp(con) > 0.0
 end
 
 function commit_cohesive_damage!(con::BondConstraint)::Tuple{Bool,Float64}

@@ -503,15 +503,8 @@ function dual_update!(sim::SimulationState, alpha::Float64)
                 end
             end
 
-            # TODO add refinement check before fracturing! -> do NOT allow fracture unless @ finest level
-            # FRACTURE CRITERIA
-            #if abs(lam_r) >= (con.fracture[r] * 10)
-            if Criteria.should_fracture(sim.criteria, sim, con, lam_r, r)
-                # Fracture does not drive AMR placement. Refinement location is
-                # controlled by the refinement criterion; capped bonds enter the
-                # cohesive damage pass after convergence.
-                nothing
-            end
+            # Fracture is committed once per step in damage_bonds!, where capped
+            # bonds are gated by Criteria.should_fracture.
 
             if lam_r > con.f_min[r] && lam_r < con.f_max[r]
                 new_k = pk[r] + sim.beta * abs(con.C[r])
@@ -769,6 +762,7 @@ function damage_bonds!(sim::SimulationState, dt::Float64)
         capA = (sim.level[a_idx] >= local_max_ref_level(sim, a_idx)) || !has_valid_child(sim, a_idx)
         capB = (sim.level[b_idx] >= local_max_ref_level(sim, b_idx)) || !has_valid_child(sim, b_idx)
         (capA && capB) || continue
+        (bond.is_cohesive || Criteria.should_fracture(sim.criteria, sim, bond, 0.0, 1)) || continue
 
         bond_changed, released = Criteria.commit_cohesive_damage!(bond)
 
