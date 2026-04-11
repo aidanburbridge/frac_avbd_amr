@@ -361,10 +361,8 @@ end
 
     d_factor = max(1e-3, 1.0 - clamp(bond.damage, 0.0, 0.999))
 
-    # Make opening/compression split orientation-invariant w.r.t. bond normal sign.
-    rest_n = bond.rest[1]
-    n_sign = abs(rest_n) <= eps(Float64) ? 1.0 : sign(rest_n)
-    opening = (n_sign * bond.C[1]) > 0.0
+    # Bond normals point A -> B, while C[1] uses pA - pB. Opening is negative C[1].
+    opening = bond.C[1] < 0.0
     k_n = opening ? (bond.stiffness[1] * d_factor) : bond.stiffness[1]
 
     k_t1 = bond.stiffness[2] * d_factor

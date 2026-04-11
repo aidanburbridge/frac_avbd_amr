@@ -298,7 +298,7 @@ def _sym6_to_mats(stress6: np.ndarray) -> np.ndarray:
 def _max_principal_proxy(stress6: np.ndarray) -> np.ndarray:
     if stress6.size == 0:
         return np.zeros((0,), dtype=float)
-    return np.linalg.eigvalsh(_sym6_to_mats(stress6))[:, -1]
+    return -np.linalg.eigvalsh(_sym6_to_mats(stress6))[:, 0]
 
 
 def _stress_proxy_components(stress6: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -306,7 +306,8 @@ def _stress_proxy_components(stress6: np.ndarray) -> tuple[np.ndarray, np.ndarra
         empty = np.zeros((0,), dtype=float)
         return empty.copy(), empty.copy(), empty.copy(), empty.copy()
 
-    principal = np.linalg.eigvalsh(_sym6_to_mats(stress6))[:, -1]
+    # Solver stress proxy is compression-positive; report principal tension as positive.
+    principal = -np.linalg.eigvalsh(_sym6_to_mats(stress6))[:, 0]
     xx = stress6[:, 0]
     yy = stress6[:, 1]
     zz = stress6[:, 2]
@@ -314,10 +315,10 @@ def _stress_proxy_components(stress6: np.ndarray) -> tuple[np.ndarray, np.ndarra
     yz = stress6[:, 4]
     zx = stress6[:, 5]
 
-    hydrostatic = (xx + yy + zz) / 3.0
-    sxx = xx - hydrostatic
-    syy = yy - hydrostatic
-    szz = zz - hydrostatic
+    raw_hydrostatic = (xx + yy + zz) / 3.0
+    sxx = xx - raw_hydrostatic
+    syy = yy - raw_hydrostatic
+    szz = zz - raw_hydrostatic
     deviatoric_norm = np.sqrt(
         np.square(sxx)
         + np.square(syy)
@@ -325,7 +326,7 @@ def _stress_proxy_components(stress6: np.ndarray) -> tuple[np.ndarray, np.ndarra
         + 2.0 * (np.square(xy) + np.square(yz) + np.square(zx))
     )
     von_mises = np.sqrt(1.5) * deviatoric_norm
-    return principal, von_mises, hydrostatic, deviatoric_norm
+    return principal, von_mises, -raw_hydrostatic, deviatoric_norm
 
 
 def _normalized_benchmark_token(value: Any) -> str:
@@ -557,8 +558,7 @@ def _bond_response_quantities(
         strain_length = np.sqrt(np.clip(area, a_min=0.0, a_max=None))
     safe_strain_length = np.where(strain_length > eps, strain_length, np.nan)
 
-    normal_sign = np.where(np.abs(rest[:, 0]) > eps, np.sign(rest[:, 0]), 1.0)
-    delta_n = C[:, 0] if use_area_strain_length else normal_sign * C[:, 0]
+    delta_n = -C[:, 0]
     eps_n = delta_n / safe_strain_length
     gamma_t1 = C[:, 1] / safe_strain_length
     gamma_t2 = C[:, 2] / safe_strain_length
@@ -578,19 +578,15 @@ def _bond_response_quantities(
 
     if np.any(caps_mask):
         row_force[caps_mask] = np.clip(penalty_k[caps_mask] * C[caps_mask], f_min[caps_mask], f_max[caps_mask])
-        sigma_n[caps_mask] = row_force[caps_mask, 0] / safe_area[caps_mask]
+        sigma_n[caps_mask] = -row_force[caps_mask, 0] / safe_area[caps_mask]
         tau_t1[caps_mask] = row_force[caps_mask, 1] / safe_area[caps_mask]
         tau_t2[caps_mask] = row_force[caps_mask, 2] / safe_area[caps_mask]
         tau_eq[caps_mask] = np.sqrt(np.square(tau_t1[caps_mask]) + np.square(tau_t2[caps_mask]))
 
-        normal_cap = np.where(
-            normal_sign[caps_mask] >= 0.0,
-            np.maximum(f_max[caps_mask, 0], eps),
-            np.maximum(-f_min[caps_mask, 0], eps),
-        )
+        normal_cap = np.maximum(-f_min[caps_mask, 0], eps)
         shear_cap_t1 = np.maximum(np.maximum(np.abs(f_min[caps_mask, 1]), np.abs(f_max[caps_mask, 1])), eps)
         shear_cap_t2 = np.maximum(np.maximum(np.abs(f_min[caps_mask, 2]), np.abs(f_max[caps_mask, 2])), eps)
-        fn_open = np.maximum(0.0, normal_sign[caps_mask] * row_force[caps_mask, 0])
+        fn_open = np.maximum(0.0, -row_force[caps_mask, 0])
         ft1 = np.abs(row_force[caps_mask, 1])
         ft2 = np.abs(row_force[caps_mask, 2])
 

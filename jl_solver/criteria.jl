@@ -400,7 +400,7 @@ end
         xy yy yz
         zx yz zz
     ]
-    return max(eigmax(Symmetric(sigma)), 0.0)
+    return max(-eigmin(Symmetric(sigma)), 0.0)
 end
 
 @inline function _stress_deviatoric_norm(stress_data, idx)::Float64
@@ -485,13 +485,9 @@ function _max_incident_bond_onset(sim, body_idx::Int)::Float64
     return peak
 end
 
-@inline function _normal_sign(con)::Float64
-    rest_n = con.rest[1]
-    return abs(rest_n) <= eps(Float64) ? 1.0 : sign(rest_n)
-end
-
 @inline function _normal_opening_disp(con)::Float64
-    return max(0.0, _normal_sign(con) * con.C[1])
+    # Bond normals point A -> B, while C[1] uses pA - pB. Opening is negative C[1].
+    return max(0.0, -con.C[1])
 end
 
 @inline function _opening_disp(con)::Float64
@@ -536,7 +532,7 @@ end
     sigma_t1 = clamp(con.penalty_k[2] * con.C[2], con.f_min[2], con.f_max[2])
     sigma_t2 = clamp(con.penalty_k[3] * con.C[3], con.f_min[3], con.f_max[3])
 
-    fn_open = _normal_opening_disp(con) > 0.0 ? max(0.0, _normal_sign(con) * sigma_n) : 0.0
+    fn_open = _normal_opening_disp(con) > 0.0 ? max(0.0, -sigma_n) : 0.0
     ft1 = abs(sigma_t1)
     ft2 = abs(sigma_t2)
     return fn_open, ft1, ft2

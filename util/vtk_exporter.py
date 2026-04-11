@@ -90,12 +90,14 @@ def _stress_proxy_fields(stress_tensor: np.ndarray) -> tuple[np.ndarray, dict[st
     mats[:, 0, 1] = mats[:, 1, 0] = xy
     mats[:, 1, 2] = mats[:, 2, 1] = yz
     mats[:, 0, 2] = mats[:, 2, 0] = zx
-    max_principal = np.linalg.eigvalsh(mats)[:, -1]
+    eigvals = np.linalg.eigvalsh(mats)
+    # Solver stress proxy is compression-positive; expose principal tension as positive.
+    max_principal = -eigvals[:, 0]
 
-    hydrostatic = (xx + yy + zz) / 3.0
-    sxx = xx - hydrostatic
-    syy = yy - hydrostatic
-    szz = zz - hydrostatic
+    raw_hydrostatic = (xx + yy + zz) / 3.0
+    sxx = xx - raw_hydrostatic
+    syy = yy - raw_hydrostatic
+    szz = zz - raw_hydrostatic
     deviatoric_norm = np.sqrt(
         np.square(sxx)
         + np.square(syy)
@@ -107,7 +109,7 @@ def _stress_proxy_fields(stress_tensor: np.ndarray) -> tuple[np.ndarray, dict[st
     return full9, {
         "Max_Principal_Stress_Proxy": max_principal.astype(np.float32, copy=False),
         "Von_Mises_Stress_Proxy": von_mises.astype(np.float32, copy=False),
-        "Hydrostatic_Stress_Proxy": hydrostatic.astype(np.float32, copy=False),
+        "Hydrostatic_Stress_Proxy": (-raw_hydrostatic).astype(np.float32, copy=False),
         "Deviatoric_Stress_Norm_Proxy": deviatoric_norm.astype(np.float32, copy=False),
     }
 
@@ -141,9 +143,8 @@ def _bond_proxy_fields(
         f_max[i, :] = np.asarray(rec["f_max"], dtype=float)
 
     L0 = np.linalg.norm(rest, axis=1)
-    normal_sign = np.where(np.abs(rest[:, 0]) > eps, np.sign(rest[:, 0]), 1.0)
     safe_length = np.where(L0 > eps, L0, np.nan)
-    eps_n = normal_sign * C[:, 0] / safe_length
+    eps_n = -C[:, 0] / safe_length
     gamma_t1 = C[:, 1] / safe_length
     gamma_t2 = C[:, 2] / safe_length
     gamma_eq = np.sqrt(np.square(gamma_t1) + np.square(gamma_t2))
@@ -162,19 +163,15 @@ def _bond_proxy_fields(
 
     if np.any(caps_mask):
         row_force[caps_mask] = np.clip(penalty_k[caps_mask] * C[caps_mask], f_min[caps_mask], f_max[caps_mask])
-        sigma_n[caps_mask] = row_force[caps_mask, 0] / safe_area[caps_mask]
+        sigma_n[caps_mask] = -row_force[caps_mask, 0] / safe_area[caps_mask]
         tau_t1[caps_mask] = row_force[caps_mask, 1] / safe_area[caps_mask]
         tau_t2[caps_mask] = row_force[caps_mask, 2] / safe_area[caps_mask]
         tau_eq[caps_mask] = np.sqrt(np.square(tau_t1[caps_mask]) + np.square(tau_t2[caps_mask]))
 
-        normal_cap = np.where(
-            normal_sign[caps_mask] >= 0.0,
-            np.maximum(f_max[caps_mask, 0], eps),
-            np.maximum(-f_min[caps_mask, 0], eps),
-        )
+        normal_cap = np.maximum(-f_min[caps_mask, 0], eps)
         shear_cap_t1 = np.maximum(np.maximum(np.abs(f_min[caps_mask, 1]), np.abs(f_max[caps_mask, 1])), eps)
         shear_cap_t2 = np.maximum(np.maximum(np.abs(f_min[caps_mask, 2]), np.abs(f_max[caps_mask, 2])), eps)
-        fn_open = np.maximum(0.0, normal_sign[caps_mask] * row_force[caps_mask, 0])
+        fn_open = np.maximum(0.0, -row_force[caps_mask, 0])
         ft1 = np.abs(row_force[caps_mask, 1])
         ft2 = np.abs(row_force[caps_mask, 2])
 
