@@ -54,16 +54,17 @@ FRICTION = 0.0
 STEPS = 10000
 MAX_REF_LEVEL = 2
 
-PYTHON_SOLVER_PARAMS = {
-    "mu": 0.2,
-    "post_stabilize": False,
-    "beta": 100.0,
-    "alpha": 0.95,
-    "gamma": 0.99,
-    "debug_contacts": False,
-    "criteria_refine_stress_threshold": 0.0,
-    "criteria_refine_stress_exclude_kinematic": True,
-}
+def _build_solver_params() -> dict[str, float | bool]:
+    return {
+        "mu": 0.2,
+        "post_stabilize": False,
+        "beta": 100.0,
+        "alpha": 0.95,
+        "gamma": 0.99,
+        "debug_contacts": False,
+        "criteria_refine_stress_threshold": REFINE_STRESS_THRESHOLD,
+        "criteria_refine_stress_exclude_kinematic": True,
+    }
 
 def _select_bodies_by_center_box(
     assembly: VoxelAssembly,
@@ -380,7 +381,7 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
         gravity=GRAV,
         friction=FRICTION,
         sync_bodies=sync_bodies,
-        python_solver_params=PYTHON_SOLVER_PARAMS,
+        python_solver_params=_build_solver_params(),
         amr_params=amr_dict,
         metadata={
             "benchmark_name": "L-panel benchmark",
@@ -395,6 +396,12 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
             "area_unit_label": "m^2",
             "stress_unit_label": "Pa",
             "energy_unit_label": "J",
+            "density": DENSITY,
+            "penalty_gain": PENALTY_GAIN,
+            "E": E_MODULUS,
+            "nu": NU,
+            "tensile_strength": TENSILE_STRENGTH,
+            "fracture_toughness": FRACTURE_TOUGHNESS,
             "max_ref_level": MAX_REF_LEVEL,
             "outer_dim": OUTER_DIM,
             "inner_step": INNER_STEP,
@@ -408,6 +415,11 @@ def build_setup(sync_bodies: bool = True) -> SimulationSetup:
             "loading_velocity": LOAD_VELOCITY.tolist(),
             "loading_strategy": "contact_indenter",
             "refine_stress_threshold": REFINE_STRESS_THRESHOLD,
+            "refine_stress_threshold_factor": (
+                float(REFINE_STRESS_THRESHOLD) / float(TENSILE_STRENGTH)
+                if float(TENSILE_STRENGTH) > 0.0
+                else 0.0
+            ),
             "fixed_voxel_ids": list(explicit_fixed_ids),
             "load_voxel_ids": specimen_load_ids,
             "load_body_ids": load_body_ids,

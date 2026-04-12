@@ -1,0 +1,24 @@
+{
+  "batch_name": "lbar_refine_threshold_target_disp",
+  "runs": [
+    {
+      "test": "L_bar",
+      "mode": "product",
+      "vary": {
+        "refine_stress_threshold_factor": [
+          0.01,
+          0.05,
+          0.1,
+          0.25
+        ]
+      },
+      "fixed": {
+        "load_velocity": 0.03,
+        "dt_physics": 0.00025,
+        "youngs_modulus": 2000000000.0,
+        "target_displacement": 0.05,
+        "iterations": 20
+      }
+    }
+  ]
+}

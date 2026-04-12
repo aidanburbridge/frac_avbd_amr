@@ -124,20 +124,31 @@ def _iso_20753_overrides(module, resolved: dict[str, Any]) -> dict[str, Any]:
 
 def _l_bar_defaults(module) -> dict[str, float]:
     load_velocity = np.asarray(module.LOAD_VELOCITY, dtype=float)
+    tensile_strength = float(module.TENSILE_STRENGTH)
+    refine_stress_threshold = float(module.REFINE_STRESS_THRESHOLD)
     return {
         "load_velocity": float(load_velocity[1]),
         "dt_physics": float(module.DT_PHYSICS),
         "youngs_modulus": float(module.E_MODULUS),
+        "tensile_strength": tensile_strength,
+        "iterations": int(module.ITER),
+        "refine_stress_threshold_factor": (
+            refine_stress_threshold / tensile_strength if tensile_strength > 0.0 else 0.0
+        ),
         "steps": int(module.STEPS),
     }
 
 
 def _l_bar_overrides(module, resolved: dict[str, Any]) -> dict[str, Any]:
     dt_physics = float(resolved["dt_physics"])
+    refine_stress_threshold = float(resolved["refine_stress_threshold"])
     return {
         "LOAD_VELOCITY": np.array([0.0, float(resolved["load_velocity"]), 0.0], dtype=float),
         "DT_PHYSICS": dt_physics,
         "E_MODULUS": float(resolved["youngs_modulus"]),
+        "TENSILE_STRENGTH": float(resolved["tensile_strength"]),
+        "REFINE_STRESS_THRESHOLD": refine_stress_threshold,
+        "ITER": int(resolved["iterations"]),
         "STEPS": int(resolved["steps"]),
         "STEPS_PER_EXPORT": max(1, int(module.DT_RENDER / dt_physics)),
     }
@@ -276,6 +287,30 @@ def _validate_run_spec(run_spec: Any, index: int) -> dict[str, Any]:
 
 def _resolve_derived_parameters(resolved: dict[str, Any], *, test_name: str, run_index: int) -> dict[str, Any]:
     resolved_copy = dict(resolved)
+
+    refine_stress_threshold_factor = resolved_copy.get("refine_stress_threshold_factor")
+    if refine_stress_threshold_factor is not None:
+        try:
+            refine_stress_threshold_factor = float(refine_stress_threshold_factor)
+            tensile_strength = float(resolved_copy["tensile_strength"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ManifestError(
+                f"runs[{run_index}] for '{test_name}' could not resolve refine_stress_threshold_factor "
+                "because tensile_strength is missing/invalid."
+            ) from exc
+
+        if not math.isfinite(refine_stress_threshold_factor) or refine_stress_threshold_factor < 0.0:
+            raise ManifestError(
+                f"runs[{run_index}].refine_stress_threshold_factor must be a non-negative finite number."
+            )
+        if not math.isfinite(tensile_strength) or tensile_strength <= 0.0:
+            raise ManifestError(
+                f"runs[{run_index}] has invalid tensile_strength for refine_stress_threshold_factor resolution."
+            )
+
+        resolved_copy["refine_stress_threshold_factor"] = refine_stress_threshold_factor
+        resolved_copy["refine_stress_threshold"] = refine_stress_threshold_factor * tensile_strength
+
     target_displacement = resolved_copy.get("target_displacement")
     if target_displacement is None:
         return resolved_copy

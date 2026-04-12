@@ -1,0 +1,25 @@
+{
+  "batch_name": "lbar_iterations_target_disp",
+  "runs": [
+    {
+      "test": "L_bar",
+      "mode": "product",
+      "vary": {
+        "iterations": [
+          10,
+          20,
+          40,
+          80,
+          100
+        ]
+      },
+      "fixed": {
+        "load_velocity": 0.03,
+        "dt_physics": 0.00025,
+        "youngs_modulus": 2000000000.0,
+        "target_displacement": 0.05,
+        "refine_stress_threshold_factor": 0.05
+      }
+    }
+  ]
+}
