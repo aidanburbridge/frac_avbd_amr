@@ -1,6 +1,11 @@
+from pathlib import Path
 import time
 import sys
 import numpy as np
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 # Project imports (your current layout)
 from geometry.primitives import rect_2D, box_3D
@@ -25,6 +30,45 @@ def try_enable_msaa(plotter: pv.Plotter):
             plotter.enable_anti_aliasing()
         except Exception:
             pass
+
+def add_scene_light(plotter: pv.Plotter, position, focal_point=(0.0, 0.0, 0.0), intensity=1.0):
+    """Add a basic scene light in a VTK-compatible way."""
+    light = vtk.vtkLight()
+    try:
+        light.SetLightTypeToSceneLight()
+    except Exception:
+        pass
+    light.SetPositional(False)
+    light.SetPosition(*map(float, position))
+    light.SetFocalPoint(*map(float, focal_point))
+    light.SetIntensity(float(intensity))
+    light.SetColor(1.0, 1.0, 1.0)
+    try:
+        plotter.add_light(light)
+    except Exception:
+        renderer = getattr(plotter, "renderer", None)
+        if renderer is not None:
+            renderer.AddLight(light)
+    return light
+
+def setup_balanced_lighting(plotter: pv.Plotter):
+    """
+    Replace the default front-heavy lighting with a softer multi-light rig.
+    """
+    try:
+        plotter.remove_all_lights()
+    except Exception:
+        renderer = getattr(plotter, "renderer", None)
+        if renderer is not None:
+            try:
+                renderer.RemoveAllLights()
+            except Exception:
+                pass
+
+    add_scene_light(plotter, position=(8.0, 10.0, 12.0), intensity=0.75)
+    add_scene_light(plotter, position=(-10.0, 6.0, 5.0), intensity=0.45)
+    add_scene_light(plotter, position=(-6.0, 4.0, -10.0), intensity=0.35)
+    add_scene_light(plotter, position=(0.0, 14.0, 0.0), intensity=0.30)
 
 def start_interactive_compat(plotter: pv.Plotter):
     """
@@ -158,7 +202,8 @@ def build_actor_for_body(plotter: pv.Plotter, body, color=None):
         w, h, d = body.size
         mesh = pv.Cube(center=(0, 0, 0), x_length=w, y_length=h, z_length=d)
         actor = plotter.add_mesh(mesh, color=(color or "royalblue"),
-                                 smooth_shading=True, show_edges=False, opacity=1)
+                                 smooth_shading=True, show_edges=False, opacity=1,
+                                 ambient=0.30, diffuse=0.65, specular=0.08, specular_power=15.0)
         def update():
             R = rot_from_axes(body.get_axes())
             t = body.position[:3] if body.position.shape[0] >= 3 else body.pos
@@ -171,7 +216,8 @@ def build_actor_for_body(plotter: pv.Plotter, body, color=None):
         zt = 0.1
         mesh = pv.Cube(center=(0, 0, 0), x_length=w, y_length=h, z_length=zt)
         actor = plotter.add_mesh(mesh, color=(color or "tomato"),
-                                 smooth_shading=True, show_edges=False)
+                                 smooth_shading=True, show_edges=False,
+                                 ambient=0.30, diffuse=0.65, specular=0.08, specular_power=15.0)
         def update():
             theta = float(body.position[2])
             c, s = np.cos(theta), np.sin(theta)
@@ -184,7 +230,8 @@ def build_actor_for_body(plotter: pv.Plotter, body, color=None):
 
     # Fallback: unit cube
     mesh = pv.Cube()
-    actor = plotter.add_mesh(mesh, color=(color or "gray"))
+    actor = plotter.add_mesh(mesh, color=(color or "gray"),
+                             ambient=0.30, diffuse=0.65, specular=0.08, specular_power=15.0)
     return actor, (lambda: None)
 
 def paint_contacts(plotter:pv.Plotter, contact_constraints:list[ContactConstraint], point_radius=0.03, point_color="yellow"):
@@ -232,6 +279,7 @@ def run_realtime():
     plotter.set_background("white")
 
     try_enable_msaa(plotter)
+    setup_balanced_lighting(plotter)
 
     # Camera
     try:

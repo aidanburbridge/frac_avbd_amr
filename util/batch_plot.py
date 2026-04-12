@@ -105,6 +105,40 @@ def _curve_label(run_dir: Path, resolved_config: dict[str, Any]) -> str:
     return run_dir.name
 
 
+def _parameter_axis_info(records: list[dict[str, Any]], parameter_key: str) -> tuple[str, str, float]:
+    if parameter_key == "dt_physics":
+        return "Physics Timestep [s]", "Physics Timestep", 1.0
+
+    if parameter_key == "youngs_modulus":
+        stress_unit = str(records[0].get("stress_unit_label") or "").strip()
+        gpa_scale = {
+            "Pa": 1.0e-9,
+            "kPa": 1.0e-6,
+            "MPa": 1.0e-3,
+            "GPa": 1.0,
+        }.get(stress_unit)
+        if gpa_scale is not None:
+            return "Young's Modulus [GPa]", "Young's Modulus", gpa_scale
+        if stress_unit:
+            return f"Young's Modulus [{stress_unit}]", "Young's Modulus", 1.0
+        return "Young's Modulus", "Young's Modulus", 1.0
+
+    if parameter_key == "load_velocity":
+        displacement_unit = str(records[0].get("displacement_unit_label") or "").strip()
+        if displacement_unit:
+            return f"Load Velocity [{displacement_unit}/s]", "Load Velocity", 1.0
+        return "Load Velocity [units/s]", "Load Velocity", 1.0
+
+    if parameter_key == "target_displacement":
+        displacement_unit = str(records[0].get("displacement_unit_label") or "").strip()
+        if displacement_unit:
+            return f"Target Displacement [{displacement_unit}]", "Target Displacement", 1.0
+        return "Target Displacement", "Target Displacement", 1.0
+
+    pretty = parameter_key.replace("_", " ").title()
+    return pretty, pretty, 1.0
+
+
 def _collect_batch_records(
     run_dirs: list[Path],
     *,
@@ -228,10 +262,12 @@ def _plot_parameter_response(
 ) -> bool:
     import matplotlib.pyplot as plt
 
+    axis_label, _title_label, x_scale = _parameter_axis_info(records, parameter_key)
     x_values = np.asarray(
         [_safe_float(record["resolved_config"].get("swept_parameters", {}).get(parameter_key)) for record in records],
         dtype=float,
     )
+    x_values = x_values * x_scale
     finite_x = np.isfinite(x_values)
     if not np.any(finite_x):
         return False
@@ -253,7 +289,7 @@ def _plot_parameter_response(
         plt.close(fig)
         return False
 
-    ax.set_xlabel(parameter_key)
+    ax.set_xlabel(axis_label)
     ax.set_ylabel(y_series[0][2] if len(y_series) == 1 else "Response")
     ax.set_title(title, fontsize=13, pad=10)
     ax.grid(True, alpha=0.3)
@@ -322,6 +358,7 @@ def _generate_batch_comparison_plots(
     swept_keys = sorted(set.union(*swept_key_sets)) if swept_key_sets else []
     if len(swept_keys) == 1 and all(len(keys) <= 1 for keys in swept_key_sets):
         parameter_key = swept_keys[0]
+        _axis_label, parameter_title, _x_scale = _parameter_axis_info(records, parameter_key)
         displacement_unit = records[0]["displacement_unit_label"]
         _plot_parameter_response(
             records,
@@ -349,7 +386,7 @@ def _generate_batch_comparison_plots(
                 ),
             ],
             output_path=output_dir / f"{benchmark_slug}_batch_event_displacements_vs_{parameter_key}.png",
-            title=f"{benchmark_name}: Event Displacements vs {parameter_key}",
+            title=f"{benchmark_name}: Event Displacements vs {parameter_title}",
         )
         _plot_parameter_response(
             records,
@@ -362,7 +399,7 @@ def _generate_batch_comparison_plots(
                 ),
             ],
             output_path=output_dir / f"{benchmark_slug}_batch_final_crack_area_vs_{parameter_key}.png",
-            title=f"{benchmark_name}: Final Crack Area Proxy vs {parameter_key}",
+            title=f"{benchmark_name}: Final Crack Area Proxy vs {parameter_title}",
         )
         _plot_parameter_response(
             records,
@@ -375,7 +412,7 @@ def _generate_batch_comparison_plots(
                 ),
             ],
             output_path=output_dir / f"{benchmark_slug}_batch_final_broken_bond_count_vs_{parameter_key}.png",
-            title=f"{benchmark_name}: Final Broken Bond Count vs {parameter_key}",
+            title=f"{benchmark_name}: Final Broken Bond Count vs {parameter_title}",
         )
         _plot_parameter_response(
             records,
@@ -388,7 +425,7 @@ def _generate_batch_comparison_plots(
                 ),
             ],
             output_path=output_dir / f"{benchmark_slug}_batch_peak_stress_proxy_vs_{parameter_key}.png",
-            title=f"{benchmark_name}: Peak Stress Proxy vs {parameter_key}",
+            title=f"{benchmark_name}: Peak Stress Proxy vs {parameter_title}",
         )
         _plot_parameter_response(
             records,
@@ -401,7 +438,7 @@ def _generate_batch_comparison_plots(
                 ),
             ],
             output_path=output_dir / f"{benchmark_slug}_batch_solve_time_vs_{parameter_key}.png",
-            title=f"{benchmark_name}: Solve Time vs {parameter_key}",
+            title=f"{benchmark_name}: Solve Time vs {parameter_title}",
         )
 
     print(f"[batch-plot] Wrote batch comparison figures to {output_dir}")
