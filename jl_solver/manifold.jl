@@ -1,4 +1,9 @@
-# manifold.jl
+"""
+Persistent contact manifolds for warm-starting contact constraints.
+
+Each manifold caches a small set of contact constraints per body pair so the
+AVBD solver can reuse multipliers and penalty state across frames.
+"""
 module ManifoldHandling
 
 using LinearAlgebra
@@ -20,6 +25,7 @@ mutable struct Manifold
     count::Int
 end
 
+"""Create an empty manifold record for a body pair."""
 function init_manifold(a::Int, b::Int)
     return Manifold(a, b, ContactConstraint[], 0)
 end
@@ -32,6 +38,7 @@ end
     return dot(c.normal, old_con.normal) > COS_EPS
 end
 
+"""Refresh the cached manifold while preserving warm-start state when possible."""
 function update_manifold_dynamic!(manifold::Manifold, contacts::Vector{Contact}, friction::Float64, bodies::Vector{Body})
     used_old = MVector{MAX_CONTACTS,Bool}(false, false, false, false)
 

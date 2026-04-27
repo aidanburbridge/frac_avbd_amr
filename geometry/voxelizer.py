@@ -1,29 +1,9 @@
-# VOXELIZER
-"""
-Key Elements:
-    - Voxelizer
-    - Neighbor Graph Generator
-    - Octree Refinement
+"""STL voxelization utilities used by the Python preprocessing pipeline.
 
-Requirements:
-    - box_3D primitives from primitives.py as "voxels"
-    - box_face_vectors from primitives.py
-    - numpy
-    - trimesh
-
-Voxelizer:
-    - STL voxelization to a target number of occupied voxels
-
-Neighbor Graph Generator:
-    - Get 6-neighbor graph for adjacent voxels
-    - Generates Bond objects with face tagging
-    - Collision exclusion for bonded neighbors TODO incorporate this with constraints
-    - TODO add edge and corner influence for isotropy
-
-Octree Refinement:
-    - Splits voxels at set areas
-    - Applies 2:1 balancing with a default mazimum split of 3 levels
-
+`STLVoxelizer` converts a surface mesh into a padded occupancy grid and stores
+the grid metadata needed by the octree hierarchy builder. The output remains
+solver-agnostic so the same voxelization can feed either the Python prototype
+or the Julia AVBD backend.
 """
 # Python standard libraries
 import numpy as np
@@ -31,14 +11,11 @@ import trimesh
 from tqdm import trange
 
 
-### -------------------- Geometry Voxelization -------------------- ###
+# --- STL Voxelization --- #
 
 class STLVoxelizer:
     """
-    Encapsulates all functions involved in STL voxelization.
-        - mesh
-        - aabb
-        - parameters/settings
+    Encapsulate mesh loading and occupancy-grid generation for one STL asset.
     """
     def __init__(self,
                  stl_path: str,
@@ -68,19 +45,16 @@ class STLVoxelizer:
         self.zs     = None                                      # z centers (Nz,)
 
 
-    # -------------------- Public API -------------------- #
+    # --- Public API --- #
 
-    # TODO maybe make it so I can either give a resolution or a set voxel size h
     def voxelize_to_resolution(
             self,
             target_resolution: int,
             iters: int = 6,
             tol: float = 0.10,
             max_backoff: int = 10):
-        """ 
-        Voxelize an STL toward a target resolution/number of voxels. 
-        Guesses h (voxel size) from the bounding box volume and a resolution target.
-        h is corrected over a few iterations to acheive desired resolution.
+        """
+        Voxelize toward a target occupied-voxel count by iterating on `h`.
         """
         
         if self.bbox_vol <=0:
@@ -98,7 +72,8 @@ class STLVoxelizer:
             if num_occ > 0:
                 break
             if backoff >= max_backoff:
-                self._set_state(h, origin, occ, xs, ys, zs)     # Update state for debugging
+                # Preserve the last attempt for inspection before returning.
+                self._set_state(h, origin, occ, xs, ys, zs)
                 return self.occ, self.origin, self.h            
             h *= 0.5                                            # Reduce h size to try and fit inside mesh
             backoff += 1
@@ -126,7 +101,7 @@ class STLVoxelizer:
         return self.occ, self.origin, self.h
     
     
-    # -------------------- Core Helpers -------------------- #
+    # --- Core Helpers --- #
 
     def _voxelize_with_h(self, hval: float):
         """ Build occ grid for a given voxel size h, sample center-in-solid. Flood fill optional. """
@@ -176,8 +151,7 @@ class STLVoxelizer:
         X, Y, Z = np.meshgrid(x_centers, y_centers, z_centers, indexing='ij')
 
         pts = np.column_stack([X.ravel(), Y.ravel(), Z.ravel()])    # Stack unraveled vectors as columns (N, 3)
-        #inside = mesh.contains(pts)                                 # boolean (N,)
-        inside = _contains_points_chunked(mesh, pts, chunk=200_000)  # with progress
+        inside = _contains_points_chunked(mesh, pts, chunk=200_000)
 
         occ = inside.reshape(X.shape)                               # occ: occupancy grid - grid of booleans (center lies inside mesh) - all have same shape
         return occ
@@ -255,7 +229,7 @@ class STLVoxelizer:
         self.ys     = ys
         self.zs     = zs
     
-    # -------------------- Getters -------------------- #
+    # --- Getters --- #
     def centers(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """ Return arrays of voxel center coordinates. """
         if self.xs is None:
@@ -274,7 +248,7 @@ class STLVoxelizer:
         }
 
 
-### -------------------- Extra Helpers -------------------- ###
+# --- Extra Helpers --- #
 def _contains_points_chunked(mesh, pts: np.ndarray, chunk: int = 200_000, show_progress: bool = True) -> np.ndarray:
     """
     Fast + memory-safe mesh.contains with optional progress.

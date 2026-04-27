@@ -1,3 +1,10 @@
+"""
+Broad-phase and narrow-phase collision detection for voxel bodies.
+
+The module stores rigid-body state, updates oriented box transforms, performs
+sweep-and-prune broad phase culling, and generates contact candidates for the
+manifold cache used by the AVBD solver.
+"""
 module Collisions
 
 using LinearAlgebra

@@ -1,3 +1,5 @@
+"""Python bridge helpers for the Julia AVBD solver backend."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -77,7 +79,7 @@ class HybridSolver:
         positions: (N, 7) -> xyz + quaternion (wxyz)
         velocities: (N, 6) -> linear xyz, angular xyz
         masses: (N,)
-        bonds: (M, 17) -> optional face bond table
+        bonds: (M, 17) -> optional bond rows from `BondData`
         sizes: (N, 3) -> optional box extents per body
         """
         pos_arr = np.ascontiguousarray(positions, dtype=np.float64)
@@ -166,11 +168,9 @@ class HybridSolver:
         return self._bridge.step_timed(self._sim)
 
     def get_state(self) -> np.ndarray:
-
-        # TODO add in stress data from bridge
+        """Return body poses only; stress export uses `get_visualization_data()`."""
         if self._sim is None:
             raise RuntimeError("No simulation initialized.")
-        # Minimal transfer: only pull positions/quaternions to Python.
         return np.array(self._bridge.get_positions(self._sim))
     
     def write_frame(self, filename: str) -> tuple[int, int] | None:
@@ -260,6 +260,7 @@ def _body_arrays(
 
 
 def _bond_rows(constraints: Iterable[object], idx_map: dict[int, int]) -> np.ndarray:
+    """Convert Python bond objects into the flat row format expected by Julia."""
     # Prefer directly provided BondData
     bonddata = [c for c in constraints if isinstance(c, BondData)]
     if bonddata:
@@ -318,7 +319,8 @@ class HybridWorld:
         self.friction = float(friction)
         self.bodies = list(bodies)
         self.constraints = list(constraints)
-        self.contact_constraints = []  # placeholder for visualizer API
+        # Maintained for visualizer compatibility; Julia owns contact state.
+        self.contact_constraints = []
         self._sync_bodies = bool(sync_bodies)
         self._amr = amr or {}
         self._solver_params = dict(solver_params or {})

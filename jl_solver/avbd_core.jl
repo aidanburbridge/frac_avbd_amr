@@ -1,12 +1,17 @@
+"""
+Core AVBD simulation state and solver loop for voxel fracture.
+
+This module owns the Julia-side `SimulationState`, advances inertial prediction,
+collision detection, warm-starting, primal and dual AVBD updates, cohesive
+damage, adaptive refinement, and the energy log consumed by the export bridge.
+"""
 module AVBDCore
 
-# TODO CHECK avbd_core.jl, avbd_constraints.jl, manifold.jl and physics_bridge.jl - one of these screws with the voxel size??? Still error voxelizing to resolution!!!
 include("criteria.jl")
 using .Criteria
 using LinearAlgebra
 using Random
 using StaticArrays
-using Base.Threads
 using ..Maths: Vec3, Quat, integrate_quat, quat_to_rotvec, quat_mul, quat_inv, rotvec_to_quat, delta_twist_from, rotate_vec
 import ..Collisions: Body, Contact, get_collisions_active, update_rotation!, update_inv_inertia_world!
 using ..AVBDConstraints
@@ -15,18 +20,8 @@ using ..Energy
 
 export SimulationState, init_simulation, step_simulation!
 
-# TODO things to implement
-# - have damage only apply to tension -> leave the stiffness of compresison untouched
-# - ensure both compressive and tensile strain and stress are exported to the visualizer
-# - need to somehow stabilize the fracture through 
-
-
-# TODO add damping value calculation - or have NN do this??
-# damp_val = 2 * [0.05 - 0.3] * sqrt(k*mass)
-
-# ---------- CONSTANTS ---------- #
-const EARLY_OUT_TOL = 1e-5 # TODO have this as a parameter as a fraction of h (voxel size) ~0.1% 
-const DEBUG_REFINE_ALL = false # Debug: force refinement of all active bodies (set false to disable)
+# --- Constants --- #
+const EARLY_OUT_TOL = 1e-5
 const DEFAULT_RNG_SEED = 12345
 
 @inline function configured_rng_seed()::Int
@@ -35,6 +30,7 @@ const DEFAULT_RNG_SEED = 12345
     return seed === nothing ? DEFAULT_RNG_SEED : seed
 end
 
+"""Full Julia-side solver state, including AVBD, contact manifolds, and AMR data."""
 mutable struct SimulationState
     bodies::Vector{Body}
     manifolds::Dict{Tuple{Int,Int},Manifold}
@@ -42,14 +38,11 @@ mutable struct SimulationState
     bond_constraints::Vector{BondConstraint}
     contact_constraints::Vector{ContactConstraint}
 
-    bond_incidence::Vector{Vector{Int}} # active bond ids per body
+    bond_incidence::Vector{Vector{Int}} # Active bond ids per body.
     contact_incidence::Vector{Vector{Int}}
-    bond_incidence_all::Vector{Vector{Int}} # all bond ids per body (static)
+    bond_incidence_all::Vector{Vector{Int}} # Static bond ids per body.
 
     energy_log::EnergyLog
-
-    # Body ID -> list of constraints affecting body
-    #incidence_map::Vector{Vector{AbstractConstraint}} # Incident map of constraints on bodies - needed? - better way to do this?
 
     # Solver settings
     dt::Float64
@@ -65,8 +58,8 @@ mutable struct SimulationState
 
     # AMR
     active_body_ids::Vector{Int}
-    active_bond_ids::Vector{Int} # active bonds (rebuilt from active bodies)
-    bond_mark::Vector{Int} # epoch marks for active bond rebuild
+    active_bond_ids::Vector{Int} # Active bonds rebuilt from active bodies.
+    bond_mark::Vector{Int} # Epoch marks for active bond rebuild.
     bond_mark_epoch::Int
     seed_neighbor_ids::Vector{Int}
     seed_lambda_sums::Vector{Vec3}
@@ -78,12 +71,11 @@ mutable struct SimulationState
     refine_queue::Vector{Int}
     refine_out::Vector{Int}
 
-    # Hierarchy lists
-    # TODO there must be a way to make this somehow more compact - do I really need all of these lists?
-    active::BitVector # TODO make this the single source of truth
+    # Hierarchy state
+    active::BitVector
     valid_mask::BitVector
     can_refine::BitVector
-    level::Vector{Int} # TODO - why not make level the single source of truth and use -1 if not active?
+    level::Vector{Int}
     parent_list::Vector{Int}
     children_start::Vector{Int}
     children_count::Vector{Int}
@@ -115,7 +107,7 @@ mutable struct SimulationState
         e_log = EnergyLog()
 
         # AMR
-        active = falses(length(bodies)) # default all inactive OR set later
+        active = falses(length(bodies))
         valid_mask = trues(length(bodies))
         can_refine = BitVector()
         active_body_ids = Int[]
@@ -141,11 +133,9 @@ mutable struct SimulationState
         children_start = Int[]
         children_count = Int[]
 
-        # Neighbor map for 2:1 refinement check
         neighbor_map = Matrix{Int}(undef, 0, 0)
 
-        # TODO must pass max_level in here
-        max_level = 1 # default 1 for now but should come from octree
+        max_level = 1 # Overwritten when AMR metadata is supplied.
         max_level_per_body = fill(max_level, length(bodies))
 
         # Refine and fracture criteria
@@ -168,7 +158,8 @@ mutable struct SimulationState
     end
 end
 
-function predict_inertia!(sim::SimulationState) # Why do I pass dt and gravity if they are in simulation state struct??
+"""Predict unconstrained rigid-body motion for the current active body set."""
+function predict_inertia!(sim::SimulationState)
     dt = sim.dt
     gravity_vec = Vec3(0.0, sim.gravity, 0.0)
 
@@ -213,12 +204,10 @@ function predict_inertia!(sim::SimulationState) # Why do I pass dt and gravity i
     end
 end
 
+"""Rebuild contact constraints from the current active bodies and manifolds."""
 function detect_collisions!(sim::SimulationState)
 
-    # Clear the contacts
     empty!(sim.contact_constraints)
-
-    #append!(sim.active_constraints, sim.persistent_constraints)
 
     raw_contacts = get_collisions_active(sim.bodies, sim.active_body_ids)
     raw_count = length(raw_contacts)
@@ -228,7 +217,8 @@ function detect_collisions!(sim::SimulationState)
     for c in raw_contacts
         idA, idB = c.body_idx_a, c.body_idx_b
 
-        # TODO HACK -> replace so raw_contacts = get_collisions(sim.bodies, sim.active_body_ids)
+        # Narrow phase returns body ids directly; ignore any contact involving
+        # bodies that became inactive before manifold assembly.
         if !sim.active[idA+1] || !sim.active[idB+1]
             continue
         end
@@ -254,17 +244,15 @@ function detect_collisions!(sim::SimulationState)
     return raw_count
 end
 
+"""Warm-start bond/contact penalties and rebuild body incidence lists."""
 function warm_start!(sim::SimulationState)
-    # Clear incidence map
     num_bodies = length(sim.bodies)
 
     current_len = length(sim.bond_incidence)
     if current_len < num_bodies
         resize!(sim.bond_incidence, num_bodies)
         resize!(sim.contact_incidence, num_bodies)
-        # Initialize new
-        for i in 1:num_bodies # TODO WHAT is the logic behind this? why not current_len?
-            #for i in (current_len+1):num_bodies
+        for i in (current_len + 1):num_bodies
             if !isassigned(sim.bond_incidence, i)
                 sim.bond_incidence[i] = Int[]
             end
@@ -279,7 +267,6 @@ function warm_start!(sim::SimulationState)
         empty!(sim.contact_incidence[i])
     end
 
-    # Loop bonds first (active bodies only)
     empty!(sim.active_bond_ids)
 
     if length(sim.bond_mark) != length(sim.bond_constraints)
@@ -302,7 +289,6 @@ function warm_start!(sim::SimulationState)
 
             con = sim.bond_constraints[con_id]
 
-            # Skip broken/inactive bonds
             con.is_broken && continue
             con.is_active || continue
 
@@ -313,9 +299,6 @@ function warm_start!(sim::SimulationState)
             end
 
             initialize!(con)
-
-            # MUST CLAMP TO Material stiffness!!
-
             con.penalty_k = clamp.(con.penalty_k .* sim.gamma, con.k_min, con.k_max)
 
             if !sim.stabilize
@@ -329,14 +312,12 @@ function warm_start!(sim::SimulationState)
             end
             con.penalty_k = pk
 
-            # Build incidence_map (endpoints already verified active)
             push!(sim.bond_incidence[a_idx], con_id)
             push!(sim.bond_incidence[b_idx], con_id)
             push!(sim.active_bond_ids, con_id)
         end
     end
 
-    # Loop contacts
     for con_id in eachindex(sim.contact_constraints)
 
         con = sim.contact_constraints[con_id]
@@ -363,12 +344,12 @@ function warm_start!(sim::SimulationState)
         end
         con.penalty_k = pk
 
-        # Build incidence_map (endpoints already verified active)
         push!(sim.contact_incidence[a_idx], con_id)
         push!(sim.contact_incidence[b_idx], con_id)
     end
 end
 
+"""Solve the local primal AVBD subproblem for one active body."""
 function primal_solve!(sim::SimulationState, b::Body, bonds::Vector{Int}, contacts::Vector{Int}, dt::Float64, invdt2::Float64, alpha::Float64)
     b.inv_mass == 0.0 && return
 
@@ -452,11 +433,10 @@ function primal_solve!(sim::SimulationState, b::Body, bonds::Vector{Int}, contac
     b.quat = normalize(b.quat)
 end
 
+"""Update multipliers/penalties and collect refinement requests for this step."""
 function dual_update!(sim::SimulationState, alpha::Float64)
-    # Dual update will now return a max constraint violation 
     max_violation = 0.0
 
-    # List of bodies to be refined 
     refinement_list = Int[]
 
     for con_id in sim.active_bond_ids
@@ -471,7 +451,6 @@ function dual_update!(sim::SimulationState, alpha::Float64)
         pk = con.penalty_k
         lam = con.lambda
 
-        # TODO need a way to get the level & check for refinement/fracture - this is probabaly a bad way
         a_idx = con.bodyA.id + 1
         b_idx = con.bodyB.id + 1
 
@@ -484,16 +463,11 @@ function dual_update!(sim::SimulationState, alpha::Float64)
         capA = (levelA >= local_max_ref_level(sim, a_idx)) || !has_valid_child(sim, a_idx)
         capB = (levelB >= local_max_ref_level(sim, b_idx)) || !has_valid_child(sim, b_idx)
 
-        # TODO essentially need to check if over threshold -> refine, UNLESS already @ max_ref_level, then break/fracture
-
         for r in 1:3
-            #lambda_base = isinf(con.stiffness[r]) ? lam[r] : 0.0
-            sigma = pk[r] * con.C[r]# + lambda_base
+            sigma = pk[r] * con.C[r]
             lam_r = clamp(sigma, con.f_min[r], con.f_max[r])
             lam = setindex(lam, lam_r, r)
 
-            # TODO REFINEMENT CRITERIA
-            # if abs(lam_r) >= ref_crit
             if Criteria.should_refine(sim.criteria, sim, con, lam_r, r)
                 if !capA
                     push!(refinement_list, a_idx)
@@ -564,17 +538,18 @@ function update_vel!(sim::SimulationState, invdt::Float64)
         body.is_static && continue
         body.inv_mass == 0.0 && continue
 
-        body.vel = (body.pos - body.pos0) * invdt #* 0.1 -> velocity issue isolated
+        body.vel = (body.pos - body.pos0) * invdt
 
         q_rel = quat_mul(body.quat, quat_inv(body.quat0))
         d_theta = quat_to_rotvec(q_rel)
-        body.ang_vel = d_theta * invdt# * 0.1
+        body.ang_vel = d_theta * invdt
 
         update_rotation!(body)
         update_inv_inertia_world!(body)
     end
 end
 
+"""Initialize the Julia solver state from flat body and bond arrays."""
 function init_simulation(
     pos_flat::Matrix{Float64},
     vel_flat::Matrix{Float64},
@@ -599,7 +574,8 @@ function init_simulation(
     max_ref_level::Union{Int,Nothing}=nothing,
     max_ref_level_per_body::Union{AbstractVector{<:Integer},Nothing}=nothing,
     criteria_refine_stress_threshold::Union{Nothing,Float64}=nothing,
-    criteria_refine_stress_exclude_kinematic::Bool=true,)
+    criteria_refine_stress_exclude_kinematic::Bool=true,
+)
 
     n_bodies = length(masses)
     bodies = Vector{Body}(undef, n_bodies)
@@ -630,8 +606,7 @@ function init_simulation(
         refine_stress_exclude_kinematic=criteria_refine_stress_exclude_kinematic,
     )
 
-    # TODO cleaner way to do this?
-    # Apply AMR arrays if provided
+    # Apply AMR arrays if provided.
     if active !== nothing
         sim.active = BitVector(active)
     else
@@ -677,7 +652,7 @@ function init_simulation(
     # Deterministic bond randomization unless overridden via AVBD_RNG_SEED.
     Random.seed!(configured_rng_seed())
 
-    #HACK adding weibull randomization to the material properties
+    # Apply deterministic Weibull scaling to bond strength and toughness.
     weibull_shape = 5.0
     n_bonds = size(bond_data, 1)
     if n_bonds > 0
@@ -693,7 +668,7 @@ function init_simulation(
             kt = row[13]
             area = row[14]
 
-            U = rand() # Uniform [0,1]
+            U = rand()
             random_factor = (-log(U))^(1.0 / weibull_shape)
 
             tensile = row[15] * random_factor
@@ -702,7 +677,7 @@ function init_simulation(
             bA = bodies[idxA+1]
             bB = bodies[idxB+1]
 
-            # set bond break steps & avoid infinite mass issues 
+            # Estimate a conservative break window while avoiding infinite-mass cases.
             mass_bond = (bA.mass + bB.mass) / 2
             if !isfinite(mass_bond) || !isfinite(kt) || kt <= 0
                 bond_break_steps = 10
@@ -747,8 +722,7 @@ function init_simulation(
     return sim
 end
 
-function damage_bonds!(sim::SimulationState, dt::Float64)
-    _ = dt
+function damage_bonds!(sim::SimulationState, _dt::Float64)
     changed = false
 
     for con_id in sim.active_bond_ids
@@ -782,29 +756,19 @@ function damage_bonds!(sim::SimulationState, dt::Float64)
     return changed
 end
 
-@inline function assert_finite_body!(b, tag)
-    if !(all(isfinite, b.pos) && all(isfinite, b.vel) && all(isfinite, b.quat) && all(isfinite, b.ang_vel))
-        error("Non-finite body $(b.id) at $tag: pos=$(b.pos) quat=$(b.quat)")
-    end
-end
-
+"""Advance the AVBD solver by one step, including damage and optional AMR."""
 function step_simulation!(sim::SimulationState)
 
     dt = sim.dt
     inv_dt = 1 / dt
     inv_dt2 = 1 / (dt * dt)
 
-    # Inertial solve
     predict_inertia!(sim)
 
-    # TODO CHECK time diffrence between running with collision detection and contact constraints vs. just bonds
-    # Build contact constraints
     detect_collisions!(sim)
 
-    # warm start constraints
-    warm_start!(sim) # Python builds incident map here - inside the constraint loop
+    warm_start!(sim)
 
-    #total_iters = sim.iterations + (sim.stabilize ? 1 : 0)
     inner_passes = sim.iterations
 
     curr_max_violation = Inf
@@ -816,27 +780,19 @@ function step_simulation!(sim::SimulationState)
 
         alpha_eff = sim.stabilize ? 1.0 : sim.alpha
 
-        # Loop over bodies aka primal loop
         for b_id in sim.active_body_ids
             body = sim.bodies[b_id]
-            # solve constriants not in loop but via linear algebra
             body.is_static && continue
 
-            # TODO include a L-scheme term here that adds numerical inertia
             primal_solve!(sim, body,
                 sim.bond_incidence[body.id+1],
                 sim.contact_incidence[body.id+1],
-                dt, inv_dt2, alpha_eff)  # Uses eval_bond
-
-            #assert_finite_body!(body, "after primal_solve in_it=$in_it")
+                dt, inv_dt2, alpha_eff)
         end
 
-        # TODO should dual update output a list of voxels to refine OR should it happen in dual update? -> probably shouldn't
         curr_max_violation, refine_list = dual_update!(sim, alpha_eff)
 
-        # Early out - skip prescribed num of iterations if below tolerance
         curr_max_violation < EARLY_OUT_TOL && break
-
     end
 
     for body_idx in Criteria.collect_stress_refinement_candidates(sim.criteria, sim)
@@ -846,11 +802,6 @@ function step_simulation!(sim::SimulationState)
 
     damage_bonds!(sim, dt)
 
-    if DEBUG_REFINE_ALL
-        refine_list = copy(sim.active_body_ids)
-    end
-
-    # # TODO do refinement step here
     if !isempty(refine_list)
         if size(sim.neighbor_map, 2) == 6
             refine_list = enforce_2to1!(sim, refine_list)
@@ -860,13 +811,12 @@ function step_simulation!(sim::SimulationState)
         end
     end
 
-    # Velocity derivation from new positions
     update_vel!(sim, inv_dt)
 
     alpha_log = sim.alpha
 
-    # Stabilization pass
-    if sim.stabilize && isempty(refine_list) #HACK - just skip stabilization when refinement occurs
+    # Skip stabilization when topology changed during this step.
+    if sim.stabilize && isempty(refine_list)
         alpha_stabil = 0.05
         for b_id in sim.active_body_ids
             body = sim.bodies[b_id]
@@ -887,7 +837,14 @@ function step_simulation!(sim::SimulationState)
 
 end
 
-# ---------- AMR HELPER FUNCITONS ---------- #
+"""Profile wrapper used by Python-side timing scripts."""
+function step_simulation_timed!(sim::SimulationState)
+    t0 = time_ns()
+    step_simulation!(sim)
+    return (total_s=(time_ns() - t0) * 1.0e-9,)
+end
+
+# --- AMR Helpers --- #
 
 @inline function resolve_active_neighbor(sim::SimulationState, nb_node::Int)
     nb_node < 0 && return 0
@@ -996,6 +953,7 @@ function enforce_2to1!(sim::SimulationState, refine_list::Vector{Int})
     return [id for id in sim.refine_out if !sim.refine_blocked[id]]
 end
 
+"""Activate valid children, deactivate the parent, and transfer kinematics."""
 function refine_voxel!(sim::SimulationState, parent_idx::Int)
     # Refines given voxel to children voxels and transfers kinematics.
     # parent_idx is a 1-based index into sim.bodies (Body.id == parent_idx - 1).
@@ -1004,7 +962,6 @@ function refine_voxel!(sim::SimulationState, parent_idx::Int)
         return
     end
 
-    # TODO here active_body_ids is changed -> nowhere else 
     parent = sim.bodies[parent_idx]
 
     node_id = parent.id # 0-based id to index AMR lists
@@ -1064,7 +1021,7 @@ function refine_voxel!(sim::SimulationState, parent_idx::Int)
 end
 
 function seed_child_lambdas!(sim::SimulationState, parent_idx::Int, child_indices::Vector{Int})
-    # Distribute parent's bond lambda to new child bonds (per active neighbor).
+    # Distribute the parent's bond lambda to the newly activated child bonds.
     neighbor_ids = sim.seed_neighbor_ids
     lambda_sums = sim.seed_lambda_sums
     counts = sim.seed_counts
@@ -1165,7 +1122,6 @@ end
 end
 
 function rebuild_active_body_ids!(sim::SimulationState)
-    # TODO should probably build this list ONCE and then empty and fill -- aka no resizing
     empty!(sim.active_body_ids)
     if length(sim.active_pos) != length(sim.active)
         sim.active_pos = zeros(Int, length(sim.active))
@@ -1181,7 +1137,7 @@ function rebuild_active_body_ids!(sim::SimulationState)
 end
 
 @inline function _local_offset(parent::Body, child::Body)
-    # Get child local offset in parent's local frame from prev proses 
+    # Get child local offset in the parent's local frame from the previous step.
     r_world = child.pos_prev - parent.pos_prev
     if all(isfinite, r_world) && !iszero(r_world)
         return rotate_vec(r_world, quat_inv(parent.quat_prev))
@@ -1207,17 +1163,12 @@ end
 end
 
 @inline function transfer_kinematics!(parent::Body, child::Body, dt::Float64; slot::Union{Int,Nothing}=nothing)
-    # Compute child local offset in parent's rest frame (robust to missing children).
-    # r_local = _local_offset(parent, child)
-    # if r_local === nothing
     if slot === nothing
         r_local = Vec3(0.0, 0.0, 0.0)
     else
         r_local = _octant_local_offset(parent, slot)
     end
-    # end
 
-    # r_world = rotate_vec(r_local, quat_inv(parent.quat))
     r_world = rotate_vec(r_local, parent.quat)
 
     # Rigid transfer

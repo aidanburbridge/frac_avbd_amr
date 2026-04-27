@@ -1,3 +1,10 @@
+"""
+Refinement and fracture criteria for the adaptive voxel solver.
+
+The criteria layer evaluates bond-based and stress-based indicators without
+changing the core AVBD update loop, so refinement and cohesive damage remain
+configurable from the bridge.
+"""
 module Criteria
 
 using LinearAlgebra
@@ -12,18 +19,18 @@ export CriteriaConfig, RefineSpec, FractureSpec, RefineKind, FractureKind, Logic
     SimpleRefine, StressRefine, DeviatoricStressRefine, SimpleFracture, default_criteria_config, build_criteria_config,
     compute_body_stress_data, collect_stress_refinement_candidates, should_refine, should_fracture
 
-# ---------- Enums and Logic Params ---------- #
+# --- Enums and Logic --- #
 
 @enum LogicOperation ANY ALL
 
 @enum RefineKind REFINE_LAMBDA REFINE_ENERGY REFINE_STRESS REFINE_DEVIATORIC_STRESS
 @enum FractureKind FRAC_LAMBDA FRAC_STRETCH FRAC_ENERGY
 
-# ---------- Structs ---------- #
+# --- Data Types --- #
 
 struct RefineSpec
     kind::RefineKind
-    params::SVector{2,Float64} # [threshold, unused]
+    params::SVector{2,Float64} # [primary threshold, optional secondary flag/value]
 end
 
 struct FractureSpec
@@ -49,6 +56,7 @@ DeviatoricStressRefine(threshold::Real; exclude_kinematic::Bool=true) = RefineSp
 )
 SimpleFracture(threshold::Real=1.0) = FractureSpec(FRAC_LAMBDA, SVector(Float64(threshold), 0.0))
 
+"""Build the default refinement/fracture configuration used by the solver."""
 function default_criteria_config()::CriteriaConfig
     ref_specs = [
         RefineSpec(REFINE_ENERGY, SVector(0.50, 1.0)),
@@ -59,6 +67,7 @@ function default_criteria_config()::CriteriaConfig
     return CriteriaConfig(ref_specs, ANY, frac_specs, ANY)
 end
 
+"""Construct a criteria configuration from optional bridge overrides."""
 function build_criteria_config(;
     refine_stress_threshold::Union{Nothing,Real}=nothing,
     refine_stress_exclude_kinematic::Bool=true,
@@ -80,9 +89,7 @@ function build_criteria_config(;
     return cfg
 end
 
-# -------------------------------------------------- #
-#                   Refinement
-# -------------------------------------------------- #
+# --- Refinement --- #
 
 @inline function _check_refinement_criteria(spec::RefineSpec, con, lam_r, r)::Bool
     spec.kind != REFINE_STRESS && spec.kind != REFINE_DEVIATORIC_STRESS && _bond_touches_prescribed_body(con) && return false
@@ -131,10 +138,9 @@ end
     end
 end
 
-# -------------------------------------------------- #
-#             Stress-Driven Refinement
-# -------------------------------------------------- #
+# --- Stress-Driven Refinement --- #
 
+"""Accumulate per-body Cauchy stress estimates from the active bond set."""
 function compute_body_stress_data(sim)
     active_body_indices = sim.active_body_ids
     id_to_local = fill(0, length(sim.bodies))
@@ -188,6 +194,7 @@ function compute_body_stress_data(sim)
     return stress_data, id_to_local
 end
 
+"""Collect active bodies that satisfy any configured stress refinement rule."""
 function collect_stress_refinement_candidates(config::CriteriaConfig, sim)::Vector{Int}
     stress_specs = RefineSpec[
         spec for spec in config.refine_specs
@@ -261,9 +268,7 @@ function collect_stress_refinement_candidates(config::CriteriaConfig, sim)::Vect
     return candidates
 end
 
-# -------------------------------------------------- #
-#                   Fracture
-# -------------------------------------------------- #
+# --- Fracture --- #
 
 @inline function _check_fracture_criteria(spec::FractureSpec, con, lam_r, r)::Bool
     _bond_touches_prescribed_body(con) && return false
@@ -314,7 +319,7 @@ end
     end
 end
 
-# ---------- Helper Functions ---------- #
+# --- Helper Functions --- #
 
 @inline function _acc_stress!(buf, idx, r, f, vol)
     idx <= 0 && return
@@ -436,8 +441,8 @@ end
 end
 
 @inline function _bond_touches_prescribed_body(con)::Bool
-    # TODO: excluding a wider grip-adjacent halo would require extra boundary
-    # metadata beyond the direct prescribed-body information available here.
+    # A wider grip-adjacent exclusion zone would require boundary metadata
+    # beyond the direct prescribed-body information stored on the bond.
     return _body_has_prescribed_motion(con.bodyA) || _body_has_prescribed_motion(con.bodyB)
 end
 

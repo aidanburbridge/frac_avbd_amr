@@ -1,9 +1,12 @@
+"""
+Julia bridge functions exposed to Python.
+
+This module translates NumPy-compatible arrays into the solver state, advances
+the AVBD simulation, and writes the binary/CSV exports consumed by the thesis
+visualization and post-processing scripts.
+"""
 module PhysicsBridge
 
-using LinearAlgebra
-using StaticArrays
-
-# Load the Core
 include("maths.jl")
 include("collisions.jl")
 include("avbd_constraints.jl")
@@ -19,6 +22,7 @@ const BOND_META_MAGIC = "ABM2"
 
 # --- Interface Functions ---
 
+"""Initialize the Julia `SimulationState` from Python-owned arrays."""
 function init_system(
     pos::Matrix{FLOAT},   # (N, 7)
     vel::Matrix{FLOAT},   # (N, 6)
@@ -34,7 +38,7 @@ function init_system(
     stabilize::Bool=true,
     sizes::Union{Matrix{FLOAT},Nothing}=nothing,
     assembly_ids::Union{Vector{Int},Nothing}=nothing,
-    active=nothing, # TODO do I really need to pass these, could initialize active in julia solver based on level
+    active=nothing,
     valid_mask=nothing,
     can_refine=nothing,
     level=nothing,
@@ -47,8 +51,6 @@ function init_system(
     criteria_refine_stress_threshold=nothing,
     criteria_refine_stress_exclude_kinematic::Bool=true,
 )
-    # Create the SimulationState object
-    # This object stays in Julia memory
     sim = AVBDCore.init_simulation(pos, vel, masses, bond_data, dt, gravity, iters;
         friction=friction, beta=beta, gamma=gamma, alpha=alpha, stabilize=stabilize,
         sizes=sizes, assembly_ids=assembly_ids,
@@ -59,6 +61,7 @@ function init_system(
     return sim
 end
 
+"""Advance the simulation for `steps` solver steps."""
 function step_batch!(sim::AVBDCore.SimulationState, steps::Int)
     for _ in 1:steps
         AVBDCore.step_simulation!(sim)
@@ -72,8 +75,8 @@ function step_timed(sim::AVBDCore.SimulationState)
     return AVBDCore.step_simulation_timed!(sim)
 end
 
+"""Return positions and quaternions for all bodies."""
 function get_positions(sim::AVBDCore.SimulationState)
-    # Extract positions to return to Python for rendering
     n = length(sim.bodies)
     data = zeros(FLOAT, n, 7)
 
@@ -90,6 +93,7 @@ function get_positions(sim::AVBDCore.SimulationState)
     return data
 end
 
+"""Write one binary visualization frame with active bodies and active bonds."""
 function write_frame(sim::AVBDCore.SimulationState, filename::String)
     active_body_indices = sim.active_body_ids
     stress_data, bond_data = get_visualization_data(sim)
@@ -162,6 +166,7 @@ function write_frame(sim::AVBDCore.SimulationState, filename::String)
     return (n_bodies, n_bonds)
 end
 
+"""Write the most recent energy sample as a single-row CSV."""
 function write_energy_csv(sim::AVBDCore.SimulationState, filename::String, frame_idx::Int)
     log = sim.energy_log
 
@@ -188,6 +193,7 @@ function write_energy_csv(sim::AVBDCore.SimulationState, filename::String, frame
     end
 end
 
+"""Write static bond metadata used by downstream post-processing."""
 function write_bond_metadata(sim::AVBDCore.SimulationState, filename::String)
     open(filename, "w") do io
         write(io, codeunits(BOND_META_MAGIC))
@@ -207,6 +213,7 @@ function write_bond_metadata(sim::AVBDCore.SimulationState, filename::String)
     end
 end
 
+"""Return coarse per-step solver metrics for progress and logging."""
 function get_last_step_metrics(sim::AVBDCore.SimulationState)
     return (
         sim.step_count,
@@ -218,6 +225,7 @@ function get_last_step_metrics(sim::AVBDCore.SimulationState)
     )
 end
 
+"""Return stress tensors and bond metadata for Python-side visualization."""
 function get_visualization_data(sim::AVBDCore.SimulationState)
     # Active bodies are sourced from sim.active_body_ids (precomputed in solver)
     active_body_indices = sim.active_body_ids

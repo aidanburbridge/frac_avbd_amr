@@ -1,17 +1,24 @@
+"""
+Constraint types and evaluation routines for the AVBD solver.
+
+`ContactConstraint` stores persistent contact manifold data, while
+`BondConstraint` stores cohesive voxel bonds that couple preprocessing output to
+the Julia solver state.
+"""
 module AVBDConstraints
 
 using LinearAlgebra
 using StaticArrays
-import ..Maths: Vec3, Quat, transform_point, quat_mul, integrate_quat, orthonormal_basis, rotate_vec, quat_to_rotmat, quat_inv, quat_to_rotvec, delta_twist_from
+import ..Maths: Vec3, orthonormal_basis, rotate_vec, quat_to_rotmat, delta_twist_from
 import ..Collisions: Body
 
-export ContactConstraint, BondConstraint, initialize!, compute_constraint!, update_bounds!, eval_bond, update_bond_state!, bond_k_eff, get_effective_stiffness #AbstractConstraint, 
+export ContactConstraint, BondConstraint, initialize!, compute_constraint!, update_bounds!, eval_bond, update_bond_state!, bond_k_eff, get_effective_stiffness
 
 const CONTACT_MARGIN = 1e-6
 const CONTACT_K_MIN = 1e6
 const CONTACT_K_MAX = 1e14
 
-##### ---------- Contact Constraint ---------- #####
+# --- Contact Constraints --- #
 
 mutable struct ContactConstraint
     bodyA::Body
@@ -32,7 +39,7 @@ mutable struct ContactConstraint
     JB::SMatrix{3,6,Float64,18}
 
     # AVBD solver values
-    lambda::Vec3 # TODO Removed is_hard and will instead just set lambda 0 for non-hard constraints -> No check stiffness is Inf for hard or not
+    lambda::Vec3 # Warm-start multiplier state.
     penalty_k::Vec3
 
     stiffness::Vec3 # Material E essentially ?
@@ -49,7 +56,7 @@ mutable struct ContactConstraint
 
         stiff = @SVector fill(Inf, 3)
         kmin = @SVector fill(CONTACT_K_MIN, 3)
-        kmax = @SVector fill(CONTACT_K_MAX, 3) # TODO Maybe we make this Inf -> could make Inf 
+        kmax = @SVector fill(CONTACT_K_MAX, 3)
 
         fmin = @SVector [0.0, -Inf, -Inf]
         fmax = @SVector [Inf, Inf, Inf]
@@ -60,7 +67,7 @@ mutable struct ContactConstraint
     end
 end
 
-# ---------- Contact Constraint Functions ---------- #
+# --- Contact Constraint Functions --- #
 
 function initialize!(con::ContactConstraint)
     t1, t2 = orthonormal_basis(con.normal)
@@ -112,13 +119,6 @@ function compute_constraint!(con::ContactConstraint, alpha::Float64)
     con.C = (1.0 - alpha) * con.C0 + con.JA * dA + con.JB * dB
 end
 
-# TODO do I need to calculate JA and JB?? It's normally just cached, calculated in initialize?? -> No, only for non-linear but ignore for now.
-function compute_JA!(con::ContactConstraint)
-end
-
-function compute_JB!(con::ContactConstraint)
-end
-
 function update_bounds!(con::ContactConstraint)
 
     # Non-negative lambda
@@ -136,19 +136,10 @@ function update_bounds!(con::ContactConstraint)
 
 end
 
-##### ---------- End Contact Constraint ---------- #####
+# --- End Contact Constraints --- #
 
 
-##### ---------- Bond Constraint ---------- #####
-
-#DEBUGGING CONSTANTS
-const DT_PHYSICAL_CFL = 2.9330379512351167e-06  # Your calculated value
-const SIM_DT_ESTIMATE = 1.0 / 4000.0            # Your physics timestep (0.00025)
-
-const SPEED_RATIO = SIM_DT_ESTIMATE / DT_PHYSICAL_CFL
-const TARGET_DAMAGE_PER_FRAME = 0.25
-
-const MAX_DAMAGE_RATE = TARGET_DAMAGE_PER_FRAME / SIM_DT_ESTIMATE
+# --- Bond Constraints --- #
 
 mutable struct BondConstraint
     id::Int
@@ -167,7 +158,7 @@ mutable struct BondConstraint
     JA::SMatrix{3,6,Float64,18}
     JB::SMatrix{3,6,Float64,18}
 
-    # AVBD solver values (AL)
+    # AVBD solver state
     lambda::Vec3
     penalty_k::Vec3
     fracture::Vec3
@@ -179,17 +170,17 @@ mutable struct BondConstraint
     rest_initialized::Bool
     damage::Float64
 
-    # Fracture histroy
+    # Fracture history
     max_eff_strain::Float64
     current_eff_strain::Float64
-    max_committed_strain::Float64 # CCM calls this lambda, but switched for 'strain' to avoid confusion
+    max_committed_strain::Float64 # Stored separately from the AVBD multiplier lambda.
 
     # Solver values
     k_eff::Vec3
 
     # Material config/values
     area::Float64
-    stiffness::Vec3 # base material stiffness (E) will NOT be damaged, use for compression
+    stiffness::Vec3 # Undamaged bond stiffness.
     k_min::Vec3
     k_max::Vec3
     f_min::Vec3
@@ -199,8 +190,8 @@ mutable struct BondConstraint
     limits::SVector{4,Float64} # [delta_n0, delta_s0, delta_nc, delta_sc]
 
     # Stabilization parameters
-    break_counter::Int # based this on wave speed - CZM? - process zone ahead of crack tip
-    max_break_steps::Int # TODO this must be calculated based on speed of sound 
+    break_counter::Int
+    max_break_steps::Int # Default limit; preprocessing may override from a wave-speed estimate.
     viscosity::Float64
     C_prev::Vec3
 
@@ -213,12 +204,12 @@ mutable struct BondConstraint
         d_n0 = (tensile * area) / kn
         d_s0 = (tensile * area) / kt
 
-        # Critical strain value - notable for fracture
+        # Cohesive failure separations derived from the material inputs.
         d_nc = (2.0 * Gc) / tensile
         d_sc = (2.0 * Gc) / tensile
 
         limits = @SVector [d_n0, d_s0, d_nc, d_sc]
-        stiff = @SVector [kn, kt, kt] # These will be corrected with SINDy - cool beans man
+        stiff = @SVector [kn, kt, kt]
 
         R_A = quat_to_rotmat(bA.quat)
         n_loc = transpose(R_A) * n_world
@@ -239,7 +230,7 @@ mutable struct BondConstraint
         lambda = zeros_Vec3
         penalty_k = stiff
 
-        # Stabilization terms - TUNE these TODO
+        # Conservative defaults until material-specific calibration is supplied.
         break_counter = 0
         max_break_steps = 10
         viscosity = 0.0
@@ -258,16 +249,10 @@ mutable struct BondConstraint
     end
 end
 
-# ---------- Bond Constraint Functions ---------- #
+# --- Bond Constraint Functions --- #
 
-function initialize!(con::BondConstraint) #TODO do I put in the body list here? bonds do not have bodies?
-    # if con.is_broken
-    #     con.k_tension = @SVector zeros(3)
-
-    #     return
-    # end
-
-    R_A = quat_to_rotmat(con.bodyA.quat) #Unless body has update rotmat in struct
+function initialize!(con::BondConstraint)
+    R_A = quat_to_rotmat(con.bodyA.quat)
     n_curr = R_A * con.n_local
     t1_curr = R_A * con.t1_local
     t2_curr = R_A * con.t2_local
@@ -277,17 +262,16 @@ function initialize!(con::BondConstraint) #TODO do I put in the body list here? 
     rA = rotate_vec(con.pA_local, con.bodyA.quat)
     rB = rotate_vec(con.pB_local, con.bodyB.quat)
 
-    #TODO do I need to initialize the rest length like I do in python?
-
     pA = con.bodyA.pos + rotate_vec(con.pA_local, con.bodyA.quat)
     pB = con.bodyB.pos + rotate_vec(con.pB_local, con.bodyB.quat)
     dp = pA - pB
 
     if !con.rest_initialized
+        # Capture the undeformed bond coordinates on first use.
         con.rest = @SVector [dot(n_curr, dp), dot(t1_curr, dp), dot(t2_curr, dp)]
         con.rest_initialized = true
 
-        # Previous con
+        # Previous constraint state for viscous regularization.
         con.C_prev = @SVector zeros(3)
     end
 
@@ -329,31 +313,9 @@ function eval_bond(con::BondConstraint)
 end
 
 
-##### ---------- End Bond Constraint ---------- #####
+# --- End Bond Constraints --- #
 
-##### ---------- Helper functions ---------- #####
-
-#TODO Gemini provided math - check for accuracy - renamed for now to be not used
-function get_delta_twist(b::Body, from_pos::Vec3, from_quat::Quat)
-    # 1. Translational Delta
-    dx = b.pos - from_pos
-
-    # 2. Rotational Delta (Exact Log Map)
-    # Ensure shortest path (Hemisphere check)
-    # Matches Python: qs = self._closest_hemisphere(q, qs) 
-    if dot(b.quat, from_quat) < 0.0
-        from_quat = -from_quat
-    end
-
-    # Difference quaternion: q_diff = q_current * inv(q_inertial)
-    q_rel = quat_mul(b.quat, quat_inv(from_quat))
-
-    # Map to rotation vector (axis * angle)
-    # Matches Python: dth = quat_log(qerr) 
-    d_th = quat_to_rotvec(q_rel)
-
-    return vcat(dx, d_th)
-end
+# --- Helper Functions --- #
 
 @inline function get_effective_stiffness(bond::BondConstraint)
 

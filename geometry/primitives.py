@@ -1,10 +1,12 @@
-# PRIMITIVES
-import numpy as np
-from dataclasses import dataclass
+"""Geometry primitives and rigid-body helpers shared by preprocessing code."""
+
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Union
 
-# -------------------- Data Structures -------------------- #
+import numpy as np
+
+# --- Data Structures --- #
 @dataclass
 class AABB_ND:
     """ An Axis Aligned Bounding Box (AABB) in D dimensions. """
@@ -29,7 +31,7 @@ class AABB3:
     min_y: float; max_y: float
     min_z: float; max_z: float
 
-# -------------------- Linear Algebra Helper Functions -------------------- #
+# --- Linear Algebra Helpers --- #
 
 def skew(v: np.ndarray) -> np.ndarray:
     """
@@ -44,14 +46,7 @@ def skew(v: np.ndarray) -> np.ndarray:
         ], dtype=float)
 
 
-# -------------------- Quaternion Helper (3D) -------------------- #
-"""
-Quaternion being a way to represent rotation in 3D space - with 4 numbers hence quat_pos.
-    q = (w,x,y,z)
-    Where:
-        - w: scalar part 
-        - (x, y, x): vector part, uses imaginary numbers
-"""
+# --- Quaternion Helpers (3D) --- #
 
 def quat_normalize(q: np.ndarray) -> np.ndarray:
     """
@@ -147,7 +142,7 @@ def quat_log(q: np.ndarray) -> np.ndarray:
     return (angle / (nv + 1e-12)) * v
 
 
-# -------------------- Body base classes -------------------- #
+# --- Body Base Classes --- #
 class Body:
     def __init__(self, position, velocity, density:float, stiffness:float, static:bool=False):
 
@@ -160,7 +155,7 @@ class Body:
         self.density = float(density)
         self.k = float(stiffness)
 
-        # DOFs 
+        # Degrees of freedom
         self.dof = len(self.velocity)   # Either 3 or 6 long
 
         # Mass/inertia defaults (also for statics)
@@ -175,7 +170,7 @@ class Body:
         self.body_id: int = None
         self.assembly_id: int = None
 
-        # Inertial or "y" in paper
+        # Predicted inertial state used by the solver update.
         self.inertial_pos = np.zeros_like(self.position)
 
         # Solver scratch buffers
@@ -239,7 +234,7 @@ class CollidableShape(Body, ABC):
         pass
 
 
-# -------------------- 2D rectangle -------------------- #
+# --- 2D Rectangle --- #
     
 class rect_2D(CollidableShape):
     def __init__(self, position, velocity, density:float, stiffness:float, size, static: bool=False):
@@ -326,7 +321,7 @@ class rect_2D(CollidableShape):
     def get_dim(self):
         return int(len(self.size))
     
-# -------------------- 3D box -------------------- #
+# --- 3D Box --- #
 
 class box_3D(CollidableShape):
     """
@@ -497,13 +492,11 @@ class box_3D(CollidableShape):
         return q_y
 
 
-### -------------------- Utility: 3D faces -------------------- ###
+# --- 3D Face Helpers --- #
 
 def box_face_vectors(b: box_3D) -> list[tuple[np.ndarray, np.ndarray]]:
     """
-    For a 3D box return...
-        - center: center position of the face
-        - face_vectors: the normal and tangent vectors of each face
+    Return each face center together with a local normal/tangent basis.
     """
     # Box's 3x3 rotation matrix
     rot_mat = b.rotmat()
@@ -538,19 +531,18 @@ def box_face_vectors(b: box_3D) -> list[tuple[np.ndarray, np.ndarray]]:
     ]
     return [(centers[i], face_vectors[i]) for i in range(6)]
 
-# -------------------- ND Scaffolding (unused for now) -------------------- #
+# --- Experimental ND Scaffolding --- #
 
 class RigidND_Scaffold(Body):
     """
-    Plain: Minimal ND rigid placeholder (trans_pos in R^D, linear velocity); orientation is identity.
-    Scientific: Prototype for SE(D): stores translation and an identity rotation matrix R∈SO(D).
+    Experimental ND rigid scaffold retained for compatibility with older tooling.
     """
     def __init__(self, D: int, position, velocity, density: float, stiffness: float, size, static: bool=False):
         trans_pos = np.asarray(position, float).reshape(D)
         vel = np.asarray(velocity, float).reshape(D)
         super().__init__(trans_pos, vel, density, stiffness, static)
         self.D = int(D)
-        self.R = np.eye(self.D, dtype=float)              # placeholder orientation
+        self.R = np.eye(self.D, dtype=float)
         self.size = np.asarray(size, dtype=float).reshape(self.D)
 
         volume = float(np.prod(self.size))
@@ -562,17 +554,11 @@ class RigidND_Scaffold(Body):
             self.inv_mass = 0.0
 
     def get_axes(self) -> np.ndarray:
-        """
-        Plain: Rows of the body’s ND rotation (identity here).
-        Scientific: Returns R^T; basis of the body frame in world coordinates.
-        """
+        """Return the body-frame basis vectors in world coordinates."""
         return self.R.T
 
     def get_corners(self) -> np.ndarray:
-        """
-        Plain: All 2^D corners of the hyper-rectangle, rotated by R and translated by trans_pos.
-        Scientific: V_world = R V_local + t with V_local ∈ {±s_1/2}×…×{±s_D/2}.
-        """
+        """Return all corners of the ND hyper-rectangle in world coordinates."""
         he = 0.5 * self.size
         corners = []
         for i in range(1 << self.D):
@@ -581,9 +567,6 @@ class RigidND_Scaffold(Body):
         return np.stack(corners, axis=0)
 
     def get_aabb(self) -> AABB_ND:
-        """
-        Plain: ND axis-aligned bounding box around the corners.
-        Scientific: Component-wise extrema over V_world yield Π_i [min, max].
-        """
+        """Return the axis-aligned bounding box enclosing the ND body."""
         c = self.get_corners()
         return AABB_ND(np.min(c, axis=0), np.max(c, axis=0))

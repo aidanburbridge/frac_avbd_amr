@@ -1,16 +1,23 @@
-# OCTREE
+"""Octree construction and bond generation for voxel-based fracture models.
+
+This module builds the voxel hierarchy used by adaptive refinement, creates
+box primitives for each octree leaf, and emits solver-agnostic `BondData`
+records for the Julia AVBD bridge.
+"""
+
 # Python standard libraries
 from dataclasses import dataclass
-import numpy as np
 from typing import Optional
+
+import numpy as np
 from tqdm import trange
 
 # Project specific
-from geometry.primitives import box_3D
 from geometry.bond_data import BondData
+from geometry.primitives import box_3D
 
-### -------------------- Data structures -------------------- ###
-@dataclass(frozen=True)                                         # Freeze class so values can't change -> must make new leaves instead
+# --- Data Structures --- #
+@dataclass(frozen=True)
 class Leaf:
     level: int
     i: int
@@ -28,7 +35,7 @@ class Leaf:
     def key(self) -> tuple[int, int, int, int]:
         return (self.level, self.i, self.j, self.k)
     
-### --------------------  Constants -------------------- ###
+# --- Constants --- #
 
 # Offsets to find 6 face connected neighbors in the 3D grid
 _NEIGHBOR_OFFSETS = [(1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)]
@@ -57,7 +64,7 @@ _FACE_DIRS = [
     (0, 0, -1),  # -Z
 ]
 
-### -------------------- Octree Functions -------------------- ###
+# --- Octree Construction --- #
 
 def octree_from_occ(occ: np.ndarray, h_base: float = 1.0) -> tuple[list[Leaf], float]:
     """
@@ -161,7 +168,7 @@ def octree_refine(
     to_split: list[Leaf] = []
 
     # Stage 1: create split list
-    if metric is not None and threshold is not None:            # metric.get(leaf, 0.0) is dict and gets 0.0 as fall-back TODO change to relastic val
+    if metric is not None and threshold is not None:
         to_split = [leaf for leaf in leaves if leaf.level < max_level and metric.get(leaf, 0.0) >= threshold]
 
     # Stage 2: split leaves
@@ -191,7 +198,7 @@ def octree_refine(
     return list(new_leaf_set.values())
 
 
-### -------------------- DSU -------------------- ###
+# --- Assembly Connectivity --- #
 class DSU:
     """
     Disjoint-set / union-find
@@ -223,7 +230,7 @@ class DSU:
             self.rank[root_a] += 1
 
 
-### -------------------- Primitive building functions -------------------- ###
+# --- Body Instantiation --- #
 def instantiate_boxes_from_tree(
         leaves: list[Leaf],
         origin: np.ndarray,
@@ -234,7 +241,7 @@ def instantiate_boxes_from_tree(
         show_progress: bool = True,
         valid_mask: Optional[list[bool]] = None):
     """
-    Instantiate a box_3D primitive for each octree leaf.
+    Instantiate one `box_3D` voxel body per octree node.
     
     Args:
         leaves: list of Leaf objects
@@ -248,6 +255,9 @@ def instantiate_boxes_from_tree(
     Returns:
         bodies: list[box_3D]
         leaf_key_to_body_index: mapping {leaf.key(): index in bodies}
+
+    Valid level-0 leaves start active. Refined descendants are created
+    inactive so the Julia solver can activate them during refinement.
     """
 
     bodies: list[box_3D] = []
@@ -265,7 +275,6 @@ def instantiate_boxes_from_tree(
         h = lf.size(h_base)                       # cube edge length
         pos = tuple(lf.center(origin, h_base))    # cube center
 
-        # If highest level parent, set active in mask list, else don't
         is_valid = True if valid_mask is None else bool(valid_mask[leaf_id])
         if lf.level == 0 and is_valid:
             active_mask.append(True)
@@ -288,7 +297,7 @@ def instantiate_boxes_from_tree(
 
     return bodies, leaf_key_to_body_index, active_mask
 
-### ---------------------- Full Octree w/ Refinement ---------------------- ###
+# --- Hierarchy Construction --- #
 
 def build_full_hierarchy(
         coarse_occ: np.ndarray,
@@ -296,6 +305,7 @@ def build_full_hierarchy(
         origin: Optional[np.ndarray] = None,
         h_base: Optional[float] = None,
         contains_fn=None):
+    """Build the full octree, including inactive descendants for future AMR."""
 
     # Instantiate empty return
     nodes: list[Leaf] = []      # list of leaves
@@ -392,7 +402,7 @@ def build_full_hierarchy(
 
 
 
-### -------------------- Constraint building functions -------------------- ###
+# --- Bond Construction --- #
 
 def build_constraints_from_tree(
         leaves: list[Leaf],
@@ -411,7 +421,6 @@ def build_constraints_from_tree(
     truss-style bonds scaled for isotropy.
     """
 
-    # TODO mix quadrature face points and the edges and corners
     if damping is not None:
         damping_val = damping
     
@@ -577,7 +586,6 @@ def build_constraints_from_tree(
                                 damp_val=damping_val,
                             )
                         )
-                    dsu.union(a_idx, b_idx)
     
     for idx, b in enumerate(bodies):
         b.assembly_id = int(dsu.find_root(idx))
@@ -597,28 +605,14 @@ def build_contsraints_from_hierarchy(
         valid_mask: Optional[list[bool]] = None,
         max_level: Optional[int] = None) -> list[BondData]:
     
-    """
-    for each leaf:
-        if invalid leaf:
-            continue
-        
-        # same level bonds
-        for neighbor:
-            build same level bond
+    """Build same-level and coarse-to-fine bonds for a hierarchical octree.
 
-        # intermediary bonds
-        if level.level < max_level # this leaf should have intermediary bonds to finer neighbors
-            get_fine_neighbors
-            for f_lf in finer_neighbors 
-                build bond (or build_intermediary bond)
-
-        return bond_list
+    The misspelled public name is retained for compatibility with existing
+    scripts and manifests.
     """
-    # Solve for material params TODO should I do this in like a solver setup script?
     fracture_energy = (fracture_toughness ** 2 * (1.0 - nu ** 2)) / E
     G = E / (2.0 * (1.0 + nu))
 
-    # TODO what if max_level doesn't agree with actual max - I suppose need single source of truth passed
     if max_level is None:
         max_level = max(lf.level for lf in leaves) if leaves else 0
 
@@ -632,14 +626,12 @@ def build_contsraints_from_hierarchy(
     seen_pairs = set()
     dsu = DSU(len(bodies))
 
-    
-    ## ---------- Helpers in Contraint Building Function ---------- ##
+    # --- Local Helpers --- #
 
-    # basic bond building function (used for same level & intermediary level bonds)
-    def _build_bond(idxA, idxB, pA, pB, normal, area, len):
+    def _build_bond(idxA, idxB, pA, pB, normal, area, length_scale):
         """Build a single bond (1 axial/normal & 2 shear/tangent components)."""
-        k_n = E * area / max(len, 1e-12)
-        k_t = G * area / max(len, 1e-12)
+        k_n = E * area / max(length_scale, 1e-12)
+        k_t = G * area / max(length_scale, 1e-12)
         return BondData(
             idxA=idxA,
             idxB=idxB,
@@ -702,7 +694,9 @@ def build_contsraints_from_hierarchy(
                         seen_pairs.add(pair_id)
 
                         body_B = bodies[child_idx]
-                        dsu.union(parent_idx, child_idx) # TODO why add this to the DSU? I thought DSU was just for grouping voxels belonging to the same assembly? would this not already happen in the same-level boinding?
+                        # Intermediary bonds also define rigid connectivity
+                        # across refinement levels, so they must enter the DSU.
+                        dsu.union(parent_idx, child_idx)
 
                         vec_sep = body_B.get_center() - parent_center
                         axis_idx = int(np.argmax(np.abs(vec_sep))) # longest axis
@@ -738,7 +732,6 @@ def build_contsraints_from_hierarchy(
         return new_bonds
 
 
-    # TODO make this less UGLY if possible - gotta be a cleaner way to write this
     def _child_at_face(parent_leaf, face_dir, di, dj, dk):
         """Return the child adjacent to a given parent face & quadrant."""
         L, i, j, k = parent_leaf.level, parent_leaf.i, parent_leaf.j, parent_leaf.k
@@ -758,7 +751,7 @@ def build_contsraints_from_hierarchy(
             return (Lf, 2*i + di, 2*j + dj, 2*k + 0)
         return None
 
-    # ---------- MAIN LOOP ---------- #
+    # --- Main Loop --- #
 
     for lf_idx, lf in enumerate(leaves):
         if not valid_mask[lf_idx]:
@@ -833,7 +826,7 @@ def build_contsraints_from_hierarchy(
     return bonds
 
 
-# Neighbor lookup for 2:1 refinement assurance
+# --- Neighbor Lookup --- #
 def build_neighbor_map(nodes: list[Leaf], key_to_id: dict[tuple[int, int, int, int], int]) -> np.ndarray:
     """
     Create a (N, 6) array where each row contains the node IDs for all 6 face-face neighbors of node i.
@@ -876,7 +869,7 @@ def build_hierarchical_bodies_bonds_amr(
         fracture_toughness: float = 1.0,
         damping_val: float = 0.0):
     """
-    Build a hierarchical voxel body set + bonds + AMR arrays from a coarse occupancy grid.
+    Build voxel bodies, bonds, and solver-side AMR arrays from a coarse grid.
 
     Returns:
         bodies, bonds, amr_dict

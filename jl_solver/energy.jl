@@ -1,8 +1,14 @@
+"""
+Energy accounting utilities for the AVBD solver.
+
+This module tracks kinetic, elastic, contact, fracture, and viscous work terms
+so the Julia solver and the export bridge can write reproducible energy logs.
+"""
 module Energy
 
 using LinearAlgebra
 using StaticArrays
-using ..Maths: Vec3, Quat, rotate_vec, quat_to_rotmat
+using ..Maths: rotate_vec, quat_to_rotmat
 using ..Collisions: Body
 using ..AVBDConstraints: BondConstraint, ContactConstraint, compute_constraint!, get_effective_stiffness
 
@@ -80,9 +86,6 @@ function compute_bond_potential(bonds::Vector{BondConstraint})
 
         C_local = @SVector [c_n, c_t1, c_t2]
 
-        # in_tension = c_n > 0
-        # k_mat = in_tension ? (bond.stiffness * (1.0 - bond.damage)) : bond.stiffness
-
         k_eff = get_effective_stiffness(bond)
 
         U += 0.5 * (k_eff[1] * C_local[1]^2 + k_eff[2] * C_local[2]^2 + k_eff[3] * C_local[3]^2)
@@ -138,6 +141,7 @@ function record_viscous_work!(energy_log::EnergyLog, work::Float64)
     end
 end
 
+"""Preview the accounted energy using the current accumulated fracture and viscous work."""
 function preview_accounted_energy(energy_log::EnergyLog, bodies::Vector{Body}, bonds::Vector{BondConstraint}, contacts::Vector{ContactConstraint},
     alpha::Float64, active_body_ids::Vector{Int}, active_bond_ids::Vector{Int})
     T = compute_kinetic(bodies, active_body_ids)
@@ -149,6 +153,7 @@ function preview_accounted_energy(energy_log::EnergyLog, bodies::Vector{Body}, b
     return E_mech + W_frac + W_visc
 end
 
+"""Append one global energy sample using all bodies and bonds."""
 function log_step!(energy_log::EnergyLog, bodies::Vector{Body}, bonds::Vector{BondConstraint}, contacts::Vector{ContactConstraint}, alpha::Float64)
 
     T = compute_kinetic(bodies)
@@ -170,6 +175,7 @@ function log_step!(energy_log::EnergyLog, bodies::Vector{Body}, bonds::Vector{Bo
 
 end
 
+"""Append one energy sample restricted to the currently active bodies and bonds."""
 function log_step!(energy_log::EnergyLog, bodies::Vector{Body}, bonds::Vector{BondConstraint}, contacts::Vector{ContactConstraint},
     alpha::Float64, active_body_ids::Vector{Int}, active_bond_ids::Vector{Int})
 
