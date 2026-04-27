@@ -4,8 +4,16 @@
       "test": "L_bar",
       "mode": "product",
       "vary": {
-        "load_velocity": [0.001, 0.002, 0.005],
-        "dt_physics": [0.00025, 0.000125, 0.0000625]
+        "load_velocity": [
+          0.001,
+          0.002,
+          0.005
+        ],
+        "dt_physics": [
+          0.025,
+          0.0125,
+          0.00625
+        ]
       },
       "fixed": {
         "youngs_modulus": 2000000000.0
@@ -15,7 +23,10 @@
       "test": "three_point_bending",
       "mode": "product",
       "vary": {
-        "youngs_modulus": [2000000000.0, 3000000000.0]
+        "youngs_modulus": [
+          2000000000.0,
+          3000000000.0
+        ]
       },
       "fixed": {
         "dt_physics": 0.00015,

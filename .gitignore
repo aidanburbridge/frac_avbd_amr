@@ -1,8 +1,27 @@
+
+## 5. Add/clean your `.gitignore`
+
+Use this:
+
+```gitignore
+# Python
+.venv/
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
-prof.out
-*.prof
-.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+
+# Julia
+.julia/
+*.ji
+
+# Outputs
+output/
+*.vtk
+*.vtu
+*.bin
+
+# OS/editor
 .DS_Store
+.vscode/
+.idea/
