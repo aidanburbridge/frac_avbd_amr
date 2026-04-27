@@ -1,6 +1,8 @@
-output/
-discussion_section_draft.txt
-latex_thesis/
 __pycache__/
-*.py[cod]
-*$py.class
+*.pyc
+*.pyo
+*.pyd
+prof.out
+*.prof
+.ipynb_checkpoints/
+.DS_Store
