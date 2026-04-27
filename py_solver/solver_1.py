@@ -121,8 +121,6 @@ class Solver:
         for con in self.contact_constraints:
             c = con.contact
             print(f"\t Pair ({id(c.bodyA)%1000}, {id(c.bodyB)%1000}) normal: {c.normal.round(3)}")
-        # TODO redundant loops!!
-
         # Initialize once per frame
         for con in self._all_constraints:
             con.initialize()

@@ -8,7 +8,7 @@ from util.vtk_exporter import VTKExporter
 
 FRAME_MAGIC = b"AVB2"
 
-# We need a dummy object to mimic the Body class for the exporter
+# Minimal body adapter for the VTK exporter compatibility path.
 class DummyBody:
     def __init__(self, pos, quat, size, assembly_id, body_id=None):
         self.pos = pos

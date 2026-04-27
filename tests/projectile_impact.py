@@ -44,8 +44,7 @@ INITIAL_PROJECTILE_GAP = 15.0 * MM
 WALL_SUPPORT_EDGE_WIDTH = 75.0 * MM
 WALL_SUPPORT_BACK_DEPTH = 40.0 * MM
 
-# Conservative debugging baseline for fracture onset; increase later once the
-# setup is stable and the contact/fracture response looks reasonable.
+# Conservative baseline for initial fracture-onset calibration.
 IMPACT_VELOCITY = 35.0
 
 # Optional explicit wall-support voxel IDs from util.selection_tool.

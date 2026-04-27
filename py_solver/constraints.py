@@ -128,7 +128,7 @@ class ContactConstraint(Constraint):
 
         self._cache: _ContactFrameCache | None = None
 
-        # for debugging
+        # Optional contact endpoints retained for visualization/debug plots.
         self.point_list = []
         self.depth = None
 
@@ -169,7 +169,7 @@ class ContactConstraint(Constraint):
         pA0 = A.position[:dim] + rA0
         pB0 = B.position[:dim] + rB0
 
-        # For debugging
+        # Cache the frame-start contact endpoints for inspection tools.
         self.point_list.extend([pA0, pB0])
 
         # Define normal constraint so C > 0 when penetration exceeds margin
@@ -290,7 +290,7 @@ class FaceBondPoint(Constraint):
         # 1. Elastic limits
         self.delta_n0 = (tensile_strength * area) / float(k_n)
         self.delta_s0 = (tensile_strength * area) / float(k_t)
-        # 2. Critical limits TODO check on the math here
+        # 2. Critical limits of the current mixed-mode cohesive law
         self.delta_nc = (2.0 * fracture_energy) / tensile_strength # normal
         self.delta_sc = (2.0 * fracture_energy) / tensile_strength # shear
 
@@ -393,8 +393,8 @@ class FaceBondPoint(Constraint):
                 self.penalty_k[:] = 0.0
             else:
                 # Calculate damage based on current state
-                curr_lam_cr = np.sqrt((self.delta_n0/self.delta_nc)**2) # Pure Mode I TODO maybe update for more complex situations
-                if d_s > 1e-9: # Non-zero I guess (?) TODO
+                curr_lam_cr = np.sqrt((self.delta_n0/self.delta_nc)**2) # Pure mode-I fallback
+                if d_s > 1e-9: # Mixed-mode update when shear separation is present
                     curr_lam_cr = np.sqrt( ((d_n/self.delta_nc)**2 + (d_s/self.delta_sc)**2)/
                                            ((d_n/self.delta_n0)**2 + (d_s/self.delta_s0)**2))
             

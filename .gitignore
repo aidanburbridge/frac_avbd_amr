@@ -1,3 +1,6 @@
 output/
 discussion_section_draft.txt
-thesis_zip_edit/
+latex_thesis/
+__pycache__/
+*.py[cod]
+*$py.class

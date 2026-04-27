@@ -118,8 +118,6 @@ class Solver:
         self._build_contact_constraints()
         self._all_constraints = self.persistent_constraints + self.contact_constraints
 
-        # TODO redundant loops!!
-
         # Initialize once per frame
         for con in self._all_constraints:
             con.initialize()

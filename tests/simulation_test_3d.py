@@ -324,11 +324,11 @@ def run_realtime():
     last = time.perf_counter()
     frames = 0
 
-    update_interval = 2 # TODO fix update interval 1 causing a crash!!
+    update_interval = 2  # The interactive viewer is currently unstable at 1.
     iter_count = 0
 
     while window_is_open(plotter):
-        # TODO issue with painting contacts - the contacts flicker every time.
+        # Contact glyph updates may flicker in the interactive viewer.
 
         if not paused["flag"]:
             solver.step()

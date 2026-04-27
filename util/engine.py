@@ -117,7 +117,7 @@ def run_headless(
     # Validate solver capability
     if not hasattr(solver, "write_frame"):
         print("Warning: Solver does not support 'write_frame'. No data will be saved.")
-        # Create a dummy function to prevent crash
+        # Provide a no-op writer so the headless loop can still execute.
         solver.write_frame = lambda x: None
 
     if hasattr(solver, "write_bond_metadata"):

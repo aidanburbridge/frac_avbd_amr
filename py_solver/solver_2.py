@@ -132,16 +132,12 @@ class Solver:
             y = b.position.copy()
             y[:3] += b.velocity[:3] * dt        # Update translation position
             y[3:] = b.integrate_rotation(dt)    # Update rotational position
-            b.position = y.copy()               # TODO copy y to keep simple for now
+            b.position = y.copy()
 
             y[1] += self.gravity * dt *dt       # Update due to gravity position
             b.inertial_pos = y.copy()
             # b.position = b.position + b.velocity * dt # + warm start acceleration stuff
             
-            # TODO Add in acceleration warm start stuff
-            # accel = (b.velocity - b.prev_vel) /dt
-            # accelExt = accel[1]
-
         # Broad and narrow phase collision detection + warm starting
         with self.prof.phase("build cont. const."):
             self._build_contact_constraints()
@@ -203,7 +199,7 @@ class Solver:
 
             with self.prof.phase("compute constraints"):
                 for c in self._all_constraints:
-                    c.compute_constraint(current_alpha)               #TODO replace this constraint computation somehow with cache?
+                    c.compute_constraint(current_alpha)
 
             with self.prof.phase("main solve"):
                 for b in self.bodies:
@@ -225,7 +221,6 @@ class Solver:
                         """
                         cons_for_body = self.incidence_map.get(int(b.body_id), [])
                         for con in cons_for_body:                       # iterate only constraints involving this body
-                            # con.compute_constraint(current_alpha)               #TODO replace this constraint computation somehow with cache?
                             #print("Recomputed constraint: ", con.C)
                             loop_amt += 1
                             # Only apply this constraint to its participating bodies
@@ -289,7 +284,7 @@ class Solver:
                         # con.compute_constraint(current_alpha)
                         # print("Change: ", old_vals - con.C[:])
                         with self.prof.phase("dual up. comp."):
-                            con.compute_constraint(current_alpha)           # refresh C at new positions - TODO the constraint is NOT recomputed, it says the same thing as before...
+                            con.compute_constraint(current_alpha)           # Refresh C at the updated positions.
                         for r in range(con.rows()):                     # Hard constraints update λ via clamped force; soft rows keep λ=0
 
                             # 1) Update lambda for hard rows

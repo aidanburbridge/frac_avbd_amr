@@ -61,22 +61,6 @@ boxB = box_3D((0.8, 1., 1.2), (0.0, 0.0, 0.0, 0.0), (0,0,0), (0,0,0), 1000, 10, 
 #Reference normal sign:  1.0
 # No flip
 
-# wrong way
-# boxA = box_3D((0.1, 0.5, 1), (0.12, 0.4, 0.7, 0.7), (0,0,0), (0,0,0), 1000, 10, (2,1,2), static=False)
-# boxB = box_3D((0.2, 2, 2), (0.06, 0.04, 0.30, 0.5), (0,0,0), (0,0,0), 1000, 10, (1,2,1), static=False)
-#Best axis:  [0.22016222 0.85515643 0.46929316] ('FA', 2)
-#Contact normal:  [-0.22016222 -0.85515643 -0.46929316]
-#Reference normal sign:  -1.0
-# No flip
-#Ref and contact dot prod:  1.0
- 
-# IDK wtf is going on here?? - could be correct??
-# boxA = box_3D((0.1, 0.0, 0), (0.5, 0., 0., 0.7), (0,0,0), (0,0,0), 1000, 10, (1,1,2), static=False)
-# boxB = box_3D((0.5, 1, 1), (0.6, 0.4, 0.8, 0.5), (0,0,0), (0,0,0), 1000, 10, (1,2,1), static=False)
-# Reference normal sign:  -1.0
-# Best axis:  [ 0.94594595  0.32432432 -0.        ] ('FB', 1)
-# Contact normal:  [-0.94594595 -0.32432432  0.        ]
-
 broads = collisions.broad_phase([boxA, boxB],[])
 
 broad1 = broads[0][0]

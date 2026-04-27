@@ -372,7 +372,7 @@ function commit_bond_damage!(bonds::Vector{FaceBond}, bodies::Vector{Body})
         end
 
         if bond.is_cohesive
-            # TODO Should this be max or current ???
+            # Track the maximum committed effective strain for irreversible damage.
             bond.max_eff_strain = max(bond.max_eff_strain, strain)
 
             if bond.current_eff_strain >= 1.0

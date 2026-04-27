@@ -1,4 +1,5 @@
-# COLLISIONS
+"""Collision detection utilities shared by the 2D/3D AVBD prototype path."""
+
 import numpy as np
 from dataclasses import dataclass
 from bodies import Body, CollidableShape, AABB
@@ -87,7 +88,7 @@ def broad_phase(bodies: list[CollidableShape], ignore_ids: set[tuple[int, int]])
 
 ### -------------------------- SAT (2D & 3D) -------------------------- ###
 
-def _sat_and_overlap(A: CollidableShape, B: CollidableShape): # TODO add face bias
+def _sat_and_overlap(A: CollidableShape, B: CollidableShape):
     """
     Performs SAT and returns (normal, overlap) if intersecting, else (None, 0).
         2D: face normals from both
@@ -311,7 +312,6 @@ def get_collisions(bodies: list[Body], ignore_ids: set[tuple[int, int]] | None =
 
 ############################################ ^OLD^ ############################################
 
-# TODO move the geometric helper functions into primatives
 ### -------------------------- Helper Functions -------------------------- ##
 
 def _unit(vector: np.ndarray) -> np.ndarray:
@@ -345,16 +345,17 @@ def _half_extents(body: CollidableShape) -> np.ndarray:
         h.append(float(np.max(np.abs(vals))))
     return np.array(h, dtype=float)
 
-def _other_axes_indices(num_axes: int, idx: int):               # TODO what is this?
+def _other_axes_indices(num_axes: int, idx: int):
+    """Return all axis indices except the reference-face axis."""
     return [j for j in range(num_axes) if j!= idx]
 
 def _face_center(axes: np.ndarray, half_exts: np.ndarray, center: np.ndarray,
                   face_axis_idx: int, face_sign: float) -> np.ndarray:
     return center + (face_sign * axes[face_axis_idx]) * half_exts[face_axis_idx]
 
-def _face_vertices(body: CollidableShape, axis_idx: int, outward_sign: float) -> np.ndarray: #TODO what does outward normal = outwardsign * axes[axis_idx] mean?
+def _face_vertices(body: CollidableShape, axis_idx: int, outward_sign: float) -> np.ndarray:
     """ 
-    Returns the 4 vertices of the face from the body whose outward normal is outward_sign * axes[axis_idx]
+    Return the face vertices whose outward normal is `outward_sign * axes[axis_idx]`.
     """
     axes = body.get_axes()
     h = _half_extents(body)
@@ -393,7 +394,8 @@ def  _clip_poly_to_plane(vertices: np.ndarray, plane_n: np.ndarray, plane_c: flo
     n = plane_n
     c = plane_c
 
-    def inside(p): # TODO - what is this doing? checking to see if p plane p along normal is inside plane c by some tolerance?
+    def inside(p):
+        """Return True when `p` lies on or behind the clipping plane."""
         return (np.dot(n, p) - c) <= _EPS_CLIP
     
     prev = vertices[-1]
@@ -442,7 +444,7 @@ def _remove_duplicates(points: np.ndarray) -> np.ndarray:           # Checks if 
             unique.append(p)
     return np.asarray(unique)
 
-def _feature_id_hash(bodyA: Body, bodyB: Body, ref_idx: int, inc_idx: int, p: np.ndarray) -> int: # TODO wtf is going on here?
-    # Quantize point for ID stability (helps warm-starting)
+def _feature_id_hash(bodyA: Body, bodyB: Body, ref_idx: int, inc_idx: int, p: np.ndarray) -> int:
+    # Quantize the contact point so the ID is stable across nearby frames.
     q = np.round(p * 1e4).astype(int)
     return (hash((id(bodyA) >> 4, id(bodyB) >> 4, ref_idx, inc_idx, int(q.sum()))) & 0x7fffffff)

@@ -91,7 +91,7 @@ def build_setup() -> SimulationSetup:
         damping_val=visco_val,
     )
 
-    print(f"DEBUG: Instantiated {len(boxes)} bodies")
+    print(f"Instantiated {len(boxes)} bodies")
     print(f"Number of beam bonds: {len(beam_bonds)}")
     print(f"The damping value used for this sim: {visco_val}")
 
@@ -113,7 +113,6 @@ def build_setup() -> SimulationSetup:
     dog_bone.set_boundary_fixed(
         faces=["bottom"],
         distance=GRIP_DISTANCE,
-        debug=True,
     )
 
     dog_bone.set_boundary_velocity(
@@ -121,7 +120,6 @@ def build_setup() -> SimulationSetup:
         velocity=[0.0, 0.0, PULL_RATE],
         # velocity = [0.0, PULL_RATE, 0.0],
         distance=GRIP_DISTANCE,
-        debug=True,
     )
 
     return SimulationSetup(

@@ -186,16 +186,12 @@ class Solver:
             y = b.position.copy()
             y[:3] += b.velocity[:3] * dt        # Update translation position
             y[3:] = b.integrate_rotation(dt)    # Update rotational position
-            b.position = y.copy()               # TODO copy y to keep simple for now
+            b.position = y.copy()
 
             y[1] += self.gravity * dt *dt       # Update due to gravity position
             b.inertial_pos = y.copy()
             # b.position = b.position + b.velocity * dt # + warm start acceleration stuff
             
-            # TODO Add in acceleration warm start stuff
-            # accel = (b.velocity - b.prev_vel) /dt
-            # accelExt = accel[1]
-
         # Broad and narrow phase collision detection + warm starting
         with self.prof.phase("build cont. const."):
             self._build_contact_constraints()

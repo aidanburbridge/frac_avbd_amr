@@ -51,8 +51,8 @@ NU = 0.30
 GC_TARGET = 2.7e3
 TENSILE_STRENGTH = 3.0e8
 FRACTURE_TOUGHNESS = np.sqrt(E_MODULUS * GC_TARGET / (1.0 - NU ** 2))
-# TODO: Calibrate TENSILE_STRENGTH and FRACTURE_TOUGHNESS against crack onset
-# and force-displacement response for the final benchmark target.
+# Calibration note: tune TENSILE_STRENGTH and FRACTURE_TOUGHNESS against
+# crack onset and force-displacement response for the final benchmark target.
 REFINE_STRESS_THRESHOLD = 0.05 * TENSILE_STRENGTH
 
 
